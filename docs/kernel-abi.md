@@ -1,4 +1,4 @@
-# Kronos kernel ABI 3 and byte embedding
+# Kosmos kernel ABI 3 and byte embedding
 
 `src/kernel/main.zig` compiles one import-free wasm32 module from the stable
 evaluator. It defines unshared memory with a declared maximum (256 MiB by default)

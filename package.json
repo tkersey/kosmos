@@ -1,5 +1,5 @@
 {
-  "name": "@tkersey/kronos",
+  "name": "@tkersey/kosmos",
   "version": "6.0.0",
   "type": "module",
   "private": false,
@@ -8,7 +8,7 @@
     ".": "./src/embedding/index.mjs"
   },
   "bin": {
-    "kronos": "./bin/kronos.mjs"
+    "kosmos": "./bin/kosmos.mjs"
   },
   "engines": {
     "node": ">=26.8.1"
@@ -17,7 +17,7 @@
     "LICENSE",
     "README.md",
     "package.json",
-    "bin/kronos.mjs",
+    "bin/kosmos.mjs",
     "docs/rename.md",
     "docs/kernel-abi.md",
     "docs/runtime-bundles.md",
@@ -36,7 +36,7 @@
     "src/node/runtime-acquire.mjs",
     "src/node/runtime-output.mjs",
     "src/node/runtime-profile.json",
-    "kronos-kernel.wasm"
+    "kosmos-kernel.wasm"
   ],
   "scripts": {
     "check": "zig build check",

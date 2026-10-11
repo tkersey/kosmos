@@ -2,6 +2,6 @@
     .name = .consumer,
     .version = "0.0.0",
     .fingerprint = 0x705b3727bb03dcc2,
-    .dependencies = .{ .kronos = .{ .path = "../kronos" } },
+    .dependencies = .{ .kosmos = .{ .path = "../kosmos" } },
     .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
 }

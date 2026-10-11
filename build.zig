@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     });
-    const public_kronos = b.addModule("kronos", .{
+    const public_kosmos = b.addModule("kosmos", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -85,14 +85,14 @@ pub fn build(b: *std.Build) void {
     const host_mode = std.meta.stringToEnum(std.lang.Optimize, profile.hostMode) orelse @panic("invalid host mode");
     const source_data = if (host_mode == optimize) host_data else b.createModule(.{ .root_source_file = source.path(b, "src/data/root.zig"), .target = b.graph.host, .optimize = host_mode });
     const horos = b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
-    const host_kronos = if (target.query.isNative() and host_mode == optimize) public_kronos else b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    const host_kosmos = if (target.query.isNative() and host_mode == optimize) public_kosmos else b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     const stable_runtime = b.createModule(.{ .root_source_file = b.path("src/interpreter_v2/stable_session.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/stable_source.zig"),
         .target = b.graph.host,
         .optimize = host_mode,
-        .imports = &.{ .{ .name = "kronos", .module = host_kronos }, .{ .name = "stable_runtime", .module = stable_runtime }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
+        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "stable_runtime", .module = stable_runtime }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
     }) });
     const stable_source = b.addRunArtifact(stable_test);
     const native_checks = b.step("check-native", "Check native storage, source semantics, sessions and restore without an interpreter");
@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "runtime", .module = current_runtime }, .{ .name = "horos_data", .module = wasm_data } },
     });
     current_module.addOptions("kernel_options", current_options);
-    const current_kernel = b.addExecutable(.{ .name = "kronos-kernel", .root_module = current_module });
+    const current_kernel = b.addExecutable(.{ .name = "kosmos-kernel", .root_module = current_module });
     current_kernel.entry = .disabled;
     current_kernel.use_llvm = profile.wasmBackend == .llvm;
     current_kernel.use_lld = profile.wasmLinker == .lld;
@@ -161,21 +161,21 @@ pub fn build(b: *std.Build) void {
     }, .{}) catch @panic("out of memory"));
     const installed_profile = b.addInstallFileWithDir(build_profile, .prefix, "kernel-profile.json");
     b.step("build-kernel", "Build the generic ABI 3 kernel")
-        .dependOn(&b.addInstallFileWithDir(current_kernel.getEmittedBin(), .prefix, "kronos-kernel.wasm").step);
+        .dependOn(&b.addInstallFileWithDir(current_kernel.getEmittedBin(), .prefix, "kosmos-kernel.wasm").step);
     const runtime_package = b.step("build-runtime", "Build the standalone current JavaScript/kernel package");
     runtime_package.dependOn(&installed_profile.step);
     // One explicit npm file list owns the optional package's shipped surface.
     // Repeated builds may retain old outputs, but those never enter a new package.
     const npm_package = std.json.parseFromSliceLeaky(struct { files: []const []const u8 }, b.allocator, @embedFile("package.json"), .{ .ignore_unknown_fields = true }) catch @panic("invalid package file list");
     for (npm_package.files) |path| {
-        const file = if (std.mem.eql(u8, path, "kronos-kernel.wasm")) current_kernel.getEmittedBin() else b.path(path);
+        const file = if (std.mem.eql(u8, path, "kosmos-kernel.wasm")) current_kernel.getEmittedBin() else b.path(path);
         runtime_package.dependOn(&b.addInstallFileWithDir(file, .prefix, b.fmt("runtime/{s}", .{path})).step);
     }
     const fixture = b.addExecutable(.{ .name = "current-fixtures", .root_module = b.createModule(.{
         .root_source_file = b.path("test/current/fixtures.zig"),
         .target = b.graph.host,
         .optimize = host_mode,
-        .imports = &.{ .{ .name = "kronos", .module = host_kronos }, .{ .name = "horos", .module = horos } },
+        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
     }) });
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{ .override = .{ .custom = "current/bin" } } });
     const native_input = b.addRunArtifact(fixture);
@@ -265,7 +265,7 @@ pub fn build(b: *std.Build) void {
     const check = b.step("check", "Check current native, host, portable and package contracts");
     const zig17 = b.step("check-zig17", "Check pointer-borrow diagnostics and qualified storage ownership");
     const borrow_probe = b.addExecutable(.{
-        .name = "kronos-borrow-diagnostics",
+        .name = "kosmos-borrow-diagnostics",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/interpreter_v2/borrow_diagnostics.zig"),
             .target = b.graph.host,

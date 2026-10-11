@@ -30,9 +30,9 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kronos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            kronos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
       - name: Select working cache
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -46,11 +46,11 @@ jobs:
         run: |
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/source" "$scratch/kronos" "$scratch/consumer"
+          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
           git --no-replace-objects archive --format=tar HEAD > "$scratch/source.tar"
           tar -xf "$scratch/source.tar" -C "$scratch/source"
           package_hash=$(ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig fetch "$scratch/source")
-          tar -xzf "$scratch/cache/p/$package_hash.tar.gz" --strip-components=1 -C "$scratch/kronos"
+          tar -xzf "$scratch/cache/p/$package_hash.tar.gz" --strip-components=1 -C "$scratch/kosmos"
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
           zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -66,12 +66,12 @@ jobs:
         working-directory: zig-out/runtime
         run: |
           archive=$(npm pack --offline --ignore-scripts --silent --pack-destination "$RUNNER_TEMP")
-          mv "$RUNNER_TEMP/$archive" "$RUNNER_TEMP/kronos-runtime-package.tar.gz"
+          mv "$RUNNER_TEMP/$archive" "$RUNNER_TEMP/kosmos-runtime-package.tar.gz"
       - name: Retain the tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: kronos-runtime-package-${{ github.sha }}
-          path: ${{ runner.temp }}/kronos-runtime-package.tar.gz
+          name: kosmos-runtime-package-${{ github.sha }}
+          path: ${{ runner.temp }}/kosmos-runtime-package.tar.gz
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -96,4 +96,4 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kronos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}

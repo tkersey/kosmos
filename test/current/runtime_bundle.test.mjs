@@ -8,14 +8,14 @@ import { inventory, sha256, verifyInventory, readVerifiedFile,
 import runtimeProfile from "../../src/node/runtime-profile.json" with { type: "json" };
 
 import { reserveOutput } from "../../src/node/runtime-output.mjs";
-async function area(t) { const root=await mkdtemp(join(tmpdir(), "kronos output ")); t.after(()=>rm(root,{recursive:true,force:true})); return root; }
+async function area(t) { const root=await mkdtemp(join(tmpdir(), "kosmos output ")); t.after(()=>rm(root,{recursive:true,force:true})); return root; }
 
 const required = ["runtime/world-kernel.wasm", "runtime/package.json", "runtime/bin/world.mjs",
   "runtime/src/node/runtime-bundle.mjs", "runtime/src/node/runtime-profile.json",
   "runtime/src/embedding/index.mjs", "qualification.json",
   "runtime/LICENSE", "smoke/pure.bpi3", "smoke/effect.bpi3"];
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "kronos bundle "));
+  const root = await mkdtemp(join(tmpdir(), "kosmos bundle "));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const file of required) {
     await mkdir(join(root, file, ".."), { recursive: true });
@@ -112,7 +112,7 @@ test("safe acquisition binds archive before extraction and refuses destination c
   const { readFile } = await import("node:fs/promises");
   const { acquireBundle, unpackArchive } = await import("../../src/node/runtime-acquire.mjs");
   const f = await fixture(t);
-  const scratch = await mkdtemp(join(tmpdir(), "kronos acquisition "));
+  const scratch = await mkdtemp(join(tmpdir(), "kosmos acquisition "));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const archive = join(scratch, "bundle.tar.gz"), output = join(scratch, "relocated bundle");
   const {chmod,stat} = await import("node:fs/promises");
@@ -142,7 +142,7 @@ test("bundle mode normalization preserves executable intent and safe archive rou
   const { readFile } = await import("node:fs/promises");
   const { acquireBundle, unpackArchive } = await import("../../src/node/runtime-acquire.mjs");
   const f = await fixture(t), file = "runtime/bin/world.mjs";
-  const scratch = await mkdtemp(join(tmpdir(), "kronos archive modes "));
+  const scratch = await mkdtemp(join(tmpdir(), "kosmos archive modes "));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   for (const [mode, delivered] of [[0o600, 0o644], [0o640, 0o644], [0o664, 0o644],
     [0o601, 0o755], [0o610, 0o755], [0o700, 0o755], [0o750, 0o755],
@@ -175,7 +175,7 @@ test("archive acquisition survives restrictive and shared-group producer umasks"
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   for (const mask of ["002", "027", "077"]) {
-    const run = spawnSync("/bin/sh", ["-c", 'umask "$1"; shift; exec "$@"', "kronos-umask-test", mask,
+    const run = spawnSync("/bin/sh", ["-c", 'umask "$1"; shift; exec "$@"', "kosmos-umask-test", mask,
       process.execPath, "--test", "--test-reporter=tap",
       "--test-name-pattern=^safe acquisition binds archive before extraction and refuses destination collision$",
       import.meta.filename], { env, encoding: "utf8", timeout: 20_000 });
@@ -229,7 +229,7 @@ test("worker entry detection survives ancestor aliases and importing stays inert
   const { spawnSync } = await import("node:child_process");
   const { resolve } = await import("node:path");
   const { pathToFileURL } = await import("node:url");
-  const root = await mkdtemp(join(tmpdir(), "kronos worker alias "));
+  const root = await mkdtemp(join(tmpdir(), "kosmos worker alias "));
   t.after(() => rm(root, {recursive:true,force:true}));
   const repo = resolve(import.meta.dirname,"../..");
   await symlink(repo,join(root,"source alias"),"dir");

@@ -1,8 +1,9 @@
-# World → Kronos
+# World → Kronos → Kosmos
 
-Use the `kronos` Zig module, `-Dhoros-source`, `@tkersey/kronos`,
-`bin/kronos.mjs` and newly built `kronos-kernel.wasm`. The JavaScript error
-class is `KronosHostError`. Boundary and Agent are now Horos and Protean.
+Use the `kosmos` Zig module, `-Dhoros-source`, `@tkersey/kosmos`,
+`bin/kosmos.mjs` and newly built `kosmos-kernel.wasm`. The JavaScript error
+class is `KosmosHostError`. Boundary and Agent are now Horos and Protean.
+Kronos was an intermediate product name; Kosmos is the current name.
 No legacy source aliases or duplicate executables are installed.
 
 ABI 3 export strings `world_*`, `WORLD_*` error codes, the
@@ -18,8 +19,8 @@ exercise that historical contract. Published assets and tags are untouched;
 this does not certify renamed source as an old release. The current optional
 JS package is built and checked with its matching new kernel.
 
-Zig's name-derived fingerprint checksum is now `5a86bb04`; the lineage ID
+Zig 0.17.0 derives the Kosmos name checksum `da7fbe49`; the lineage ID
 `074dc2bd` and version 6.0.0 are unchanged. Package hashes are computed by Zig.
-New scratch and output locations use Kronos names. No old user state is discovered,
+New scratch and output locations use Kosmos names. No old user state is discovered,
 moved or deleted. Existing saved tasks retain their original build bindings;
 use the original pinned build where restoration is incompatible.
