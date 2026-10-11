@@ -1,5 +1,5 @@
 {
-  "name": "kronos-browser-conformance",
+  "name": "kosmos-browser-conformance",
   "private": true,
   "type": "module",
   "devDependencies": {

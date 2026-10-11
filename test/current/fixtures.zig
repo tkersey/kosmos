@@ -1,7 +1,7 @@
 //! Explicit compiler-dependent fixture builder and independent native byte peer.
 const std = @import("std");
 const horos = @import("horos");
-const runtime = @import("kronos");
+const runtime = @import("kosmos");
 
 pub fn main(init: std.process.Init) !void {
     var arguments = std.process.Args.Iterator.init(init.minimal.args);

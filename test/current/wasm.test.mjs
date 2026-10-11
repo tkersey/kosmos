@@ -52,7 +52,7 @@ test('static ABI admission accepts the exact interface and rejects altered types
     {rename:(name)=>name==='memory'?'\uFEFFmemory':name},
     {rename:(name)=>name==='world_invoke'?'\uFEFFworld_invoke':name}]) {
     const bytes=kernel(change);assert.ok(WebAssembly.validate(bytes),'negative fixture must be structurally valid WASM');
-    assert.throws(()=>inspectKernelWasm(bytes),{name:'KronosHostError'});
+    assert.throws(()=>inspectKernelWasm(bytes),{name:'KosmosHostError'});
   }
 });
 
@@ -61,7 +61,7 @@ test('guest ranges require exact unsigned offsets and complete memory containmen
   assert.equal(wasmRange(memory,65535,1n,'value').length,1);
   assert.equal(wasmOffset(-1,'pointer'),0xffffffff);
   for(const [pointer,length] of [[65535,2n],[-1,1n],[0,-1n],[0,1n<<64n],[1.5,1n]]) {
-    assert.throws(()=>wasmRange(memory,pointer,length,'value'),{name:'KronosHostError'});
+    assert.throws(()=>wasmRange(memory,pointer,length,'value'),{name:'KosmosHostError'});
   }
 });
 
@@ -73,7 +73,7 @@ test('kernel factory checks identity before compilation and ABI before instantia
   t.mock.method(WebAssembly, 'instantiate', () => assert.fail('rejected kernel must not instantiate'));
   for (const change of [{wrongType:true},{extraExport:true},{missingExport:true},{imports:true},{start:true},{shared:true}]) {
     const input = kernel(change);
-    await assert.rejects(admit(input, { expectedSha256: crypto.createHash('sha256').update(input).digest('hex') }), { name: 'KronosHostError' });
+    await assert.rejects(admit(input, { expectedSha256: crypto.createHash('sha256').update(input).digest('hex') }), { name: 'KosmosHostError' });
   }
 });
 

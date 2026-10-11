@@ -99,7 +99,7 @@ export async function readVerifiedFile(root, manifest, path, limit = 64 << 20) {
 }
 
 async function useInventoryCopy(root, manifest, expected, use) {
-  const copy = await mkdtemp(join(tmpdir(), "kronos verified bundle "));
+  const copy = await mkdtemp(join(tmpdir(), "kosmos verified bundle "));
   try {
     const manifestBytes = await readBounded(join(root, "manifest.json"), 1 << 20);
     if (sha256(manifestBytes) !== expected)

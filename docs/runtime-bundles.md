@@ -1,6 +1,6 @@
 # Source packages and historical runtime bundles
 
-Kronos has one Zig evaluator. Its current native import/build path uses the
+Kosmos has one Zig evaluator. Its current native import/build path uses the
 Horos package selected by `build.zig.zon`; it does not acquire a JS/WASM
 runtime bundle or run a foreign-language preparatory command.
 
@@ -8,7 +8,7 @@ runtime bundle or run a foreign-language preparatory command.
 
 ```sh
 zig build build-runtime -Doptimize=safe
-node zig-out/runtime/bin/kronos.mjs --help
+node zig-out/runtime/bin/kosmos.mjs --help
 ```
 
 The Zig build owns kernel construction, resolved build metadata and package
@@ -31,10 +31,10 @@ collectors remain in Git history rather than a dormant producer stack.
 The acquisition and verification interfaces for published v1 bundles remain:
 
 ```sh
-node bin/kronos.mjs runtime acquire --archive bundle.tar.gz \
+node bin/kosmos.mjs runtime acquire --archive bundle.tar.gz \
   --archive-sha256 APPROVED_ARCHIVE_SHA256 \
   --manifest-sha256 APPROVED_MANIFEST_SHA256 --output NEW_DIRECTORY
-node bin/kronos.mjs runtime verify --root NEW_DIRECTORY \
+node bin/kosmos.mjs runtime verify --root NEW_DIRECTORY \
   --manifest-sha256 APPROVED_MANIFEST_SHA256 --smoke
 ```
 

@@ -236,7 +236,7 @@ test "stable slots preserve an actual outer mutable cell across retained views" 
     try testing.expectEqual(1, store.statistics.value_copies);
 }
 
-test "existing Kronos value operations read stable slots without full-frame materialization" {
+test "existing Kosmos value operations read stable slots without full-frame materialization" {
     const data = @import("horos_data");
     const Values = @import("values.zig").Values;
     const schemas = [_]data.program.Schema{

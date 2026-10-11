@@ -14,7 +14,7 @@ import { frame } from '../../src/embedding/wire.mjs';
 import { kernel } from './wasm_fixture.mjs';
 
 test("oversized sparse kernels reject before allocating or reading their contents", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "kronos-v2-kernel-size-"));
+  const root = await mkdtemp(join(tmpdir(), "kosmos-v2-kernel-size-"));
   const path = join(root, "oversized.wasm");
   const originalOpen = fs.open;
   let closes = 0;
@@ -72,7 +72,7 @@ test("kernel reads stay bounded when an opened file grows or shrinks", async (t)
 });
 
 test("kernel loading rejects directories and FIFOs without blocking", { skip: process.platform === "win32" }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "kronos-v2-kernel-kind-"));
+  const root = await mkdtemp(join(tmpdir(), "kosmos-v2-kernel-kind-"));
   try {
     const fifo = join(root, "kernel.fifo");
     const alias = join(root, "kernel-link.fifo");
@@ -96,7 +96,7 @@ test("kernel loading rejects directories and FIFOs without blocking", { skip: pr
 
 
 test('current kernel loading accepts regular paths, file URLs and symlinks', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'kronos-current-files-'));
+  const root = await mkdtemp(join(tmpdir(), 'kosmos-current-files-'));
   try {
     const bytes = kernel(), file = join(root, 'kernel.wasm'), alias = join(root, 'alias.wasm');
     await writeFile(file, bytes); await symlink(file, alias);
@@ -110,9 +110,9 @@ test('current kernel loading accepts regular paths, file URLs and symlinks', asy
 });
 
 test('current CLI rejects ambiguous options and cannot overwrite input files', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'kronos-current-cli-'));
+  const root = await mkdtemp(join(tmpdir(), 'kosmos-current-cli-'));
   try {
-    const cli = fileURLToPath(new URL('../../bin/kronos.mjs', import.meta.url));
+    const cli = fileURLToPath(new URL('../../bin/kosmos.mjs', import.meta.url));
     const bytes = kernel({ outcome: frame('ABL_PKO3', Uint8Array.of(3,0)) });
     const path = join(root, 'kernel.wasm'), input = join(root, 'input.pki3');
     const digest = createHash('sha256').update(bytes).digest('hex');
@@ -140,7 +140,7 @@ test('current CLI rejects ambiguous options and cannot overwrite input files', a
 });
 
 test('current CLI enforces the kernel extent limit before allocating its contents', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'kronos-current-cli-limit-'));
+  const root = await mkdtemp(join(tmpdir(), 'kosmos-current-cli-limit-'));
   try {
     const path = join(root, 'huge.wasm'), hook = join(root, 'allocation-guard.mjs');
     await writeFile(path, ''); await truncate(path, MAXIMUM_KERNEL_BYTES + 1);
@@ -149,7 +149,7 @@ test('current CLI enforces the kernel extent limit before allocating its content
         if (size > ${MAXIMUM_KERNEL_BYTES}) throw new Error('oversized contents were allocated');
         return allocate.call(this, size, ...args);
       };`);
-    const cli = fileURLToPath(new URL('../../bin/kronos.mjs', import.meta.url));
+    const cli = fileURLToPath(new URL('../../bin/kosmos.mjs', import.meta.url));
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(hook).href,
       cli, 'invoke', '--kernel', path, '--sha256', '0'.repeat(64), '--input', path], { timeout: 2000 });
     assert.equal(result.error, undefined); assert.equal(result.status, 1);

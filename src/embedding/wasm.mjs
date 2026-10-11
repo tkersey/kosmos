@@ -1,5 +1,5 @@
 // Adapted from World 4.1.2 static WASM admission; MIT license.
-import { isUint8Array, kronosError } from "./errors.mjs";
+import { isUint8Array, kosmosError } from "./errors.mjs";
 import { copyBytes, digest, hex } from "./wire.mjs";
 
 export const MAXIMUM_KERNEL_BYTES = 64 * 1024 * 1024;
@@ -53,7 +53,7 @@ export const KERNEL_EXPORT_NAMES = Object.freeze([
  */
 export function inspectKernelWasm(bytes) {
   if (!isUint8Array(bytes)) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_INPUT_INVALID",
       "Kernel bytes must be a Uint8Array",
     );
@@ -65,7 +65,7 @@ export function inspectKernelWasm(bytes) {
       bytes[4] !== 0x01 || bytes[5] !== 0x00 ||
       bytes[6] !== 0x00 || bytes[7] !== 0x00 ||
       !WebAssembly.validate(bytes)) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_WASM_INVALID",
       "Kernel is not a valid WebAssembly 1 binary",
     );
@@ -74,8 +74,8 @@ export function inspectKernelWasm(bytes) {
   try {
     return inspectValidated(bytes);
   } catch (error) {
-    if (error?.name === "KronosHostError") throw error;
-    throw kronosError(
+    if (error?.name === "KosmosHostError") throw error;
+    throw kosmosError(
       "WORLD_KERNEL_WASM_INVALID",
       "Kernel WebAssembly structure is malformed",
     );
@@ -92,19 +92,19 @@ export async function compileKernelWasm(bytes, expectedSha256) {
   if (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/.test(expectedSha256))
     throw new TypeError("expected kernel SHA-256 is required");
   if (hex(await digest(owned)) !== expectedSha256)
-    throw kronosError("WORLD_KERNEL_IDENTITY_INVALID", "Kernel identity does not match the expected artifact");
+    throw kosmosError("WORLD_KERNEL_IDENTITY_INVALID", "Kernel identity does not match the expected artifact");
   const retained = lastCompiledKernel?.sha256 === expectedSha256 ? lastCompiledKernel.module.deref() : null;
   if (retained) return retained;
   let module;
   try { module = await WebAssembly.compile(owned); }
   catch (error) {
     if (!(error instanceof WebAssembly.CompileError)) throw error;
-    throw kronosError("WORLD_KERNEL_WASM_INVALID", "Kernel is not a valid WebAssembly 1 binary");
+    throw kosmosError("WORLD_KERNEL_WASM_INVALID", "Kernel is not a valid WebAssembly 1 binary");
   }
   try { inspectValidated(owned); }
   catch (error) {
-    if (error?.name === "KronosHostError") throw error;
-    throw kronosError("WORLD_KERNEL_WASM_INVALID", "Kernel WebAssembly structure is malformed");
+    if (error?.name === "KosmosHostError") throw error;
+    throw kosmosError("WORLD_KERNEL_WASM_INVALID", "Kernel WebAssembly structure is malformed");
   }
   lastCompiledKernel = typeof WeakRef === "function"
     ? { sha256: expectedSha256, module: new WeakRef(module) } : null;
@@ -113,7 +113,7 @@ export async function compileKernelWasm(bytes, expectedSha256) {
 
 export function assertKernelByteLength(byteLength) {
   if (byteLength > MAXIMUM_KERNEL_BYTES) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_TOO_LARGE",
       "Kernel exceeds the admission byte limit",
       { byteLength, maximumByteLength: MAXIMUM_KERNEL_BYTES },
@@ -123,14 +123,14 @@ export function assertKernelByteLength(byteLength) {
 
 export function wasmOffset(value, label) {
   if (!Number.isInteger(value)) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_RANGE_INVALID",
       `${label} is not a wasm32 offset`,
     );
   }
   const unsigned = value >>> 0;
   if (value !== unsigned && value !== (unsigned | 0)) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_RANGE_INVALID",
       `${label} is not a wasm32 offset`,
     );
@@ -141,7 +141,7 @@ export function wasmOffset(value, label) {
 export function wasmLength(value, label) {
   if (typeof value === "bigint") {
     if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw kronosError(
+      throw kosmosError(
         "WORLD_LENGTH_UNSAFE",
         `${label} cannot be represented exactly by this JavaScript host`,
       );
@@ -153,7 +153,7 @@ export function wasmLength(value, label) {
 
 export function wasmRange(memory, pointerValue, lengthValue, label) {
   if (!(memory instanceof WebAssembly.Memory)) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_PROFILE_INVALID",
       "Kernel did not export its linear memory",
     );
@@ -162,7 +162,7 @@ export function wasmRange(memory, pointerValue, lengthValue, label) {
   const length = wasmLength(lengthValue, `${label} length`);
   const view = new Uint8Array(memory.buffer);
   if (start > view.byteLength || length > view.byteLength - start) {
-    throw kronosError(
+    throw kosmosError(
       "WORLD_KERNEL_RANGE_INVALID",
       `${label} range is outside exported memory`,
       { pointer: start, length, memoryByteLength: view.byteLength },
@@ -398,7 +398,7 @@ function boundedCount(count, reader, label) {
 }
 
 function profileError(message, details = undefined) {
-  return kronosError("WORLD_KERNEL_PROFILE_INVALID", message, details);
+  return kosmosError("WORLD_KERNEL_PROFILE_INVALID", message, details);
 }
 
 function deepFreeze(value) {

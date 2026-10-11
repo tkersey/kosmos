@@ -2,7 +2,7 @@
 import { compileKernelWasm, wasmRange } from "./wasm.mjs";
 import { copyBytes, u64, UTF8 } from "./wire.mjs";
 import { decodeOutcome } from "./codec.mjs";
-import { kronosError } from "./errors.mjs";
+import { kosmosError } from "./errors.mjs";
 const authority = Symbol("admitted kernel");
 const empty = new Uint8Array();
 
@@ -22,7 +22,7 @@ export class Kernel {
     if (token !== authority) throw new TypeError("use Kernel.create");
     this.#module = module; // Keep the admitted code alive only with its Kernel.
     this.#guest = guest; this.#identity = identity;
-    if (guest.world_abi_version() !== 3) throw kronosError("WORLD_KERNEL_ABI_INVALID", "Kernel ABI is not version 3");
+    if (guest.world_abi_version() !== 3) throw kosmosError("WORLD_KERNEL_ABI_INVALID", "Kernel ABI is not version 3");
     this.#status(guest.world_initialize(identity));
   }
   #bytes() { return new Uint8Array(wasmRange(this.#guest.memory, this.#guest.world_output_ptr(), this.#guest.world_output_len(), "output")); }
@@ -30,12 +30,12 @@ export class Kernel {
     if (status === 0) return;
     if (status === 1) {
       const capacity = decodeOutcome(this.#bytes());
-      if (capacity.kind !== "needs_capacity") throw kronosError("WORLD_KERNEL_PROTOCOL_INVALID", "Capacity status lacks a capacity outcome");
+      if (capacity.kind !== "needs_capacity") throw kosmosError("WORLD_KERNEL_PROTOCOL_INVALID", "Capacity status lacks a capacity outcome");
       const bound = capacity[capacity.arena === "memory" ? "memoryPages" : capacity.arena];
-      throw kronosError("WORLD_CAPACITY", "Kernel requires more physical capacity", { arena: capacity.arena, amount: bound.bytes, provenance: bound.provenance });
+      throw kosmosError("WORLD_CAPACITY", "Kernel requires more physical capacity", { arena: capacity.arena, amount: bound.bytes, provenance: bound.provenance });
     }
     const diagnostic = UTF8.decode(wasmRange(this.#guest.memory, this.#guest.world_error_ptr(), this.#guest.world_error_len(), "diagnostic"));
-    throw kronosError("WORLD_KERNEL_REJECTED", "Kernel rejected the operation", {
+    throw kosmosError("WORLD_KERNEL_REJECTED", "Kernel rejected the operation", {
       diagnostic: /^[A-Za-z][A-Za-z0-9]{0,127}$/.test(diagnostic) ? diagnostic : "UnknownKernelError",
     });
   }
@@ -46,14 +46,14 @@ export class Kernel {
     return BigInt(owned.length);
   }
   #token(kind, handle) {
-    if (handle <= 0n) throw kronosError("WORLD_KERNEL_HANDLE_INVALID", "Kernel returned an invalid handle");
+    if (handle <= 0n) throw kosmosError("WORLD_KERNEL_HANDLE_INVALID", "Kernel returned an invalid handle");
     const token = Object.freeze({ kind });
     this.#tokens.set(token, { kind, handle, live: true });
     return token;
   }
   #handle(token, kind) {
     const entry = this.#tokens.get(token);
-    if (!entry || !entry.live || entry.kind !== kind) throw kronosError("WORLD_HANDLE_INVALID", "Handle is released or belongs to another kernel");
+    if (!entry || !entry.live || entry.kind !== kind) throw kosmosError("WORLD_HANDLE_INVALID", "Handle is released or belongs to another kernel");
     return entry;
   }
   setLimits({ input, working, output }) {

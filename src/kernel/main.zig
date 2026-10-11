@@ -30,41 +30,41 @@ var resident_handle: u64 = 0;
 var busy = false;
 extern var __heap_base: u8;
 
-pub fn kronos_abi_version() callconv(.c) u32 {
+pub fn kosmos_abi_version() callconv(.c) u32 {
     return 3;
 }
-pub fn kronos_input_ptr() callconv(.c) u32 {
+pub fn kosmos_input_ptr() callconv(.c) u32 {
     return if (input.len == 0) 0 else @intCast(@intFromPtr(input.ptr));
 }
-pub fn kronos_input_capacity() callconv(.c) u64 {
+pub fn kosmos_input_capacity() callconv(.c) u64 {
     return input.len;
 }
-pub fn kronos_output_ptr() callconv(.c) u32 {
+pub fn kosmos_output_ptr() callconv(.c) u32 {
     return if (output.len == 0) 0 else @intCast(@intFromPtr(output.ptr));
 }
-pub fn kronos_output_len() callconv(.c) u64 {
+pub fn kosmos_output_len() callconv(.c) u64 {
     return output.len;
 }
-pub fn kronos_error_ptr() callconv(.c) u32 {
+pub fn kosmos_error_ptr() callconv(.c) u32 {
     return @intCast(@intFromPtr(&diagnostic));
 }
-pub fn kronos_error_len() callconv(.c) u64 {
+pub fn kosmos_error_len() callconv(.c) u64 {
     return diagnostic_length;
 }
-pub fn kronos_prepared_handle() callconv(.c) u64 {
+pub fn kosmos_prepared_handle() callconv(.c) u64 {
     return prepared_handle;
 }
-pub fn kronos_session_handle() callconv(.c) u64 {
+pub fn kosmos_session_handle() callconv(.c) u64 {
     return resident_handle;
 }
-pub fn kronos_working_live() callconv(.c) u64 {
+pub fn kosmos_working_live() callconv(.c) u64 {
     return if (instance == 0) 0 else working_budget.live;
 }
-pub fn kronos_working_peak() callconv(.c) u64 {
+pub fn kosmos_working_peak() callconv(.c) u64 {
     return if (instance == 0) 0 else working_budget.peak;
 }
 
-pub fn kronos_initialize(identity: u64) callconv(.c) u32 {
+pub fn kosmos_initialize(identity: u64) callconv(.c) u32 {
     if (instance != 0 or identity == 0) return reject("InvalidInstance");
     heap.cursor = @intFromPtr(&__heap_base);
     workspace = Arena.init(&initial_working);
@@ -119,7 +119,7 @@ fn publish(bytes: []u8) u32 {
     return 0;
 }
 
-pub fn kronos_set_limits(identity: u64, input_limit: u64, working_limit: u64, output_limit: u64) callconv(.c) u32 {
+pub fn kosmos_set_limits(identity: u64, input_limit: u64, working_limit: u64, output_limit: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (input_limit > std.math.maxInt(usize) or working_limit > std.math.maxInt(usize) or output_limit > std.math.maxInt(usize) or
@@ -132,7 +132,7 @@ pub fn kronos_set_limits(identity: u64, input_limit: u64, working_limit: u64, ou
     output_budget.limit = @intCast(output_limit);
     return 0;
 }
-pub fn kronos_prepare_input(identity: u64, length: u64) callconv(.c) u32 {
+pub fn kosmos_prepare_input(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     input_ready = null;
@@ -145,13 +145,13 @@ pub fn kronos_prepare_input(identity: u64, length: u64) callconv(.c) u32 {
     input_ready = @intCast(length);
     return 0;
 }
-pub fn kronos_invoke(identity: u64, length: u64) callconv(.c) u32 {
+pub fn kosmos_invoke(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     const bytes = takeInput(length) catch |err| return failed(err);
     return publish(runtime.invocation.invokeBytesWith(working_budget.allocator(), output_budget.allocator(), bytes) catch |err| return failed(err));
 }
-pub fn kronos_prepare(identity: u64, length: u64) callconv(.c) u32 {
+pub fn kosmos_prepare(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (prepared != null) return reject("PreparedAlreadyPresent");
@@ -161,7 +161,7 @@ pub fn kronos_prepare(identity: u64, length: u64) callconv(.c) u32 {
     prepared_handle = handle;
     return 0;
 }
-pub fn kronos_release_prepared(identity: u64, handle: u64) callconv(.c) u32 {
+pub fn kosmos_release_prepared(identity: u64, handle: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (prepared == null or handle == 0 or handle != prepared_handle) return reject("InvalidHandle");
@@ -182,17 +182,17 @@ fn createSession(handle: u64, length: u64, restore: bool) u32 {
     resident_handle = token;
     return 0;
 }
-pub fn kronos_start(identity: u64, handle: u64, length: u64) callconv(.c) u32 {
+pub fn kosmos_start(identity: u64, handle: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     return createSession(handle, length, false);
 }
-pub fn kronos_restore(identity: u64, handle: u64, length: u64) callconv(.c) u32 {
+pub fn kosmos_restore(identity: u64, handle: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     return createSession(handle, length, true);
 }
-pub fn kronos_drive(identity: u64, handle: u64, control: u32, quantum_present: u32, quantum: u64, checkpoint: u32, length: u64) callconv(.c) u32 {
+pub fn kosmos_drive(identity: u64, handle: u64, control: u32, quantum_present: u32, quantum: u64, checkpoint: u32, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
@@ -211,7 +211,7 @@ pub fn kronos_drive(identity: u64, handle: u64, control: u32, quantum_present: u
         .checkpoint = checkpoint == 1,
     }) catch |err| return failed(err));
 }
-pub fn kronos_checkpoint(identity: u64, handle: u64, transfer: u32) callconv(.c) u32 {
+pub fn kosmos_checkpoint(identity: u64, handle: u64, transfer: u32) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
@@ -226,7 +226,7 @@ pub fn kronos_checkpoint(identity: u64, handle: u64, transfer: u32) callconv(.c)
     }
     return publish(bytes);
 }
-pub fn kronos_close(identity: u64, handle: u64) callconv(.c) u32 {
+pub fn kosmos_close(identity: u64, handle: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
@@ -286,26 +286,26 @@ const Pages = struct {
 
 // Export the established ABI strings independently of the local product names.
 comptime {
-    @export(&kronos_abi_version, .{ .name = "world_abi_version" });
-    @export(&kronos_input_ptr, .{ .name = "world_input_ptr" });
-    @export(&kronos_input_capacity, .{ .name = "world_input_capacity" });
-    @export(&kronos_output_ptr, .{ .name = "world_output_ptr" });
-    @export(&kronos_output_len, .{ .name = "world_output_len" });
-    @export(&kronos_error_ptr, .{ .name = "world_error_ptr" });
-    @export(&kronos_error_len, .{ .name = "world_error_len" });
-    @export(&kronos_prepared_handle, .{ .name = "world_prepared_handle" });
-    @export(&kronos_session_handle, .{ .name = "world_session_handle" });
-    @export(&kronos_working_live, .{ .name = "world_working_live" });
-    @export(&kronos_working_peak, .{ .name = "world_working_peak" });
-    @export(&kronos_initialize, .{ .name = "world_initialize" });
-    @export(&kronos_set_limits, .{ .name = "world_set_limits" });
-    @export(&kronos_prepare_input, .{ .name = "world_prepare_input" });
-    @export(&kronos_invoke, .{ .name = "world_invoke" });
-    @export(&kronos_prepare, .{ .name = "world_prepare" });
-    @export(&kronos_release_prepared, .{ .name = "world_release_prepared" });
-    @export(&kronos_start, .{ .name = "world_start" });
-    @export(&kronos_restore, .{ .name = "world_restore" });
-    @export(&kronos_drive, .{ .name = "world_drive" });
-    @export(&kronos_checkpoint, .{ .name = "world_checkpoint" });
-    @export(&kronos_close, .{ .name = "world_close" });
+    @export(&kosmos_abi_version, .{ .name = "world_abi_version" });
+    @export(&kosmos_input_ptr, .{ .name = "world_input_ptr" });
+    @export(&kosmos_input_capacity, .{ .name = "world_input_capacity" });
+    @export(&kosmos_output_ptr, .{ .name = "world_output_ptr" });
+    @export(&kosmos_output_len, .{ .name = "world_output_len" });
+    @export(&kosmos_error_ptr, .{ .name = "world_error_ptr" });
+    @export(&kosmos_error_len, .{ .name = "world_error_len" });
+    @export(&kosmos_prepared_handle, .{ .name = "world_prepared_handle" });
+    @export(&kosmos_session_handle, .{ .name = "world_session_handle" });
+    @export(&kosmos_working_live, .{ .name = "world_working_live" });
+    @export(&kosmos_working_peak, .{ .name = "world_working_peak" });
+    @export(&kosmos_initialize, .{ .name = "world_initialize" });
+    @export(&kosmos_set_limits, .{ .name = "world_set_limits" });
+    @export(&kosmos_prepare_input, .{ .name = "world_prepare_input" });
+    @export(&kosmos_invoke, .{ .name = "world_invoke" });
+    @export(&kosmos_prepare, .{ .name = "world_prepare" });
+    @export(&kosmos_release_prepared, .{ .name = "world_release_prepared" });
+    @export(&kosmos_start, .{ .name = "world_start" });
+    @export(&kosmos_restore, .{ .name = "world_restore" });
+    @export(&kosmos_drive, .{ .name = "world_drive" });
+    @export(&kosmos_checkpoint, .{ .name = "world_checkpoint" });
+    @export(&kosmos_close, .{ .name = "world_close" });
 }

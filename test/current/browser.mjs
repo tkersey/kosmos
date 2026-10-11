@@ -14,7 +14,7 @@ const root = resolve(import.meta.dirname, "../..");
 const server = createServer(async (request, response) => {
   try {
     const path = new URL(request.url, "http://localhost").pathname;
-    if (path === "/") { response.end("<!doctype html><title>Kronos Worker conformance</title>"); return; }
+    if (path === "/") { response.end("<!doctype html><title>Kosmos Worker conformance</title>"); return; }
     if (path === "/kernel.wasm") { response.setHeader("Content-Type", "application/wasm"); response.end(kernel); return; }
     const file = path === "/worker.mjs" ? resolve(import.meta.dirname, "worker.mjs") :
       /^\/src\/embedding\/[a-z-]+\.mjs$/.test(path) ? resolve(root, path.slice(1)) : null;

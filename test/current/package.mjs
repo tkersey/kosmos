@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 const [runtime, fixtures] = process.argv.slice(2).map(value => resolve(value));
-const scratch = await mkdtemp(join(tmpdir(), "kronos-current-package-"));
+const scratch = await mkdtemp(join(tmpdir(), "kosmos-current-package-"));
 try {
   const [packed] = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", scratch], { cwd: runtime, encoding: "utf8" }));
   const declared = JSON.parse(await readFile(join(runtime, "package.json"), "utf8")).files;
@@ -22,15 +22,15 @@ try {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(manifest.version, "6.0.0");
   assert.deepEqual(Object.keys(manifest.exports), ["."]);
-  const kronos = await import(pathToFileURL(join(root, manifest.exports["."])));
-  assert.equal(kronos.packageVersion, manifest.version);
-  const kernelPath = join(root, "kronos-kernel.wasm");
+  const kosmos = await import(pathToFileURL(join(root, manifest.exports["."])));
+  assert.equal(kosmos.packageVersion, manifest.version);
+  const kernelPath = join(root, "kosmos-kernel.wasm");
   const bytes = new Uint8Array(await readFile(kernelPath));
   const expectedSha256 = createHash("sha256").update(bytes).digest("hex");
   const image = new Uint8Array(execFileSync(fixtures, ["image", "install"]));
-  const input = kronos.encodeInput({ image, initialArgs: new Uint8Array() });
+  const input = kosmos.encodeInput({ image, initialArgs: new Uint8Array() });
   const expected = execFileSync(fixtures, ["invoke"], { input });
-  const kernel = await kronos.Kernel.create({ bytes, expectedSha256 });
+  const kernel = await kosmos.Kernel.create({ bytes, expectedSha256 });
   // Test an insufficient budget explicitly; optimization can make this fixture
   // fit the default budget without changing the capacity-failure contract.
   const unchanged = input.slice();
@@ -41,7 +41,7 @@ try {
   assert.deepEqual(Buffer.from(kernel.invoke(input)), expected);
   const inputPath = join(scratch, "input.pki3");
   await writeFile(inputPath, input);
-  const cli = join(root, "bin/kronos.mjs");
+  const cli = join(root, "bin/kosmos.mjs");
   const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(8 << 20), "--input", inputPath];
   assert.deepEqual(execFileSync(process.execPath, args, { cwd: scratch }), expected);
   assert.equal(execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).trim(), manifest.version);
