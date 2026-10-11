@@ -1,4 +1,4 @@
-# Kosmos 6
+# Kosmos 7
 
 Formerly World; see the [rename notes](docs/rename.md).
 
@@ -7,7 +7,7 @@ natively and as an import-free wasm32 kernel. Computations, handlers, policies,
 retained control and cleanup are program data. The environment supplies typed
 external results.
 
-Kosmos `6.0.0` supports only exact Zig `0.17.0` and Horos 3 data.
+Kosmos `7.0.0` requires exact Zig `0.17.0`; source builds use Horos 4.
 It consumes BPI3 programs and PST3 states through ABI 3. See the
 [ABI contract](docs/kernel-abi.md) and [verification boundaries](docs/verification.md).
 Current source/package identities are selected by the consuming lock; published
