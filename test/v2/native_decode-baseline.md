@@ -21,3 +21,9 @@ Both large states passed diagnostic graph decoding with a caller-selected
 and exact completion for every case, while preserving rejection under an
 explicit 64 MiB budget. It regenerates large buffers sequentially and checks
 their frozen predecessor hashes instead of committing giant binary fixtures.
+
+Additional current-source witnesses grow a 34 MiB input to 68 MiB before
+checkpoint publication, and park 65 MiB in a multi-shot continuation before
+transfer. The latter verifies an actual template in PST3, restores it through
+the public Resident API, and checks two branch activations with the exact result.
+These are positive regression coverage, not additional frozen predecessor probes.

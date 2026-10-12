@@ -165,3 +165,112 @@ test "public Prepared and ERS3 reply admission accept large native bytes" {
     try std.testing.expectEqualSlices(u8, value, result.record.completed);
     try resident.close();
 }
+
+test "native execution can grow beyond the old decoder allowance before checkpoint transfer" {
+    const data = horos.data;
+    var b = horos.source.Builder.init(a);
+    defer b.deinit();
+    const bytes = try b.schema(.bytes);
+    const unit = try b.scalar(void);
+    const entry = try b.declare(&.{bytes}, bytes, &.{}, &.{});
+    const input = try b.reference(b.parameter(entry, 0));
+    const grown = try b.variable(bytes);
+    const concatenated = try b.value(.{ .schema = bytes, .expression = .{ .primitive = .{
+        .opcode = .blob_concat,
+        .operands = &.{ input, input },
+        .failures = &.{.{ .kind = .capacity_exceeded, .value = try b.failureLiteral(try b.constant(void, {})) }},
+    } } });
+    try b.define(entry, try b.bind(grown, try b.pure(concatenated), try b.term(.{ .yield_then = try b.pure(try b.reference(grown)) })));
+    var compiled = try horos.program.compile(a, b.module(entry, unit));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    var prepared = try kosmos.Prepared.init(a, image);
+    defer prepared.deinit();
+    const size = 34 << 20;
+    var measure: data.wire.Writer = .{};
+    try measure.natural(size);
+    const argument = try a.alloc(u8, measure.position + size);
+    defer a.free(argument);
+    var writer: data.wire.Writer = .{ .output = argument };
+    try writer.natural(size);
+    @memset(argument[writer.position..], 0x39);
+    var resident = try kosmos.Resident.start(a, &prepared, argument);
+    var published = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
+    defer published.deinit();
+    try std.testing.expect(published.outcome.record.record == .yielded);
+    const receipt = published.checkpoint.?;
+    try std.testing.expect(receipt.bytes().len > 64 << 20);
+    try resident.transferCheckpoint(receipt);
+    var restored = try kosmos.Resident.restore(a, &prepared, receipt.bytes());
+    var result = try restored.drive(a, .resume_yield, .{});
+    defer result.deinit();
+    var reader: data.wire.Reader = .{ .input = result.record.completed };
+    try std.testing.expectEqual(size * 2, try reader.natural());
+    const payload = result.record.completed[reader.position..];
+    try std.testing.expectEqual(size * 2, payload.len);
+    try std.testing.expect(std.mem.allEqual(u8, payload, 0x39));
+    try restored.close();
+}
+
+test "large bytes retained only by a parked multi-shot template survive transfer and repeated activation" {
+    const data = horos.data;
+    var b = horos.source.Builder.init(a);
+    defer b.deinit();
+    const bytes = try b.schema(.bytes);
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{ .identity = "native/large-template", .payload = unit, .result = unit, .external = false, .control_use = .multi });
+    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = bytes, .capture_bound = &.{ bytes, cap, unit }, .handled = &.{effect}, .mode = .deep, .use = .multi } } });
+    const returns = try b.declare(&.{bytes}, bytes, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const clause = try b.declare(&.{ unit, token }, bytes, &.{}, &.{});
+    const resume_term = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } });
+    try b.define(clause, try b.term(.{ .yield_then = try b.bind(try b.variable(bytes), resume_term, resume_term) }));
+    const handler = try b.handler(.{ .mode = .deep, .input = bytes, .answer = bytes, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
+    const body = try b.declare(&.{ cap, bytes }, bytes, &.{effect}, &.{});
+    try b.define(body, try b.bind(try b.variable(unit), try b.term(.{ .perform = .{ .effect = effect, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } }), try b.pure(try b.reference(b.parameter(body, 1)))));
+    const signature = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ cap, bytes }, .result = bytes, .effects = &.{effect} } } });
+    const entry = try b.declare(&.{bytes}, bytes, &.{}, &.{});
+    try b.define(entry, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, signature), .arguments = &.{try b.reference(b.parameter(entry, 0))} } }));
+    var compiled = try horos.program.compile(a, b.module(entry, unit));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    var prepared = try kosmos.Prepared.init(a, image);
+    defer prepared.deinit();
+    const size = 65 << 20;
+    var measure: data.wire.Writer = .{};
+    try measure.natural(size);
+    const argument = try a.alloc(u8, measure.position + size);
+    defer a.free(argument);
+    var writer: data.wire.Writer = .{ .output = argument };
+    try writer.natural(size);
+    @memset(argument[writer.position..], 0x39);
+    var resident = try kosmos.Resident.start(a, &prepared, argument);
+    var published = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
+    defer published.deinit();
+    try std.testing.expect(published.outcome.record.record == .yielded);
+    const receipt = published.checkpoint.?;
+    try std.testing.expect(receipt.bytes().len > 64 << 20);
+    {
+        var decoded = try data.state_image.decodeGraph(a, receipt.bytes());
+        defer decoded.deinit();
+        var templates: usize = 0;
+        for (decoded.state.nodes) |node| if (node.record == .multi_template) {
+            templates += 1;
+        };
+        try std.testing.expectEqual(1, templates);
+    }
+    try resident.transferCheckpoint(receipt);
+    var restored = try kosmos.Resident.restore(a, &prepared, receipt.bytes());
+    var statistics: kosmos.Statistics = .{};
+    try restored.setStatistics(&statistics);
+    var result = try restored.drive(a, .resume_yield, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(u8, argument, result.record.completed);
+    try std.testing.expectEqual(2, statistics.branch_activations);
+    try restored.close();
+}
