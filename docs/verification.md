@@ -4,6 +4,9 @@ The native roots preserve the evaluator and language contracts:
 
 - `check-storage`: the existing native interpreter/storage/allocation root.
 - `check-native`: shared native source/session/restore checks and storage tests.
+- `check-publication`: the public-module subset for predecessor large-state
+  recovery, typed/encoded native invocation, explicit finite decoder budgets,
+  receipt generations and issuers, and publication/restore allocation failures.
 - `check-zig17`: native subprocess checks of actual activation-view borrow
   invalidation, including expected assertion failures and leak-free valid paths.
 
@@ -11,6 +14,13 @@ These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package
 hash; modules and emitters then consume that captured package, so later edits to
 the supplied directory cannot change the compiled input. They do not need Node, Python, a WASM bundle or a package producer.
+
+The native recovery test retains the exact 52-byte predecessor BPI3 and the
+three original PST3 hashes in `test/v2/native_decode.zig`. Large states are
+generated sequentially. The below-64-MiB checkpoint is a distinct assertion:
+owned input plus expanded records exceeded the former default. Caller-selected
+finite budgets still reject it. Native defaults use the caller's allocator and
+representable sizes; this does not expand the JS/WASM physical input domain.
 
 The optional foreign-environment roots have distinct consumers:
 

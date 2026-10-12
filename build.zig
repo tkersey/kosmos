@@ -98,6 +98,15 @@ pub fn build(b: *std.Build) void {
     const native_checks = b.step("check-native", "Check native storage, source semantics, sessions and restore without an interpreter");
     native_checks.dependOn(&stable_source.step);
     native_checks.dependOn(&run_native_tests.step);
+    const public_test = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/v2/native_publication.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
+    }) });
+    const public_checks = b.addRunArtifact(public_test);
+    native_checks.dependOn(&public_checks.step);
+    b.step("check-publication", "Check native public checkpoint recovery and receipt custody").dependOn(&public_checks.step);
     const wasm_target = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = profile.target, .cpu_features = profile.cpu }) catch @panic("invalid kernel target"));
     const wasm_data = b.createModule(.{
         .root_source_file = source.path(b, "src/data/root.zig"),

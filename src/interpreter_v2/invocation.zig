@@ -51,25 +51,42 @@ pub fn finish(allocator: std.mem.Allocator, session: *runtime.Session, checkpoin
 /// Observe the identity already constructed for publication. This exports no
 /// validation authority and does not retain any output/checkpoint backing.
 pub fn finishObserved(allocator: std.mem.Allocator, session: *runtime.Session, checkpoint: bool, binding: ?*?[32]u8) Error!Outcome {
+    return (try finishPublication(allocator, session, if (checkpoint) .inline_state else .none, binding)).outcome;
+}
+
+pub const CheckpointMode = enum { none, inline_state, receipt };
+pub const Finished = struct {
+    outcome: Outcome,
+    checkpoint: ?[]u8 = null,
+    pending_digest: ?[32]u8 = null,
+};
+
+/// Sidecar bytes use the Session allocator, independently of the output arena.
+/// The caller must admit both before committing its resident transaction.
+pub fn finishPublication(allocator: std.mem.Allocator, session: *runtime.Session, mode: CheckpointMode, binding: ?*?[32]u8) Error!Finished {
     const observation = try session.observe();
     if (binding) |output| output.* = null;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
+    var sidecar: ?[]u8 = null;
+    errdefer if (sidecar) |bytes| session.allocator.free(bytes);
+    var pending_digest: ?[32]u8 = null;
+    if (mode == .receipt and observation != .requested) sidecar = try session.checkpoint(session.allocator);
     const result: protocol.Outcome = switch (observation) {
-        .progressed => .{ .progressed = if (checkpoint) try session.checkpoint(a) else null },
-        .yielded => .{ .yielded = if (checkpoint) try session.checkpoint(a) else null },
+        .progressed => .{ .progressed = if (mode == .inline_state) try session.checkpoint(a) else null },
+        .yielded => .{ .yielded = if (mode == .inline_state) try session.checkpoint(a) else null },
         .requested => blk: {
-            if (checkpoint) {
-                const pending = try session.pendingRequest(a);
-                if (binding) |output| output.* = pending.request.request_identity;
-                // This invocation arena owns all Pending allocations.
-                break :blk .{ .requested = .{ .state = pending.state, .request = try protocol.encodeOwned(protocol.Request, a, pending.request) } };
-            }
-            var pending = try session.pendingRequest(allocator);
+            const pending_allocator = if (mode == .inline_state) a else session.allocator;
+            var pending = try session.pendingBinding(pending_allocator, mode != .none);
             defer pending.deinit();
             if (binding) |output| output.* = pending.request.request_identity;
-            break :blk .{ .requested = .{ .state = null, .request = try protocol.encodeOwned(protocol.Request, a, pending.request) } };
+            pending_digest = pending.request.binding.pending_state_digest;
+            const request = try protocol.encodeOwned(protocol.Request, a, pending.request);
+            const state: ?[]const u8 = if (mode == .inline_state) pending.state else null;
+            if (mode == .receipt) sidecar = pending.state;
+            if (mode != .none) pending.state = &.{}; // ownership moved to arena/sidecar
+            break :blk .{ .requested = .{ .state = state, .request = request } };
         },
         .completed => |value| .{ .completed = try a.dupe(u8, try session.bytes(&value)) },
         .failed => |value| .{ .failed = .{
@@ -79,7 +96,7 @@ pub fn finishObserved(allocator: std.mem.Allocator, session: *runtime.Session, c
         } },
         .cancelled => |reason| .{ .cancelled = .{ .reason = try heap.duplicate(protocol.Reason, a, reason), .cleanup_failures = try failures(a, session) } },
     };
-    return .{ .arena = arena, .record = result };
+    return .{ .outcome = .{ .arena = arena, .record = result }, .checkpoint = sidecar, .pending_digest = pending_digest };
 }
 
 fn failures(allocator: std.mem.Allocator, session: *runtime.Session) Error![]const u8 {

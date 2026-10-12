@@ -1,9 +1,11 @@
 // Copyright (c) 2026 World contributors. MIT license.
-pub const package_version = "7.0.0";
+pub const package_version = "8.0.0";
 const current = @import("interpreter_v2/stable_session.zig");
 pub const Session = current.Session;
 pub const Prepared = current.Prepared;
 pub const Resident = current.Resident;
+pub const Checkpoint = @import("interpreter_v2/resident.zig").Checkpoint;
+pub const Publication = @import("interpreter_v2/resident.zig").Publication;
 pub const invocation = current.invocation;
 pub const Workspace = current.Workspace;
 pub const AllocationBudget = current.AllocationBudget;

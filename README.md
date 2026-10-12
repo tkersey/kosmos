@@ -7,7 +7,7 @@ natively and as an import-free wasm32 kernel. Computations, handlers, policies,
 retained control and cleanup are program data. The environment supplies typed
 external results.
 
-Kosmos `7.0.0` requires exact Zig `0.17.0`; source builds use Horos 4.
+Kosmos `8.0.0` requires exact Zig `0.17.0`; source builds use Horos 5.
 It consumes BPI3 programs and PST3 states through ABI 3. See the
 [ABI contract](docs/kernel-abi.md) and [verification boundaries](docs/verification.md).
 Current source/package identities are selected by the consuming lock; published
@@ -43,6 +43,26 @@ handle destruction. Use `setLimits` to select input, working and output budgets.
 
 Native consumers import `kosmos.Session`, `kosmos.Prepared`, `kosmos.Resident`, and
 `kosmos.invocation`. Production builds import only Horos's pure data module.
+
+`Resident.publish(destination, control, options)` is the native publication
+transaction. Destinations select a record, encoded bytes, or a caller buffer.
+Checkpoint mode `.none` streams the pending-state digest without allocating
+checkpoint output; `.inline_state` preserves existing PKO3 state fields;
+`.receipt` returns a separate owning `Checkpoint`, including terminal states.
+The outcome and receipt are produced before the same commit fence. Existing
+`drive`, `driveEncoded`, and `driveInto` delegate to it.
+
+Move a receipt out with `Publication.takeCheckpoint()` before destroying its
+publication. Its bytes are immutable and remain caller-owned after
+`Resident.transferCheckpoint(receipt)`. Transfer checks the exact issuer and
+committed generation, then retires the Resident without another serialization.
+Successful drives stale earlier receipts; failed drives preserve them. Ordinary
+checkpoint inspection does not change generation. `takeCheckpoint` remains the
+fresh-snapshot fallback, and `close` remains terminal-only. A receipt retains
+one complete checkpoint buffer plus its small owner and shared identity cell.
+Receipts use the Resident's allocator, which must outlive them; temporary
+outcome allocators can be released independently. A receipt establishes local custody only, not durable
+storage commit or exclusive execution of copied snapshots.
 
 ## Build, package and command line
 
