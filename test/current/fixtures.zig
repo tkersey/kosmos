@@ -70,14 +70,31 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn largeRequest(b: *horos.source.Builder) !horos.source.Module {
-    const bytes = try b.schema(.bytes);
-    const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "capacity/large", .payload = bytes, .result = unit });
-    const entry = try b.declare(&.{bytes}, bytes, &.{effect}, &.{});
-    const input = try b.reference(b.parameter(entry, 0));
-    const request = try b.term(.{ .perform = .{ .effect = effect, .payload = input } });
-    try b.define(entry, try b.bind(try b.variable(unit), request, try b.pure(input)));
-    return b.module(entry, unit);
+    const a = horos.authoring;
+    const c = try a.Context.init(b);
+    const Envelope = struct { content: struct { bytes: []const u8 } };
+    const bytes = try c.schema([]const u8);
+    const unit = try c.schema(void);
+    const envelope = try c.schema(Envelope);
+    const content = try c.schema(@FieldType(Envelope, "content"));
+    const project = try c.function("request bytes", .{ .envelope = envelope }, bytes, .{});
+    const projection = try c.body(project);
+    const nested = try projection.field(try projection.parameter("envelope"), "content");
+    const payload = try projection.field(nested, "bytes");
+    comptime std.debug.assert(@TypeOf(payload) == *const a.Value(a.Shape([]const u8)));
+    try c.define(project, try projection.ret(payload));
+
+    const effect = try c.external("capacity/large", bytes, unit);
+    const entry = try c.function("large request", .{ .input = bytes }, bytes, .{effect});
+    const body = try c.body(entry);
+    const input = try body.parameter("input");
+    const wrapped = try body.product(envelope, .{
+        .content = try body.product(content, .{ .bytes = input }),
+    });
+    const requested = try body.call(project, .{ .envelope = wrapped });
+    _ = try body.perform(effect, requested);
+    try c.define(entry, try body.ret(input));
+    return c.module(entry, unit);
 }
 
 fn linkedImage(allocator: std.mem.Allocator, name: []const u8) ![]u8 {

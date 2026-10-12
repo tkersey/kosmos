@@ -20,7 +20,9 @@ this does not certify renamed source as an old release. The current optional
 JS package is built and checked with its matching new kernel.
 
 Zig 0.17.0 derives the Kosmos name checksum `da7fbe49`; the lineage ID
-`074dc2bd` and version 6.0.0 are unchanged. Package hashes are computed by Zig.
+`074dc2bd` is unchanged. Kosmos 7.0.0 marks the public module, package,
+executable and error-class naming break from World 6.0.0. Package hashes are
+computed by Zig; the portable formats and ABI 3 remain unchanged.
 New scratch and output locations use Kosmos names. No old user state is discovered,
 moved or deleted. Existing saved tasks retain their original build bindings;
 use the original pinned build where restoration is incompatible.

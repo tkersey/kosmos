@@ -12,6 +12,8 @@ const host = await Kernel.create({ bytes: code, expectedSha256: createHash("sha2
 const limits = { input: 4 << 20, working: 16 << 20, output: 4 << 20 };
 host.setLimits(limits);
 const image = new Uint8Array(execFileSync(fixtures, ["image", "largeRequest"]));
+// The pre-migration raw fixture requested and returned these exact bytes.
+// Its typed successor also exercises named functions and nested record metadata.
 // Exceed the kernel's initial 1 MiB backing to require physical memory growth.
 const payloadLength = (1 << 20) + 65536;
 const initialArgs = concat(natural(payloadLength), new Uint8Array(payloadLength).fill(97));

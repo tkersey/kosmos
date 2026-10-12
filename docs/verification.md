@@ -19,6 +19,10 @@ The optional foreign-environment roots have distinct consumers:
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
   input; the fixed-memory case changes only the real module's memory declaration.
+  Its existing large-request fixture now uses Horos 4 named functions and nested
+  typed records. Independent expected payload/result bytes are unchanged and
+  checked in both native and WASM execution. The production interpreter still
+  imports only `horos_data`.
 - `check-codecs`: JS byte/value ownership, cross-realm inputs, ABI admission,
   regular-file reads, and existing v1 bundle acquisition/verification.
 - `check-browser`: an actual Chromium Worker → native → fresh Worker transfer,
