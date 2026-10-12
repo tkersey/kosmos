@@ -2,4 +2,6 @@
 test {
     _ = @import("native_decode.zig");
     _ = @import("publication.zig");
+    _ = @import("control_provenance.zig");
+    _ = @import("control_provenance_alias.zig");
 }
