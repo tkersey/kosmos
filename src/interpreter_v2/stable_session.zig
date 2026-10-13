@@ -812,7 +812,15 @@ pub const Session = struct {
                     cursor = region.return_to;
                     continue;
                 },
-                .continuation => try self.resumeContinuation(reference, value),
+                .continuation => |saved| {
+                    // A cleanup clause may return ownership while abandoning
+                    // a token. Disposal binds no answer, so close that returned
+                    // ownership before advancing its continuation.
+                    if (value.body == .owned and self.program.blocks[@intCast(saved.source_block)].terminator == .dispose)
+                        try @import("unwind.zig").begin(self, .abandoned, reference, reference, &.{value})
+                    else
+                        try self.resumeContinuation(reference, value);
+                },
                 .injection => |injection| try self.resumeContinuation(injection.continuation, value),
                 .protection => |protection| try @import("unwind.zig").begin(self, .{ .normal = value }, reference, protection.return_to, &.{}),
                 .cleanup_return => try @import("unwind.zig").returned(self, reference),

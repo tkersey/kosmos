@@ -176,11 +176,11 @@ pub const Resident = struct {
             if (owned != .none) state.expected = null;
             _ = try invocation.advance(session, owned, options.quantum);
         }
-        const output_allocator = switch (destination) {
-            .record, .encoded => |allocator| allocator,
-            .buffer => session.allocator,
+        const staging_allocator = switch (destination) {
+            .record => |allocator| allocator,
+            .encoded, .buffer => session.allocator,
         };
-        var finished = try invocation.finishPublication(output_allocator, session, options.checkpoint, &state.expected);
+        var finished = try invocation.finishPublication(staging_allocator, session, options.checkpoint, &state.expected);
         errdefer finished.outcome.deinit();
         errdefer if (finished.checkpoint) |bytes| session.allocator.free(bytes);
         var receipt: ?*Checkpoint = null;
@@ -207,7 +207,7 @@ pub const Resident = struct {
         state.generation = generation;
         transaction.commit(session);
         session.store.compactImported() catch {};
-        return .{ .outcome = published, .checkpoint = receipt, .allocator = if (destination == .encoded) output_allocator else null };
+        return .{ .outcome = published, .checkpoint = receipt, .allocator = if (destination == .encoded) destination.encoded else null };
     }
 
     pub fn drive(self: *Resident, output: std.mem.Allocator, control: protocol.Control, options: Drive) Error!invocation.Outcome {

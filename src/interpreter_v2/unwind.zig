@@ -192,7 +192,10 @@ pub fn returnedDisposal(machine: anytype, frame: anytype, value: g.Value) @TypeO
 
 fn crossedCleanupReturn(machine: anytype, frame: anytype, exit: g.Exit) @TypeOf(machine.*).ExecutionError!void {
     var obligation = (try machine.store.get(frame.obligation.node)).obligation;
-    if (exit.reason == .abandoned) {
+    if (exit.reason == .abandoned or exit.reason == .cancellation) {
+        // Cancellation can replace an abandonment while its cleanup capture is
+        // being disposed. Crossing that capture still completes its obligation;
+        // the exit retains the cancellation until the outer unwind finishes.
         const suspended = (try machine.store.get(frame.exit)).exit;
         const discarded = try discardedNormal(machine, suspended);
         defer machine.allocator.free(discarded);

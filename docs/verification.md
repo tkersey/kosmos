@@ -10,8 +10,12 @@ The native roots preserve the evaluator and language contracts:
   It also rejects insufficient caller capture bounds during implicit disposal
   and restores valid failure, fault and cancellation cleanup through direct,
   nested and closure calls, injected computations, nested captured tokens and
-  deep same-family handlers. Explicit disposal, ordinary resume and successor
+  deep and shallow nested same-family handlers. Explicit disposal, ordinary resume and successor
   resume preserve cleanup; restored and uninterrupted terminal bytes agree.
+  Owned answers returned by cleanup during explicit disposal are themselves
+  disposed, including across checkpoint restoration and cancellation. Encoded
+  publication accepts an exact final-byte output budget; staging uses the
+  resident allocator, and insufficient output capacity preserves retry state.
 - `check-zig17`: native subprocess checks of actual activation-view borrow
   invalidation, including expected assertion failures and leak-free valid paths.
 
@@ -33,7 +37,8 @@ representable sizes; this does not expand the JS/WASM physical input domain.
 The optional foreign-environment roots have distinct consumers:
 
 - `check-source`: the independent Horos higher-order interpreter versus actual
-  compiled native/WASM execution, preserving all 42 source examples.
+  compiled native/WASM execution for 44 source examples, including all 42
+  historical examples.
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
   input; the fixed-memory case changes only the real module's memory declaration.

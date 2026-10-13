@@ -35,6 +35,38 @@ fn release(resident: *kosmos.Resident) void {
     };
 }
 
+test "encoded publication charges only final bytes to an exact output budget" {
+    for ([_]bool{ false, true }) |external| {
+        const program = try image(external);
+        defer a.free(program);
+        var prepared = try kosmos.Prepared.init(a, program);
+        defer prepared.deinit();
+        for ([_]kosmos.invocation.CheckpointMode{ .none, .inline_state, .receipt }) |checkpoint_mode| {
+            var reference = try kosmos.Resident.start(a, &prepared, &argument);
+            defer release(&reference);
+            const original = try reference.checkpoint(a);
+            defer a.free(original);
+            var expected = try reference.publish(.{ .encoded = a }, .none, .{ .checkpoint = checkpoint_mode });
+            defer expected.deinit();
+            const output = try a.alloc(u8, expected.outcome.encoded.len);
+            defer a.free(output);
+            var resident = try kosmos.Resident.restore(a, &prepared, original);
+            defer release(&resident);
+            var short = std.heap.FixedBufferAllocator.init(output[0 .. output.len - 1]);
+            try std.testing.expectError(error.OutOfMemory, resident.publish(.{ .encoded = short.allocator() }, .none, .{ .checkpoint = checkpoint_mode }));
+            const unchanged = try resident.checkpoint(a);
+            defer a.free(unchanged);
+            try std.testing.expectEqualSlices(u8, original, unchanged);
+            var exact = std.heap.FixedBufferAllocator.init(output);
+            var actual = try resident.publish(.{ .encoded = exact.allocator() }, .none, .{ .checkpoint = checkpoint_mode });
+            defer actual.deinit();
+            try std.testing.expectEqualSlices(u8, expected.outcome.encoded, actual.outcome.encoded);
+            if (expected.checkpoint) |checkpoint|
+                try std.testing.expectEqualSlices(u8, checkpoint.bytes(), actual.checkpoint.?.bytes());
+        }
+    }
+}
+
 test "one receipt publication binds exact pending bytes and transfer performs no projection" {
     const program = try image(true);
     defer a.free(program);

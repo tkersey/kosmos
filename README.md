@@ -89,9 +89,9 @@ uses `tar` to unpack that authenticated snapshot for compilation. No interpreter
 JS/WASM archive or script-generated metadata is a native prerequisite.
 
 `check-native` and `check-storage` use shared native build roots. `check-source`
-compares 42 source examples with the independent higher-order oracle and actual
+compares 44 source examples with the independent higher-order oracle and actual
 native/WASM execution. The optional JS checks cover canonical bytes, handles,
-capacity/retry behavior, package/CLI consumption and a real Chromium Worker.
+capacity/retry behavior, package/CLI consumption and real Chromium and Firefox Workers.
 Repeated measurement/transfer campaigns and the Python/Wasmtime dependency are
 retired. The old `runtime prepare` producer is replaced by the ordinary Zig
 package build and existing qualification roots.
