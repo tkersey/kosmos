@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { resolve, extname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chromium } from "./browser-tools/node_modules/playwright-core/index.mjs";
+import { chromium, firefox } from "./browser-tools/node_modules/playwright-core/index.mjs";
 import { encodeInput, decodeOutcome, decodeRequest, encodeResult } from "../../src/embedding/index.mjs";
 const [kernelPath, fixtureTool] = process.argv.slice(2);
 const kernel = await readFile(kernelPath);
@@ -27,7 +27,7 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 const results = [];
 try {
-  for (const [engine, type] of [["chromium", chromium]]) {
+  for (const [engine, type] of [["chromium", chromium], ["firefox", firefox]]) {
     const browser = await type.launch({ headless: true });
     try {
       const page = await browser.newPage();

@@ -1,5 +1,5 @@
 // Byte-only public entry point. This module also loads in a browser Worker.
-export const packageVersion = "7.0.0";
+export const packageVersion = "8.0.0";
 export { Kernel } from "./kernel.mjs";
 export { encodeInput, decodeOutcome, decodeRequest, encodeResult, validateValue } from "./codec.mjs";
 export { inspectKernelWasm } from "./wasm.mjs";

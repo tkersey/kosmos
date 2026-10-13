@@ -29,13 +29,13 @@ The optional foreign-environment roots have distinct consumers:
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
   input; the fixed-memory case changes only the real module's memory declaration.
-  Its existing large-request fixture now uses Horos 4 named functions and nested
+  Its existing large-request fixture uses Horos named functions and nested
   typed records. Independent expected payload/result bytes are unchanged and
   checked in both native and WASM execution. The production interpreter still
   imports only `horos_data`.
 - `check-codecs`: JS byte/value ownership, cross-realm inputs, ABI admission,
   regular-file reads, and existing v1 bundle acquisition/verification.
-- `check-browser`: an actual Chromium Worker → native → fresh Worker transfer,
+- `check-browser`: actual Chromium and Firefox Worker → native → fresh Worker transfers,
   including retained scoped computations and explicit handle cleanup.
 - `check-package`: the extracted npm consumer and small public CLI, not source imports.
 
@@ -63,9 +63,9 @@ For the optional JavaScript and browser checks, install their locked tooling:
 
 ```sh
 npm ci --ignore-scripts --prefix test/current/browser-tools
-node test/current/browser-tools/node_modules/playwright-core/cli.js install chromium
+node test/current/browser-tools/node_modules/playwright-core/cli.js install chromium firefox
 zig build check -Doptimize=safe
 ```
 
-CI installs Chromium's Linux system dependencies with Playwright's `--with-deps`
-option. Firefox and Python/Wasmtime are not part of the current checks.
+CI installs both browsers' Linux system dependencies with Playwright's
+`--with-deps` option. Python/Wasmtime is not part of the current checks.
