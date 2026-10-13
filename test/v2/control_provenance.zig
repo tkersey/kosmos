@@ -156,13 +156,15 @@ test "effect-free yielding helper preserves an excluded caller capture on restor
     try std.testing.expectEqualSlices(u8, uninterrupted.outcome.record.record.completed, finished.outcome.record.record.completed);
 }
 
-fn effectFreeCleanupFixture(allocator: std.mem.Allocator) !d.activation.Program {
+const CleanupEffect = enum { absent, unused, performed };
+
+fn cleanupFixture(allocator: std.mem.Allocator, effect: CleanupEffect, yield_body: bool) !d.activation.Program {
     var program = p;
     const schemas = try allocator.alloc(d.program.Schema, 15);
     @memcpy(schemas[0..6], p.schemas);
-    schemas[2].internal.computation.effects = &.{};
+    schemas[2].internal.computation.effects = if (effect == .absent) &.{} else &.{0};
     schemas[6] = .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 3, .effects = &.{}, .capture_bound = &.{3} } } };
-    schemas[7] = .{ .internal = .{ .computation = .{ .parameters = &.{14}, .result = 1, .effects = &.{} } } };
+    schemas[7] = .{ .internal = .{ .computation = .{ .parameters = &.{14}, .result = 1, .effects = if (effect == .absent) &.{} else &.{0}, .capture_bound = if (effect == .absent) &.{} else &.{3} } } };
     schemas[8] = .text;
     schemas[9] = .bytes;
     schemas[10] = .{ .sum = &.{ 8, 9 } };
@@ -172,28 +174,42 @@ fn effectFreeCleanupFixture(allocator: std.mem.Allocator) !d.activation.Program 
     schemas[14] = .{ .product = &.{ 11, 12, 13 } };
     const functions = try allocator.alloc(d.activation.Function, 7);
     @memcpy(functions[0..5], p.functions);
-    functions[1].effects = &.{};
+    functions[1].effects = if (effect == .absent) &.{} else &.{0};
     functions[1].layout.slots = &.{ 0, 3, 1, 0, 6, 7 };
     functions[5] = .{ .entry = 10, .inputs = &.{0}, .layout = .{ .slots = &.{3} }, .result = 3 };
     functions[6] = .{ .entry = 11, .inputs = &.{0}, .layout = .{ .slots = &.{ 14, 1 } }, .result = 1 };
-    const blocks = try allocator.alloc(d.activation.Block, 13);
+    if (effect != .absent) functions[6] = .{ .entry = 11, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 3, 14, 1, 0 } }, .result = 1, .effects = &.{0} };
+    const blocks = try allocator.alloc(d.activation.Block, 15);
     @memcpy(blocks[0..10], p.blocks);
     blocks[0].terminator.handle.handler = 1;
-    blocks[2].instructions = &.{
+    blocks[2].instructions = try allocator.dupe(d.activation.Instruction, &.{
         .{ .destination = 4, .opcode = .computation, .operands = &.{1}, .immediate = 1 },
-        .{ .destination = 5, .opcode = .computation, .immediate = 2 },
-    };
+        .{ .destination = 5, .opcode = .computation, .immediate = 2, .operands = if (effect == .absent) &.{} else &.{1} },
+    });
     blocks[2].terminator = .{ .protect = .{ .body = 4, .cleanup = 5, .arguments = &.{}, .next = .{ .block = 4, .assignments = &.{.{ .destination = 1, .source = .returned }} } } };
     blocks[3].instructions = &.{};
     blocks[3].terminator = .{ .return_value = 0 };
     blocks[10] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
     blocks[11] = .{ .function = 6, .instructions = &.{}, .terminator = .{ .yield_value = .{ .block = 12 } } };
     blocks[12] = .{ .function = 6, .instructions = &.{.{ .destination = 1, .opcode = .constant }}, .terminator = .{ .return_value = 1 } };
+    blocks[13] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    if (yield_body) blocks[10].terminator = .{ .yield_value = .{ .block = 13 } };
+    blocks[14] = .{ .function = 6, .instructions = &.{}, .terminator = .{ .return_value = if (effect == .absent) @as(d.program.Id, 1) else 2 } };
+    if (effect != .absent) blocks[12] = .{ .function = 6, .instructions = &.{.{ .destination = 2, .opcode = .constant }}, .terminator = .{ .return_value = 2 } };
+    if (effect == .performed) {
+        // Preserve the caller integer only under the broad handler. Both
+        // handlers permit the cleanup's own live unit value across its perform.
+        schemas[4].internal.resumption.capture_bound = &.{ 0, 1, 3 };
+        schemas[5].internal.resumption.capture_bound = &.{ 1, 3 };
+        schemas[4].internal.resumption.obligations = true;
+        schemas[5].internal.resumption.obligations = true;
+        blocks[12].terminator = .{ .perform = .{ .effect = 0, .capability = 0, .payload = 2, .next = .{ .block = 14, .assignments = &.{.{ .destination = 3, .source = .returned }} } } };
+    }
     program.schemas = schemas;
     program.functions = functions;
     program.blocks = blocks;
     program.constructors = try allocator.dupe(d.program.Constructor, &.{ p.constructors[0], .{ .function = 5, .capture = 1, .schema = 6 }, .{ .function = 6, .capture = 2, .schema = 7 } });
-    program.scopes.captures = try allocator.dupe(d.program.Capture, &.{ p.scopes.captures[0], .{ .fields = &.{3}, .use = .reusable }, .{ .fields = &.{}, .use = .reusable } });
+    program.scopes.captures = try allocator.dupe(d.program.Capture, &.{ p.scopes.captures[0], .{ .fields = &.{3}, .use = .reusable }, .{ .fields = if (effect == .absent) &.{} else &.{3}, .use = .reusable } });
     return program;
 }
 
@@ -201,7 +217,7 @@ test "effect-free cleanup yielded with returned capability remains restorable" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const program = try effectFreeCleanupFixture(alloc);
+    const program = try cleanupFixture(alloc, .absent, false);
     var diagnostic: d.admission.Diagnostic = .{};
     var admitted = d.activation_ownership.analyzeDiagnosed(a, program, &diagnostic) catch |err| {
         std.debug.print("cleanup program rejected {t}: {any}\n", .{ err, diagnostic });
@@ -246,6 +262,59 @@ test "effect-free cleanup yielded with returned capability remains restorable" {
     var finished = try restored.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
     defer finished.deinit();
     try std.testing.expectEqualSlices(u8, uninterrupted.outcome.record.record.completed, finished.outcome.record.record.completed);
+}
+
+test "cleanup suspension summaries preserve checkpoint completion and cancellation" {
+    for ([_]CleanupEffect{ .unused, .performed }) |effect| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var program = try cleanupFixture(alloc, effect, true);
+        if (effect == .performed) {
+            try std.testing.expectError(error.InvalidOwnership, d.activation_ownership.analyze(a, program));
+            const blocks = try alloc.dupe(d.activation.Block, program.blocks);
+            blocks[0].terminator.handle.handler = 0;
+            program.blocks = blocks;
+        }
+        const bytes = try alloc.alloc(u8, try d.program_image.encodedLength(program));
+        _ = try d.program_image.encode(alloc, program, bytes);
+        var prepared = try k.Prepared.init(a, bytes);
+        defer prepared.deinit();
+        const expected = [_]u8{ 9, 0, 0, 0, 0, 0, 0, 0 };
+        var resident = try k.Resident.start(a, &prepared, &expected);
+        defer release(&resident);
+        var checkpoint = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
+        defer checkpoint.deinit();
+        try std.testing.expect(checkpoint.outcome.record.record == .yielded);
+        var restored = try k.Resident.restore(a, &prepared, checkpoint.checkpoint.?.bytes());
+        defer release(&restored);
+        var cleanup = try resident.publish(.{ .record = a }, .resume_yield, .{});
+        defer cleanup.deinit();
+        var restored_cleanup = try restored.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+        defer restored_cleanup.deinit();
+        try std.testing.expect(cleanup.outcome.record.record == .yielded);
+        try std.testing.expect(restored_cleanup.outcome.record.record == .yielded);
+        var during_cleanup = try k.Resident.restore(a, &prepared, restored_cleanup.checkpoint.?.bytes());
+        defer release(&during_cleanup);
+        var uninterrupted = try resident.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+        defer uninterrupted.deinit();
+        var finished = try during_cleanup.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+        defer finished.deinit();
+        try std.testing.expectEqualSlices(u8, &expected, finished.outcome.record.record.completed);
+        try std.testing.expectEqualSlices(u8, uninterrupted.checkpoint.?.bytes(), finished.checkpoint.?.bytes());
+        var cancelled = try k.Resident.restore(a, &prepared, checkpoint.checkpoint.?.bytes());
+        defer release(&cancelled);
+        var cancel_cleanup = try cancelled.publish(.{ .record = a }, .{ .cancel = .{ .text = "stop" } }, .{ .checkpoint = .receipt });
+        defer cancel_cleanup.deinit();
+        try std.testing.expect(cancel_cleanup.outcome.record.record == .yielded);
+        var cancelling = try k.Resident.restore(a, &prepared, cancel_cleanup.checkpoint.?.bytes());
+        defer release(&cancelling);
+        var stopped = try cancelling.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+        defer stopped.deinit();
+        try std.testing.expectEqualStrings("stop", stopped.outcome.record.record.cancelled.reason.text);
+        var restored_stop = try k.Resident.restore(a, &prepared, stopped.checkpoint.?.bytes());
+        defer release(&restored_stop);
+    }
 }
 
 // The outer handler excludes the caller's retained integer. The shallow token
