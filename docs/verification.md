@@ -69,3 +69,64 @@ zig build check -Doptimize=safe
 
 CI installs both browsers' Linux system dependencies with Playwright's
 `--with-deps` option. Python/Wasmtime is not part of the current checks.
+
+## Native publication measurements
+
+`zig build bench-publication -Doptimize=safe` writes
+`zig-out/publication.jsonl`. It accepts the same authenticated `-Dhoros-source`
+override as the native checks. This optional diagnostic is outside `check` and
+sets no timing threshold. Host optimization follows `build-profile.json` (`safe`).
+
+The measured core is Kosmos `863af1ff776273cfa0d3e73ce72b58dceb36f3b1`
+with Horos `f04359ca8b958a07d1bcc14748e35adfacd3ffed`, plus the benchmark
+sources in this revision. Platform: Apple M2 Pro, macOS 27.2 (26B5101f), Zig
+0.17.0. The yield fixture uses the exact 52-byte historical program. The request
+fixture retains the same bytes across one external unit request. Both must
+restore and finish with the original encoded argument. Every sample checks exact
+receipt/snapshot equality, one publication projection, zero transfer projections,
+and complete release of measured owner allocations.
+
+Times are microseconds, medians after the first observation. Each repetition
+prepares and starts fresh owners. Raw JSONL retains every observation and hash.
+Input construction, output formatting, result verification and final cleanup
+are outside timed regions. Transfer time includes retiring the resident.
+
+| Fixture/payload | Repetitions | Prepare | Start | Publish with receipt | Snapshot | Transfer receipt | Restore |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| yield/64 B | 10 | 2.4 | 0.9 | 3.0 | 0.7 | 0.4 | 2.3 |
+| yield/1 MiB | 10 | 2.5 | 119.4 | 218.2 | 231.0 | 16.2 | 197.2 |
+| yield/65 MiB | 4 | 12.1 | 9088.1 | 16661.2 | 16753.8 | 1568.3 | 13568.9 |
+| request/64 B | 10 | 3.4 | 0.8 | 4.9 | 0.9 | 0.5 | 4.2 |
+| request/1 MiB | 10 | 3.3 | 113.9 | 645.2 | 214.1 | 14.9 | 198.8 |
+| request/65 MiB | 4 | 19.6 | 9117.7 | 45654.6 | 16426.0 | 1616.5 | 13595.6 |
+
+The existing `AllocationBudget` wraps the process allocator with its representable
+maximum limit; it counts requested bytes and does not support resize/remap.
+Instrumentation affects these timings and allocation shapes. The following are
+maximum observed live requested bytes, excluding allocator metadata, RSS, input
+construction, and the separate Prepared owner. Resident and output peaks are
+separate allocation domains and must not be added as a simultaneous peak.
+
+| Fixture/payload | Checkpoint | Retained receipt | Publication resident peak | Publication output peak | Restore peak |
+|---|---:|---:|---:|---:|---:|
+| yield/64 B | 142 | 254 | 7436 | 22 | 4174 |
+| yield/1 MiB | 1048658 | 1048770 | 3676772 | 22 | 1576212 |
+| yield/65 MiB | 68157524 | 68157636 | 238557801 | 22 | 102239512 |
+| request/64 B | 157 | 269 | 7317 | 3724 | 4726 |
+| request/1 MiB | 1048673 | 1048785 | 3677044 | 3724 | 1576440 |
+| request/65 MiB | 68157539 | 68157651 | 238558073 | 3724 | 102239738 |
+
+Receipt storage belongs to the **resident allocator**, not the encoded-outcome
+allocator. After transfer it retains the full checkpoint plus 112 bytes on this
+target, including the issuer identity. That memory remains until receipt
+deinitialization. Publication's live resident allocation before retirement is
+also recorded in JSONL. A snapshot measurement retains the existing receipt while
+creating a second byte copy; it is not the cost of a receipt-free resident.
+
+Preparation retains 3,708 requested bytes for the yield program and 4,118 for
+the request program (peaks 5,620 and 5,898). Those counts exclude live resident
+and receipt owners. The 65 MiB cases have only four repeated observations and
+support no tail-latency claim. Process-allocator reuse, power state and load affect
+small timings. Snapshot and publication perform different work; their timings
+are not a before/after comparison. These measurements establish local costs and
+the serialization/memory tradeoff, not a product or provider speedup.

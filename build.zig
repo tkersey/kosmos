@@ -86,6 +86,16 @@ pub fn build(b: *std.Build) void {
     const source_data = if (host_mode == optimize) host_data else b.createModule(.{ .root_source_file = source.path(b, "src/data/root.zig"), .target = b.graph.host, .optimize = host_mode });
     const horos = b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     const host_kosmos = if (target.query.isNative() and host_mode == optimize) public_kosmos else b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    const publication_bench = b.addExecutable(.{ .name = "publication-bench", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/v2/publication_bench.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
+    }) });
+    const run_publication_bench = b.addRunArtifact(publication_bench);
+    run_publication_bench.has_side_effects = true;
+    b.step("bench-publication", "Measure native preparation, publication, receipt custody and restore (JSONL)")
+        .dependOn(&b.addInstallFile(run_publication_bench.captureStdOut(.{}), "publication.jsonl").step);
     const stable_runtime = b.createModule(.{ .root_source_file = b.path("src/interpreter_v2/stable_session.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
