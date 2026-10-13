@@ -7,8 +7,16 @@ The native roots preserve the evaluator and language contracts:
 - `check-publication`: the public-module subset for predecessor large-state
   recovery, typed/encoded native invocation, explicit finite decoder budgets,
   receipt generations and issuers, and publication/restore allocation failures.
+  It also rejects insufficient caller capture bounds during implicit disposal
+  and restores valid failure, fault and cancellation cleanup through direct,
+  nested and closure calls, injected computations, nested captured tokens and
+  deep same-family handlers. Explicit disposal, ordinary resume and successor
+  resume preserve cleanup; restored and uninterrupted terminal bytes agree.
 - `check-zig17`: native subprocess checks of actual activation-view borrow
   invalidation, including expected assertion failures and leak-free valid paths.
+
+The aggregate `check` includes the entire `check-native` root, including
+`check-publication`.
 
 These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package

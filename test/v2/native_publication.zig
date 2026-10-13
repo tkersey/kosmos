@@ -4,4 +4,5 @@ test {
     _ = @import("publication.zig");
     _ = @import("control_provenance.zig");
     _ = @import("control_provenance_alias.zig");
+    _ = @import("implicit_disposal.zig");
 }

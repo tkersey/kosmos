@@ -1,4 +1,4 @@
-# Kosmos 7
+# Kosmos 8
 
 Formerly World; see the [rename notes](docs/rename.md).
 

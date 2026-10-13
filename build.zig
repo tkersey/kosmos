@@ -298,8 +298,7 @@ pub fn build(b: *std.Build) void {
     borrow_check.addArtifactArg2(borrow_probe, .{ .make_absolute = true });
     zig17.dependOn(&borrow_check.step);
     check.dependOn(zig17);
-    check.dependOn(&run_native_tests.step);
-    check.dependOn(&stable_source.step);
+    check.dependOn(native_checks);
     check.dependOn(&activation_wasm_run.step);
     check.dependOn(&current_check.step);
     check.dependOn(&source_agreement.step);
