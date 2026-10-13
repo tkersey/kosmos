@@ -1,6 +1,7 @@
 //! Program-local capture admission remains valid across native checkpoint restore.
 const std = @import("std");
-const d = @import("horos").data;
+const h = @import("horos");
+const d = h.data;
 const k = @import("kosmos");
 const a = std.testing.allocator;
 const p: d.activation.Program = .{
@@ -245,4 +246,79 @@ test "effect-free cleanup yielded with returned capability remains restorable" {
     var finished = try restored.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
     defer finished.deinit();
     try std.testing.expectEqualSlices(u8, uninterrupted.outcome.record.record.completed, finished.outcome.record.record.completed);
+}
+
+// The outer handler excludes the caller's retained integer. The shallow token
+// carries its capability solely as an argument to an effect-free function.
+// Discarding that token executes neither this function nor the capability.
+fn retainedTokenCapabilityFixture(b: *h.source.Builder) !h.source.Module {
+    const unit = try b.scalar(void);
+    const integer = try b.scalar(u64);
+    const unit_value = try b.constant(void, {});
+    const outer_effect = try b.effect(.{ .identity = "outer", .payload = unit, .result = unit, .external = false });
+    const token_effect = try b.effect(.{ .identity = "token", .payload = unit, .result = unit, .external = false });
+    const outer_capability = try b.schema(.{ .internal = .{ .capability = outer_effect } });
+    const token_capability = try b.schema(.{ .internal = .{ .capability = token_effect } });
+    const token_schema = try b.reserveSchema();
+    try b.defineSchema(token_schema, .{ .internal = .{ .resumption = .{ .effect = token_effect, .input = unit, .answer = unit, .effects = &.{token_effect}, .handled = &.{token_effect}, .capture_bound = &.{ unit, integer, outer_capability, token_capability }, .mode = .shallow, .use = .linear } } });
+    const outer_resumption = try b.schema(.{ .internal = .{ .resumption = .{ .effect = outer_effect, .input = unit, .answer = integer, .effects = &.{token_effect}, .handled = &.{outer_effect}, .capture_bound = &.{ unit, outer_capability, token_capability, token_schema }, .mode = .deep, .use = .linear } } });
+    const entry = try b.declare(&.{}, integer, &.{token_effect}, &.{});
+    const outer_body = try b.declare(&.{outer_capability}, integer, &.{ outer_effect, token_effect }, &.{});
+    const outer_return = try b.declare(&.{integer}, integer, &.{}, &.{});
+    const outer_clause = try b.declare(&.{ unit, outer_resumption }, integer, &.{token_effect}, &.{});
+    try b.define(outer_return, try b.pure(try b.reference(b.parameter(outer_return, 0))));
+    try b.define(outer_clause, try b.term(.{ .yield_then = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(outer_clause, 1)), .argument = unit_value } }) }));
+    const token_body = try b.declare(&.{token_capability}, unit, &.{token_effect}, &.{});
+    const token_return = try b.declare(&.{unit}, token_schema, &.{}, &.{});
+    const token_clause = try b.declare(&.{ unit, token_schema }, token_schema, &.{}, &.{});
+    try b.define(token_return, try b.term(.{ .fail = unit_value }));
+    try b.define(token_clause, try b.pure(try b.reference(b.parameter(token_clause, 1))));
+    const ignore_capability = try b.declare(&.{outer_capability}, unit, &.{}, &.{});
+    try b.define(ignore_capability, try b.pure(unit_value));
+    const unused = try b.variable(unit);
+    try b.define(token_body, try b.bind(unused, try b.term(.{ .perform = .{ .effect = token_effect, .capability = try b.reference(b.parameter(token_body, 0)), .payload = unit_value } }), try b.term(.{ .call = .{ .function = ignore_capability, .arguments = &.{try b.reference(b.parameter(outer_body, 0))} } })));
+    const token_handler = try b.handler(.{ .mode = .shallow, .input = unit, .answer = token_schema, .return_function = token_return, .clauses = &.{.{ .effect = token_effect, .function = token_clause, .resumption = token_schema }} });
+    const token_body_schema = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{token_capability}, .result = unit, .effects = &.{token_effect}, .capture_bound = &.{outer_capability} } } });
+    const dispose_helper = try b.declare(&.{token_schema}, unit, &.{token_effect}, &.{});
+    try b.define(dispose_helper, try b.term(.{ .yield_then = try b.bind(try b.variable(unit), try b.term(.{ .dispose = try b.reference(b.parameter(dispose_helper, 0)) }), try b.pure(unit_value)) }));
+    const token = try b.variable(token_schema);
+    const retained = try b.variable(integer);
+    try b.define(outer_body, try b.bind(token, try b.term(.{ .handle = .{ .handler = token_handler, .body = try b.lambda(token_body, token_body_schema) } }), try b.bind(retained, try b.pure(try b.constant(u64, 42)), try b.bind(try b.variable(unit), try b.term(.{ .call = .{ .function = dispose_helper, .arguments = &.{try b.reference(token)} } }), try b.pure(try b.reference(retained))))));
+    const outer_handler = try b.handler(.{ .mode = .deep, .input = integer, .answer = integer, .effects = &.{token_effect}, .return_function = outer_return, .clauses = &.{.{ .effect = outer_effect, .function = outer_clause, .resumption = outer_resumption }} });
+    const outer_body_schema = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{outer_capability}, .result = integer, .effects = &.{ outer_effect, token_effect } } } });
+    try b.define(entry, try b.term(.{ .handle = .{ .handler = outer_handler, .body = try b.lambda(outer_body, outer_body_schema) } }));
+    return b.module(entry, unit);
+}
+
+test "unused capability inside a shallow token does not invent disposal capture" {
+    var builder = h.source.Builder.init(a);
+    defer builder.deinit();
+    const module = try retainedTokenCapabilityFixture(&builder);
+    var compiled = try h.program.compile(a, module);
+    defer compiled.deinit();
+    const bytes = try a.alloc(u8, try d.program_image.encodedLength(compiled.program));
+    defer a.free(bytes);
+    _ = try compiled.encode(a, bytes);
+    var prepared = try k.Prepared.init(a, bytes);
+    defer prepared.deinit();
+    var resident = try k.Resident.start(a, &prepared, &.{});
+    defer release(&resident);
+    var checkpoint = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
+    defer checkpoint.deinit();
+    try std.testing.expect(checkpoint.outcome.record.record == .yielded);
+    var uninterrupted = try resident.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+    defer uninterrupted.deinit();
+    try std.testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, uninterrupted.outcome.record.record.completed);
+    var restored = try k.Resident.restore(a, &prepared, checkpoint.checkpoint.?.bytes());
+    defer release(&restored);
+    var finished = try restored.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+    defer finished.deinit();
+    try std.testing.expectEqualSlices(u8, uninterrupted.checkpoint.?.bytes(), finished.checkpoint.?.bytes());
+    var cancelled = try k.Resident.restore(a, &prepared, checkpoint.checkpoint.?.bytes());
+    defer release(&cancelled);
+    var stopped = try cancelled.publish(.{ .record = a }, .{ .cancel = .{ .text = "stop" } }, .{ .checkpoint = .receipt });
+    defer stopped.deinit();
+    try std.testing.expectEqualStrings("stop", stopped.outcome.record.record.cancelled.reason.text);
+    var restored_stop = try k.Resident.restore(a, &prepared, stopped.checkpoint.?.bytes());
+    defer release(&restored_stop);
 }
