@@ -160,3 +160,114 @@ test "same-descriptor attachment alias cannot defeat fresh delimiter discharge" 
     const wire = try d.state_image.serialize(alloc, mutated, .{ .allocate = alloc }, null);
     try std.testing.expectError(error.InvalidOwnership, k.Resident.restore(a, &prepared, wire.bytes.?));
 }
+
+fn retainedOuterCapabilityFixture(allocator: std.mem.Allocator, effectful: bool) !ir.Program {
+    var program = try nestedFixture(allocator);
+    const schemas = try allocator.dupe(p.Schema, program.schemas);
+    schemas[4].internal.resumption.capture_bound = &.{5};
+    schemas[6].internal.computation.effects = if (effectful) &.{0} else &.{};
+    const functions = try allocator.alloc(ir.Function, 7);
+    @memcpy(functions[0..6], program.functions);
+    functions[5].layout.slots = &.{ 5, 0, 5, 5, 0 };
+    functions[5].effects = if (effectful) &.{0} else &.{};
+    functions[6] = .{ .entry = 15, .inputs = &.{0}, .layout = .{ .slots = &.{5} }, .result = 5 };
+    const blocks = try allocator.alloc(ir.Block, 16);
+    @memcpy(blocks[0..13], program.blocks);
+    blocks[5].terminator.resume_value.next = .{ .block = 7, .assignments = &.{.{ .destination = 2, .source = .returned }} };
+    blocks[11].instructions = if (effectful) &.{
+        .{ .destination = 3, .opcode = .move, .operands = &.{2} },
+        .{ .destination = 2, .opcode = .move, .operands = &.{0} },
+    } else &.{};
+    blocks[11].terminator = .{ .yield_value = .{ .block = 13 } };
+    blocks[12] = .{ .function = 5, .instructions = if (effectful) &.{} else &.{.{ .destination = 4, .opcode = .constant, .immediate = 2 }}, .terminator = .{ .return_value = 4 } };
+    const pure_call: ir.Block = .{ .function = 5, .instructions = &.{}, .terminator = .{ .call = .{ .function = 6, .arguments = &.{0}, .next = .{ .block = 12, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } };
+    blocks[13] = if (effectful) .{ .function = 5, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .capability = 3, .payload = 1, .next = .{ .block = 14, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } } else pure_call;
+    blocks[14] = pure_call;
+    blocks[15] = .{ .function = 6, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    program.schemas = schemas;
+    program.functions = functions;
+    program.blocks = blocks;
+    program.constants = try allocator.dupe(p.Literal, &.{ program.constants[0], program.constants[1], .{ .schema = 0, .bytes = &.{ 9, 0, 0, 0, 0, 0, 0, 0 } } });
+    return program;
+}
+
+fn restoreRetainedOuterCapability(effectful: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const program = try retainedOuterCapabilityFixture(alloc, effectful);
+    var diagnostic: d.admission.Diagnostic = .{};
+    var admitted = d.activation_ownership.analyzeDiagnosed(a, program, &diagnostic) catch |err| {
+        std.debug.print("retained outer capability program rejected {t}: {any}\n", .{ err, diagnostic });
+        return err;
+    };
+    admitted.deinit();
+    const encoded = try alloc.alloc(u8, try d.program_image.encodedLength(program));
+    _ = try d.program_image.encode(alloc, program, encoded);
+    var prepared = try k.Prepared.init(a, encoded);
+    defer prepared.deinit();
+    var resident = try k.Resident.start(a, &prepared, &.{ 9, 0, 0, 0, 0, 0, 0, 0 });
+    defer release(&resident);
+    var checkpoint = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
+    defer checkpoint.deinit();
+    var state = try d.state_image.decodeGraph(a, checkpoint.checkpoint.?.bytes());
+    defer state.deinit();
+    try std.testing.expectEqual(d.process_state.Status.yielded, state.state.status);
+    const current = state.state.nodes[@intCast(state.state.roots.current.?.id)];
+    try std.testing.expectEqual(@as(p.Id, 13), current.record.control.block);
+    const inner = state.state.nodes[@intCast(current.record.control.evidence.?.id)].record.attachment;
+    const outer = state.state.nodes[@intCast(inner.outer.?.id)].record.attachment;
+    try std.testing.expect(inner.handler.id != outer.handler.id);
+    const inner_handler = state.state.nodes[@intCast(inner.handler.id)].record.handler;
+    const outer_handler = state.state.nodes[@intCast(outer.handler.id)].record.handler;
+    try std.testing.expectEqual(inner_handler.definition, outer_handler.definition);
+    try std.testing.expectEqual(@as(p.Id, 0), inner_handler.state[0].schema);
+    try std.testing.expectEqual(@as(p.Id, 0), outer_handler.state[0].schema);
+    try std.testing.expectEqual(@as(u64, 20), std.mem.readInt(u64, &inner_handler.state[0].body.scalar, .little));
+    try std.testing.expectEqual(@as(u64, 10), std.mem.readInt(u64, &outer_handler.state[0].body.scalar, .little));
+    var retained_outer = false;
+    for (current.activation.?.bindings) |binding| if (binding.slot == 0) {
+        try std.testing.expectEqual(inner.outer.?.id, binding.value.body.reference.id);
+        retained_outer = true;
+    };
+    try std.testing.expect(retained_outer);
+    var uninterrupted = try resident.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+    defer uninterrupted.deinit();
+    var expected: [8]u8 = undefined;
+    std.mem.writeInt(u64, &expected, ~@as(u64, if (effectful) 20 else 9), .little);
+    try std.testing.expectEqualSlices(u8, &expected, uninterrupted.outcome.record.record.completed);
+    d.state_admission.validateStable(a, program, state.state) catch |err| {
+        std.debug.print("retained outer capability checkpoint rejected {t}\n", .{err});
+        return err;
+    };
+    var restored = try k.Resident.restore(a, &prepared, checkpoint.checkpoint.?.bytes());
+    defer release(&restored);
+    var finished = try restored.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+    defer finished.deinit();
+    try std.testing.expectEqualSlices(u8, uninterrupted.outcome.record.record.completed, finished.outcome.record.record.completed);
+    if (effectful) {
+        var mutated = state.state;
+        const nodes = try alloc.dupe(d.process_state.Node, mutated.nodes);
+        mutated.nodes = nodes;
+        const frame = &nodes[@intCast(mutated.roots.current.?.id)];
+        const bindings = try alloc.dupe(d.process_state.Binding, frame.activation.?.bindings);
+        frame.activation.?.bindings = bindings;
+        var changed: usize = 0;
+        for (bindings) |*binding| if (binding.slot == 3) {
+            try std.testing.expectEqual(current.record.control.evidence.?.id, binding.value.body.reference.id);
+            binding.value.body.reference = inner.outer.?;
+            changed += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), changed);
+        const wire = try d.state_image.serialize(alloc, mutated, .{ .allocate = alloc }, null);
+        try std.testing.expectError(error.InvalidOwnership, k.Resident.restore(a, &prepared, wire.bytes.?));
+    }
+}
+
+test "effect-free nested body retains an outer capability without capturing its handler" {
+    try restoreRetainedOuterCapability(false);
+}
+
+test "effectful nested body dispatches locally while retaining an outer capability for an effect-free helper" {
+    try restoreRetainedOuterCapability(true);
+}
