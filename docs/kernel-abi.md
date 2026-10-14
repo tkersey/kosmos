@@ -121,9 +121,9 @@ ordinary standalone JS package and exercises its extracted public API and CLI.
 These commands do not publish a release or create a qualified-v1 bundle.
 
 See [verification boundaries](verification.md) for the native, independent source
-and optional JavaScript checks and browser setup. Current qualification uses
-Chromium Workers; the historical Firefox/Wasmtime and duplicate transfer campaigns
-are retired. Exact subjects and executed results belong to the current PR.
+and optional JavaScript checks and browser setup. Current qualification runs the
+same Worker/native transfer cases in Chromium and Firefox. Exact subjects and
+executed results belong to the current PR.
 
 The installation fixture checks initial working-capacity rejection and successful
 unchanged-input retry with an explicitly larger budget. It does not claim that

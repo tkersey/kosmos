@@ -59,7 +59,7 @@ jobs:
       - name: Install only the browser boundary's tools
         run: |
           npm ci --ignore-scripts --prefix test/current/browser-tools
-          node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium
+          node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
         run: zig build check build-runtime -Doptimize=safe --summary all
       - name: Package the tested ordinary JS consumer

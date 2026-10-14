@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome } from "../../src/embedding/index.mjs";
 
-const requiredExamples = ["lexical","deep","recursive","choices-all","choices-first","generator","state-local","state-shared","resource-scalar","resource-pair","answers","scoped-reader","writer-raise","scheduler","queens-dfs","queens-bfs","cell-order","nested","shallow","injection","indexed","abort-custody","unwind","reentrant","cloned","clause-abort","bounded-values","scalar-contracts","ownership","shallow-resumptions","shallow-injection","handle-operand-order","protect-operand-order","successor-state","clause-payload","yielding-cleanup","borrow-operands","cleanup-disposal","cleanup-disposal-running","cleanup-disposal-failure","cleanup-disposal-owned","product-projection"];
+const requiredExamples = ["lexical","deep","recursive","choices-all","choices-first","generator","state-local","state-shared","resource-scalar","resource-pair","answers","scoped-reader","writer-raise","scheduler","queens-dfs","queens-bfs","cell-order","nested","shallow","injection","indexed","abort-custody","unwind","reentrant","cloned","clause-abort","bounded-values","scalar-contracts","ownership","shallow-resumptions","shallow-injection","handle-operand-order","protect-operand-order","successor-state","clause-payload","yielding-cleanup","borrow-operands","cleanup-disposal","cleanup-disposal-running","cleanup-disposal-failure","cleanup-disposal-owned","product-projection","local-one-shot","local-multi-shot"];
 const visitedSources = new Set(), visitedImages = new Set();
 async function readFile(file, ...options) {
   const match = String(file).match(/\/source-([^/]+)\.(json|bpi3)$/);
@@ -336,6 +336,41 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
       assert.deepEqual(trace, oracle.trace);
     }
   }
+for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-multi-shot", 32, [15, 17]]]) {
+  const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
+  const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
+  const scalar = n => [n, 0, 0, 0, 0, 0, 0, 0];
+  const oracle = execute(source, [], [scalar(10), ...branches.map(() => [])]);
+  const expectedTrace = [{ kind: "Requested", identity: "local/producer", payload: [] },
+    ...branches.flatMap(n => [{ kind: "Yielded" }, { kind: "Requested", identity: "local/branch", payload: scalar(n) }])];
+  assert.deepEqual(oracle, { kind: "Completed", value: scalar(expected), trace: expectedTrace });
+  for (const mode of ["run", "advance"]) {
+    const trace = [], frontiers = [];
+    let step = await compare(mode, { image, initialArgs: new Uint8Array() });
+    while (step.kind !== "Completed") {
+      assert.ok(frontiers.length < 256, `${name}: inconclusive transition horizon`);
+      frontiers.push(step.state);
+      let response;
+      if (step.kind === "Yielded") trace.push({ kind: "Yielded" });
+      else if (step.kind === "Requested") {
+        const request = await decodeRequest(step.request);
+        trace.push({ kind: "Requested", identity: request.semanticIdentity, payload: [...request.payload] });
+        response = await encodeResult(step.request, Uint8Array.from(request.semanticIdentity === "local/producer" ? scalar(10) : []));
+      } else assert.equal(step.kind, "Progressed");
+      step = await compare(mode, { image, state: step.state, result: response });
+    }
+    assert.deepEqual([...step.value], scalar(expected));
+    assert.deepEqual(trace, expectedTrace);
+    // Every portable frontier is restored by both runtimes before cancellation,
+    // including captured tokens and each active multi-shot branch.
+    for (const state of frontiers) {
+      const cancelled = await compare("run", { image, state, cancel: "stop" });
+      assert.equal(cancelled.kind, "Cancelled");
+      assert.equal(cancelled.reason, "stop");
+      assert.deepEqual(cancelled.cleanupFailures, []);
+    }
+  }
+}
 assert.deepEqual([...visitedSources].sort(), requiredExamples.toSorted());
 assert.deepEqual([...visitedImages].sort(), requiredExamples.toSorted());
-console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: 42, observations }));
+console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: 44, observations }));

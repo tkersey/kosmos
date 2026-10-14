@@ -185,6 +185,11 @@ pub const Session = struct {
     /// Export without advancing, collecting or changing resident custody.
     /// restoreImage checks the matching Program and complete portable State.
     pub fn checkpoint(self: *Session, allocator: std.mem.Allocator) Error![]u8 {
+        return (try self.serializeCheckpoint(.{ .allocate = allocator }, null)).bytes.?;
+    }
+
+    /// Shared projection for digest-only, inline, and sidecar publications.
+    pub fn serializeCheckpoint(self: *Session, destination: data.state_image.Destination, hasher: ?*std.crypto.hash.sha2.Sha256) Error!data.state_image.Serialization {
         if (self.poisoned) return error.InvalidState;
         if (self.statistics) |statistics| statistics.state_projections +|= 1;
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
@@ -215,7 +220,7 @@ pub const Session = struct {
             .nodes = nodes,
             .blobs = self.store.blobs.items,
         });
-        return data.state_image.emitWith(self.allocator, public_state, allocator);
+        return data.state_image.serialize(self.allocator, public_state, destination, hasher);
     }
 
     pub fn continuation(self: *Session, block: p.Id, _: anytype, control: g.Control) Error!g.NodeRef {
@@ -325,11 +330,19 @@ pub const Session = struct {
     }
 
     pub fn pendingRequest(self: *Session, allocator: std.mem.Allocator) Error!Pending {
+        return self.pendingBinding(allocator, true);
+    }
+
+    /// Internal publication plumbing. A digest-only binding has no state bytes;
+    /// all modes derive their binding from the same canonical projection.
+    pub fn pendingBinding(self: *Session, allocator: std.mem.Allocator, materialize: bool) Error!Pending {
         if (self.poisoned or self.terminal != null or self.status != .parked) return error.InvalidState;
         if (self.statistics) |statistics| statistics.pending_bindings +|= 1;
         const operation = (try self.store.get(self.roots.pending.?)).pending;
         const effect = self.program.effects[@intCast(operation.effect)];
-        const state = try self.checkpoint(allocator);
+        var hasher = protocol.stateDigestHasher();
+        const serialized = try self.serializeCheckpoint(if (materialize) .{ .allocate = allocator } else .none, &hasher);
+        const state: []u8 = serialized.bytes orelse &.{};
         errdefer allocator.free(state);
         const contract = try self.prepared.contract(operation.effect);
         const payload_schema = try allocator.dupe(u8, contract.payload);
@@ -342,7 +355,7 @@ pub const Session = struct {
         errdefer allocator.free(payload);
         return .{ .allocator = allocator, .state = state, .request = try protocol.request(.{
             .program_identity = self.program_identity,
-            .pending_state_digest = protocol.stateDigest(state),
+            .pending_state_digest = hasher.finalResult(),
             .effect = operation.effect,
             .semantic_identity = name,
             .payload_schema = payload_schema,
@@ -353,7 +366,7 @@ pub const Session = struct {
 
     /// Recompute the pending binding before accepting an ERS3 response.
     pub fn answer(self: *Session, input: []const u8) Error!void {
-        var expected = try self.pendingRequest(self.allocator);
+        var expected = try self.pendingBinding(self.allocator, false);
         defer expected.deinit();
         try @import("response.zig").answer(self, input, expected.request.request_identity);
     }
@@ -799,7 +812,15 @@ pub const Session = struct {
                     cursor = region.return_to;
                     continue;
                 },
-                .continuation => try self.resumeContinuation(reference, value),
+                .continuation => |saved| {
+                    // A cleanup clause may return ownership while abandoning
+                    // a token. Disposal binds no answer, so close that returned
+                    // ownership before advancing its continuation.
+                    if (value.body == .owned and self.program.blocks[@intCast(saved.source_block)].terminator == .dispose)
+                        try @import("unwind.zig").begin(self, .abandoned, reference, reference, &.{value})
+                    else
+                        try self.resumeContinuation(reference, value);
+                },
                 .injection => |injection| try self.resumeContinuation(injection.continuation, value),
                 .protection => |protection| try @import("unwind.zig").begin(self, .{ .normal = value }, reference, protection.return_to, &.{}),
                 .cleanup_return => try @import("unwind.zig").returned(self, reference),
