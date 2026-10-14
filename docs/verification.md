@@ -37,7 +37,7 @@ representable sizes; this does not expand the JS/WASM physical input domain.
 The optional foreign-environment roots have distinct consumers:
 
 - `check-source`: the independent Horos higher-order interpreter versus actual
-  compiled native/WASM execution for 44 source examples, including all 42
+  compiled native/WASM execution for 47 source examples, including all 42
   historical examples.
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
@@ -143,3 +143,30 @@ support no tail-latency claim. Process-allocator reuse, power state and load aff
 small timings. Snapshot and publication perform different work; their timings
 are not a before/after comparison. These measurements establish local costs and
 the serialization/memory tradeoff, not a product or provider speedup.
+
+## Stateful service composition
+
+The Horos paper witness uses the existing generator and protected region/cell
+mechanisms. `stable_source.zig` runs empty, two-request, overflow, cancellation,
+swapped-reply and two-instance scenarios both uninterrupted and restored at
+yields. It checks request ids, prior counter values, final counters, finalizer
+multiplicity and that a next command cannot enter before the prior reply. Two
+equal-typed service instances exist concurrently and each returns prior zero.
+
+A one-step native witness also checks the control positions used by Horos's
+interaction projection: local perform enters its clause atomically, and yield
+installs its successor before suspending. Restored checkpoints cancel successfully
+at both positions. This distinguishes actual runtime prefixes from extra paths
+introduced by a conservative analysis.
+
+`source_agreement.mjs` compares actual native/WASM execution and canonical state
+transfer with the independent authored-source oracle. For the single-service
+fixtures it additionally checks that projected native traces belong to Horos's
+implementation-checked finite interaction graph. The graph is optional test
+output, never runtime admission or a new state format. Existing source fixtures
+continue to discriminate shared aliases from distinct owners; existing publication
+checks retain issuer/generation/consumed-receipt and allocation-failure guarantees.
+
+These checks establish the exercised finite traces. Fair scheduling, arrival of
+external outcomes and sufficient resources remain premises of completion. Legal
+multi-shot continuations do not authorize duplicate external settlement.

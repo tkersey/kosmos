@@ -9,6 +9,7 @@ import { Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome } from 
 
 const requiredExamples = ["lexical","deep","recursive","choices-all","choices-first","generator","state-local","state-shared","resource-scalar","resource-pair","answers","scoped-reader","writer-raise","scheduler","queens-dfs","queens-bfs","cell-order","nested","shallow","injection","indexed","abort-custody","unwind","reentrant","cloned","clause-abort","bounded-values","scalar-contracts","ownership","shallow-resumptions","shallow-injection","handle-operand-order","protect-operand-order","successor-state","clause-payload","yielding-cleanup","borrow-operands","cleanup-disposal","cleanup-disposal-running","cleanup-disposal-failure","cleanup-disposal-owned","product-projection","local-one-shot","local-multi-shot"];
 const visitedSources = new Set(), visitedImages = new Set();
+requiredExamples.push("stateful-service", "swapped-service-replies", "paired-services");
 async function readFile(file, ...options) {
   const match = String(file).match(/\/source-([^/]+)\.(json|bpi3)$/);
   if (match) (match[2] === "json" ? visitedSources : visitedImages).add(match[1]);
@@ -17,6 +18,7 @@ async function readFile(file, ...options) {
 
 const [kernelPath, nativePath, fixtures, oraclePath] = process.argv.slice(2);
 const { execute } = await import(pathToFileURL(oraclePath).href);
+const { containsServiceTrace } = await import(new URL("./service_interactions.mjs", pathToFileURL(oraclePath)));
 const kernel = new Uint8Array(await readFile(kernelPath));
 const host = await Kernel.create({ bytes: kernel, expectedSha256: createHash("sha256").update(kernel).digest("hex") });
 host.setLimits({ input: 8 << 20, working: 64 << 20, output: 8 << 20 });
@@ -53,6 +55,57 @@ async function compare(mode, input) {
 }
 
 const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json", import.meta.url), "utf8"));
+  {
+    const word = value => Array.from({ length: 8 }, (_, i) => Number((BigInt(value) >> BigInt(8 * i)) & 255n));
+    const command = (id, delta) => [0, ...word(id), ...word(delta)];
+    for (const name of ["stateful-service", "swapped-service-replies", "paired-services"]) {
+      const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
+      const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
+      const analysis = name === "paired-services" ? null : JSON.parse(await read(join(fixtures, `source-${name}.analysis.json`), "utf8"));
+      for (const scenario of (name === "paired-services" ? ["requests"] : ["empty", "requests", "overflow", "cancelled"])) {
+        const responses = name === "paired-services" ? [command(1, 1), [], [1], [], command(2, 1), [], [1], []] : scenario === "empty" ? [[1], []]
+          : scenario === "cancelled" ? [command(1, 1), []]
+          : scenario === "overflow" ? [command(1, 1), [], command(2, (1n << 64n) - 1n), []]
+          : [command(1, 1), [], command(2, 1), [], [1], []];
+        const oracle = execute(source, [], responses, scenario === "cancelled" ? [{ at: 1, reason: "stop" }] : []);
+        const final = scenario === "empty" ? 0 : scenario === "requests" ? 2 : 1;
+        const expectedReplies = scenario === "requests" ? 2 : scenario === "overflow" ? 1 : 0;
+        for (const mode of ["run", "advance"]) {
+          let step = await compare(mode, { image, initialArgs: new Uint8Array() });
+          const trace = [];
+          let requests = 0, replies = 0, releases = 0;
+          while (["Progressed", "Yielded", "Requested"].includes(step.kind)) {
+            let result, cancel;
+            if (step.kind === "Yielded") {
+              trace.push({ kind: "Yielded" });
+              if (scenario === "cancelled") cancel = "stop";
+            } else if (step.kind === "Requested") {
+              const request = await decodeRequest(step.request);
+              trace.push({ kind: "Requested", identity: request.semanticIdentity, payload: [...request.payload] });
+              if (request.semanticIdentity === "example/service-reply") {
+                const id = name === "swapped-service-replies" ? (replies + 1) ^ 3 : replies + 1;
+                assert.deepEqual([...request.payload], [...word(id), ...word(name === "paired-services" ? 0 : replies)]);
+                replies++;
+              } else if (request.semanticIdentity === "example/service-finalize") {
+                assert.deepEqual([...request.payload], word(name === "paired-services" ? 1 : final));
+                releases++;
+              } else assert.equal(request.semanticIdentity, "example/service-command");
+              assert.ok(requests < responses.length, "unexpected extra service request");
+              result = await encodeResult(step.request, Uint8Array.from(responses[requests++]));
+            }
+            step = await compare(mode, { image, state: step.state, result, cancel });
+          }
+          assert.equal(step.kind, oracle.kind);
+          if (step.value !== undefined) assert.deepEqual([...step.value], oracle.value);
+          assert.deepEqual(trace, oracle.trace);
+          if (analysis) assert.ok(containsServiceTrace(analysis, trace, responses), "native/WASM trace absent from interaction abstraction");
+          assert.equal(replies, expectedReplies);
+          assert.equal(releases, name === "paired-services" ? 2 : 1);
+          if (scenario === "cancelled") assert.equal(step.reason, "stop");
+        }
+      }
+    }
+  }
   for (const { name, expected } of cleanup.entries) {
     const source = await readFile(join(fixtures, `source-${name}.json`));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
@@ -373,4 +426,4 @@ for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-
 }
 assert.deepEqual([...visitedSources].sort(), requiredExamples.toSorted());
 assert.deepEqual([...visitedImages].sort(), requiredExamples.toSorted());
-console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: 44, observations }));
+console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: requiredExamples.length, observations }));
