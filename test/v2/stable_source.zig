@@ -2078,6 +2078,61 @@ test "stable generator resumes private state and closes its retained cleanup" {
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
 }
 
+test "interaction phases follow atomic dispatch and the installed yield successor" {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    const module = try source.examples.deep(&builder);
+    const clause = builder.handlers.items[0].clauses[0].function;
+    const body = builder.functions.items[@intCast(clause)].body.?;
+    builder.functions.items[@intCast(clause)].body = try builder.term(.{ .yield_then = body });
+    var compiled = try source.lower(testing.allocator, builder.module(module.entry, module.failure));
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var session = try Session.initImage(testing.allocator, image, &.{});
+    defer session.deinit();
+    var dispatched = false;
+    var yielded = false;
+    for (0..128) |_| {
+        const current = session.roots.current orelse return error.TestUnexpectedResult;
+        const control = (try session.store.get(current)).control;
+        const frame = try session.frames.get(current.id);
+        const block = session.program.blocks[@intCast(control.block)];
+        const at_control = frame.position == block.instructions.len;
+        const local = at_control and block.terminator == .perform and block.terminator.perform.capability != null;
+        const yielding = at_control and block.terminator == .yield_value;
+        const result = try session.run(1);
+        if (local or yielding) {
+            const next = (try session.store.get(session.roots.current.?)).control;
+            if (local) {
+                try testing.expect(result == .progressed);
+                try testing.expect(session.roots.pending == null);
+                const target = session.program.handlers[0].clauses[0].function;
+                try testing.expectEqual(target, session.program.blocks[@intCast(next.block)].function);
+                try testing.expect(next.block != control.block);
+                dispatched = true;
+            } else {
+                try testing.expect(result == .yielded);
+                try testing.expectEqual(block.terminator.yield_value.block, next.block);
+                yielded = true;
+            }
+            // The checkpoint exposes the actual cancellable control position,
+            // independently of the Horos monitor's event projection.
+            const checkpoint = try session.checkpoint(testing.allocator);
+            defer testing.allocator.free(checkpoint);
+            var cancelled = try Session.restoreImage(testing.allocator, image, checkpoint);
+            defer cancelled.deinit();
+            const restored = (try cancelled.store.get(cancelled.roots.current.?)).control;
+            try testing.expectEqual(next.block, restored.block);
+            try cancelled.cancel(.{ .text = "phase-check" });
+            try testing.expect(try drive(&cancelled, null) == .cancelled);
+        }
+        if (yielded) break;
+        try testing.expect(result == .progressed);
+    }
+    try testing.expect(dispatched and yielded);
+}
+
 test "stateful service preserves labeled replies and exclusive turns through restore" {
     inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow, .paired }) |mode| {
         for ([_]bool{ false, true }) |restore| try serviceWitness(mode, restore);

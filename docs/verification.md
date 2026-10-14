@@ -153,6 +153,12 @@ yields. It checks request ids, prior counter values, final counters, finalizer
 multiplicity and that a next command cannot enter before the prior reply. Two
 equal-typed service instances exist concurrently and each returns prior zero.
 
+A one-step native witness also checks the control positions used by Horos's
+interaction projection: local perform enters its clause atomically, and yield
+installs its successor before suspending. Restored checkpoints cancel successfully
+at both positions. This distinguishes actual runtime prefixes from extra paths
+introduced by a conservative analysis.
+
 `source_agreement.mjs` compares actual native/WASM execution and canonical state
 transfer with the independent authored-source oracle. For the single-service
 fixtures it additionally checks that projected native traces belong to Horos's
