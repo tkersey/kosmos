@@ -2079,15 +2079,15 @@ test "stable generator resumes private state and closes its retained cleanup" {
 }
 
 test "stateful service preserves labeled replies and exclusive turns through restore" {
-    inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow }) |mode| {
+    inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow, .paired }) |mode| {
         for ([_]bool{ false, true }) |restore| try serviceWitness(mode, restore);
     }
 }
 
-fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, overflow }, restore: bool) !void {
+fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, overflow, paired }, restore: bool) !void {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    const module = if (mode == .swapped) try source.examples.swappedServiceReplies(&builder) else try source.examples.statefulService(&builder);
+    const module = if (mode == .paired) try source.examples.pairedServices(&builder) else if (mode == .swapped) try source.examples.swappedServiceReplies(&builder) else try source.examples.statefulService(&builder);
     var compiled = try source.lower(testing.allocator, module);
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
@@ -2101,7 +2101,7 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
     const final: u64 = switch (mode) {
         .empty => 0,
         .cancelled, .overflow => 1,
-        .requests, .swapped => 2,
+        .requests, .swapped, .paired => 2,
     };
     while (true) {
         const result = try drive(&session, null);
@@ -2129,7 +2129,7 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
                 if (std.mem.eql(u8, identity, "example/service-command")) {
                     // Each admitted request has replied before another is admitted.
                     try testing.expectEqual(commands, replies);
-                    if (mode == .empty or commands == 2) {
+                    if (mode == .empty or (if (mode == .paired) commands == releases + 1 else commands == 2)) {
                         try answerWithValue(&session, &.{1}); // close
                     } else {
                         var request: [17]u8 = undefined;
@@ -2142,7 +2142,7 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
                 } else if (std.mem.eql(u8, identity, "example/service-reply")) {
                     var expected: [16]u8 = undefined;
                     std.mem.writeInt(u64, expected[0..8], if (mode == .swapped) (replies + 1) ^ 3 else replies + 1, .little);
-                    std.mem.writeInt(u64, expected[8..16], replies, .little);
+                    std.mem.writeInt(u64, expected[8..16], if (mode == .paired) 0 else replies, .little);
                     try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
                     replies += 1;
                     try answerWithValue(&session, &.{});
@@ -2150,13 +2150,13 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
                     try testing.expectEqualStrings("example/service-finalize", identity);
                     releases += 1;
                     var expected: [8]u8 = undefined;
-                    std.mem.writeInt(u64, &expected, final, .little);
+                    std.mem.writeInt(u64, &expected, if (mode == .paired) 1 else final, .little);
                     try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
                     try answerWithValue(&session, &.{});
                 }
             },
             .completed => |value| {
-                try testing.expect(mode == .empty or mode == .requests or mode == .swapped);
+                try testing.expect(mode == .empty or mode == .requests or mode == .swapped or mode == .paired);
                 var expected: [8]u8 = undefined;
                 std.mem.writeInt(u64, &expected, final, .little);
                 try testing.expectEqualSlices(u8, &expected, try session.bytes(&value));
@@ -2173,11 +2173,11 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
             else => return error.TestUnexpectedResult,
         }
     }
-    try testing.expectEqual(@as(usize, 1), releases);
+    try testing.expectEqual(@as(usize, if (mode == .paired) 2 else 1), releases);
     try testing.expectEqual(@as(usize, switch (mode) {
         .empty, .cancelled => 0,
         .overflow => 1,
-        .requests, .swapped => 2,
+        .requests, .swapped, .paired => 2,
     }), replies);
 }
 
