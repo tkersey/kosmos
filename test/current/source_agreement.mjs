@@ -61,7 +61,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     for (const name of ["stateful-service", "swapped-service-replies", "paired-services"]) {
       const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
       const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
-      const analysis = name === "paired-services" ? null : JSON.parse(await readFile(join(fixtures, `source-${name}.analysis.json`), "utf8"));
+      const analysis = name === "paired-services" ? null : JSON.parse(await read(join(fixtures, `source-${name}.analysis.json`), "utf8"));
       for (const scenario of (name === "paired-services" ? ["requests"] : ["empty", "requests", "overflow", "cancelled"])) {
         const responses = name === "paired-services" ? [command(1, 1), [], [1], [], command(2, 1), [], [1], []] : scenario === "empty" ? [[1], []]
           : scenario === "cancelled" ? [command(1, 1), []]
