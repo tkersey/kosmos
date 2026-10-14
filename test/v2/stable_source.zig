@@ -2078,6 +2078,109 @@ test "stable generator resumes private state and closes its retained cleanup" {
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
 }
 
+test "stateful service preserves labeled replies and exclusive turns through restore" {
+    inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow }) |mode| {
+        for ([_]bool{ false, true }) |restore| try serviceWitness(mode, restore);
+    }
+}
+
+fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, overflow }, restore: bool) !void {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    const module = if (mode == .swapped) try source.examples.swappedServiceReplies(&builder) else try source.examples.statefulService(&builder);
+    var compiled = try source.lower(testing.allocator, module);
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var session = try Session.initImage(testing.allocator, image, &.{});
+    defer session.deinit();
+    var commands: usize = 0;
+    var replies: usize = 0;
+    var releases: usize = 0;
+    var yields: usize = 0;
+    const final: u64 = switch (mode) {
+        .empty => 0,
+        .cancelled, .overflow => 1,
+        .requests, .swapped => 2,
+    };
+    while (true) {
+        const result = try drive(&session, null);
+        switch (result) {
+            .yielded => {
+                yields += 1;
+                // The next command cannot be requested while this turn is held.
+                try testing.expectEqual(commands, yields);
+                try testing.expectEqual(replies + 1, commands);
+                if (restore) {
+                    const checkpoint = try session.checkpoint(testing.allocator);
+                    defer testing.allocator.free(checkpoint);
+                    var resumed = try Session.restoreImage(testing.allocator, image, checkpoint);
+                    errdefer resumed.deinit();
+                    const roundtrip = try resumed.checkpoint(testing.allocator);
+                    defer testing.allocator.free(roundtrip);
+                    try testing.expectEqualSlices(u8, checkpoint, roundtrip);
+                    session.deinit();
+                    session = resumed;
+                }
+                if (mode == .cancelled) try session.cancel(.{ .text = "stop" }) else try session.resumeYield();
+            },
+            .requested => |pending| {
+                const identity = session.program.effects[@intCast(pending.effect)].identity;
+                if (std.mem.eql(u8, identity, "example/service-command")) {
+                    // Each admitted request has replied before another is admitted.
+                    try testing.expectEqual(commands, replies);
+                    if (mode == .empty or commands == 2) {
+                        try answerWithValue(&session, &.{1}); // close
+                    } else {
+                        var request: [17]u8 = undefined;
+                        request[0] = 0; // serve(id, delta)
+                        std.mem.writeInt(u64, request[1..9], commands + 1, .little);
+                        std.mem.writeInt(u64, request[9..17], if (mode == .overflow and commands == 1) std.math.maxInt(u64) else 1, .little);
+                        commands += 1;
+                        try answerWithValue(&session, &request);
+                    }
+                } else if (std.mem.eql(u8, identity, "example/service-reply")) {
+                    var expected: [16]u8 = undefined;
+                    std.mem.writeInt(u64, expected[0..8], if (mode == .swapped) (replies + 1) ^ 3 else replies + 1, .little);
+                    std.mem.writeInt(u64, expected[8..16], replies, .little);
+                    try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
+                    replies += 1;
+                    try answerWithValue(&session, &.{});
+                } else {
+                    try testing.expectEqualStrings("example/service-finalize", identity);
+                    releases += 1;
+                    var expected: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &expected, final, .little);
+                    try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
+                    try answerWithValue(&session, &.{});
+                }
+            },
+            .completed => |value| {
+                try testing.expect(mode == .empty or mode == .requests or mode == .swapped);
+                var expected: [8]u8 = undefined;
+                std.mem.writeInt(u64, &expected, final, .little);
+                try testing.expectEqualSlices(u8, &expected, try session.bytes(&value));
+                break;
+            },
+            .failed => {
+                try testing.expect(mode == .overflow);
+                break;
+            },
+            .cancelled => {
+                try testing.expect(mode == .cancelled);
+                break;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), releases);
+    try testing.expectEqual(@as(usize, switch (mode) {
+        .empty, .cancelled => 0,
+        .overflow => 1,
+        .requests, .swapped => 2,
+    }), replies);
+}
+
 test "stable successor return clauses retain older capability and cell references" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
