@@ -54,6 +54,84 @@ fn context(guest: [32]u8) source.specialize.Context {
     };
 }
 
+test "an authored scalar rule change reaches generic and regenerated specialized execution" {
+    const image = try @import("semantic/step_tests.zig").guestImage();
+    defer a.free(image);
+    const admitted = try data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    const program = try projection.programBytes(a, admitted);
+    defer a.free(program);
+    var keys: [2][32]u8 = undefined;
+    inline for (.{ false, true }) |changed| {
+        inline for (.{ false, true }) |staged| {
+            var b = source.Builder.init(a);
+            defer b.deinit();
+            const d = if (staged) try service.defineStaged(&b) else try service.define(&b);
+            const m = try machines.define(&b);
+            if (changed) {
+                // Change the actual authored guest rule, before lowering or
+                // specialization. This test-only interpretation makes guest add
+                // compute xor; every other scalar rule keeps its original body.
+                // Neither the guest image nor native base operations change.
+                const scalar = try @import("semantic/scalar.zig").define(&b);
+                const e = try Author.init(&b);
+                const original = b.functions.items[@intCast(scalar.binary_raw)].body.?;
+                const replacement = try b.pure(try e.variant(scalar.raw_result, 0, try e.binary(.integer_bit_xor, try e.param(scalar.binary_raw, 2), try e.param(scalar.binary_raw, 3))));
+                b.functions.items[@intCast(scalar.binary_raw)].body = try e.when(
+                    try e.binary(.equal, try b.primitive(try b.scalar(u32), .enum_tag, &.{try e.param(scalar.binary_raw, 0)}, 0), try b.constant(u32, @backingInt(data.program.Opcode.integer_add))),
+                    replacement,
+                    original,
+                );
+            }
+            const module = b.module(d.entry, try b.scalar(void));
+            var selected_context = context(admitted.identity());
+            var source_hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var source_writer: data.wire.Writer = .{ .hasher = &source_hash };
+            try data.record.write(source.ast.Module, module, &source_writer);
+            selected_context.core = source_hash.finalResult();
+            const request: source.specialize.Request = .{
+                .function = d.entry,
+                .arguments = &.{ .{ .known = .{ .schema = m.program, .bytes = program } }, .dynamic },
+                .context = selected_context,
+                .policy = .{ .work = 8_000_000, .keys_per_function = 128, .depth = 1024 },
+            };
+            var specialized: ?source.specialize.Output = if (staged) try source.specialize.specialize(a, module, request) else null;
+            defer if (specialized) |*output| output.deinit();
+            if (specialized) |*output| {
+                try source.specialize.validate(a, module, request, output);
+                keys[@intFromBool(changed)] = output.key;
+            }
+            var prepared = try prepare(if (specialized) |*output| output.module() else module);
+            defer prepared.deinit();
+            const owner = try prepared.acquire();
+            defer owner.release();
+            for ([_]u64{ 17, 37, 100 }) |input| {
+                const initial = try projection.encode(service.Initial, a, .{ .arguments = &std.mem.toBytes(input) });
+                defer a.free(initial);
+                const arguments = if (staged) try a.dupe(u8, initial) else try std.mem.concat(a, u8, &.{ program, initial });
+                defer a.free(arguments);
+                var session = try base.Session.start(a, &prepared, arguments, .{ .effects = owner.admitted().program().effects });
+                defer session.deinit();
+                var first = try exchange.event(&session);
+                defer first.deinit();
+                try std.testing.expect(first.value == .cut);
+                try exchange.send(&session, .{ .advance = .{ .control = .none, .quantum = 100 } });
+                var cut = try exchange.event(&session);
+                defer cut.deinit();
+                try std.testing.expect(cut.value == .cut and cut.value.cut.status == .completed);
+                try exchange.send(&session, .observe);
+                var observed = try exchange.event(&session);
+                defer observed.deinit();
+                try std.testing.expect(observed.value == .observation and observed.value.observation == .completed);
+                const expected = if (changed) input else (input + 7) ^ 7;
+                try std.testing.expectEqualSlices(u8, &std.mem.toBytes(expected), observed.value.observation.completed);
+                try std.testing.expect(input != (input + 7) ^ 7);
+            }
+        }
+    }
+    try std.testing.expect(!std.mem.eql(u8, &keys[0], &keys[1]));
+}
+
 test "specialized scalar sequence retains raw slots without intermediate byte packing" {
     const image = try @import("semantic/step_tests.zig").guestImage();
     defer a.free(image);
