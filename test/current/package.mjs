@@ -20,7 +20,7 @@ try {
   execFileSync("tar", ["-xf", join(scratch, packed.filename), "-C", directory]);
   const root = join(directory, "package");
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.version, "8.0.0");
+  assert.equal(manifest.version, "9.0.0");
   assert.deepEqual(Object.keys(manifest.exports), ["."]);
   const kosmos = await import(pathToFileURL(join(root, manifest.exports["."])));
   assert.equal(kosmos.packageVersion, manifest.version);
