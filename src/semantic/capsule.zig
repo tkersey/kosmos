@@ -41,6 +41,12 @@ pub const Record = struct {
 };
 pub const Envelope = struct { record: Record, checkpoint: []const u8, initial: []const u8, command: []const u8 };
 
+/// Decode the retained private command for an enclosing owner to check against
+/// its durable accepted control. This grants no execution or response authority.
+pub fn readCommand(a: std.mem.Allocator, bytes: []const u8) !projection.Owned(service.Command) {
+    return projection.decode(service.Command, a, bytes);
+}
+
 pub fn reference(bytes: []const u8) Reference {
     return .{ .digest = artifact.digest(bytes), .bytes = bytes.len };
 }
