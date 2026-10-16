@@ -117,6 +117,10 @@ authored evaluator. This is a physical cost increase; guest semantics and ABI3
 formats do not change. Capacity-failure checks still lower arenas to zero or to
 measured live usage. Native allocation counters are not RSS measurements.
 
+[Semantic economy measurements](semantic-economy.md) report matched native,
+bootstrap, generic, specialized and instrumented runs, including construction,
+validation, publication, restore, memory and amortization costs.
+
 These mechanisms do not by themselves establish Protean workspace integration,
 bilateral mobility, all platform qualification, useful end-to-end specialization
 economics or observed model effectiveness. Those require their owning integration

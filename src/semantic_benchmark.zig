@@ -12,7 +12,7 @@ const artifact = @import("semantic/artifact.zig");
 const Author = @import("semantic/author.zig").Author;
 const protocol = data.invocation;
 
-const Workload = enum { scalar, dynamic_loop, structured, repeated_calls, higher_order, handlers, multi_shot, long_cleanup, retained_bytes };
+const Workload = enum { scalar, scalar_chain, dynamic_loop, structured, repeated_calls, higher_order, handlers, multi_shot, long_cleanup, retained_bytes };
 const Step = struct { control: protocol.Control, checkpoint: []const u8, outcome: []const u8 };
 const Costs = struct {
     start_ns: i96 = 0,
@@ -66,6 +66,16 @@ fn image(a: std.mem.Allocator, kind: Workload) ![]u8 {
             try b.define(entry, try b.pure(try e.binary(.integer_bit_xor, try e.param(entry, 0), try b.constant(u64, 0x12345678))));
             break :blk b.module(entry, e.unit);
         },
+        .scalar_chain => blk: {
+            const entry = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});
+            var value = try e.param(entry, 0);
+            for (0..24) |i| {
+                value = try e.binary(.integer_add, value, try b.constant(u64, 17 + i));
+                value = try e.binary(.integer_bit_xor, value, try b.constant(u64, 0x12345678 + i));
+            }
+            try b.define(entry, try b.pure(value));
+            break :blk b.module(entry, e.unit);
+        },
         .structured => blk: {
             const pair = try b.schema(.{ .product = &.{ e.integer, e.integer } });
             const entry = try b.declare(&.{pair}, pair, &.{}, &.{});
@@ -114,7 +124,7 @@ fn image(a: std.mem.Allocator, kind: Workload) ![]u8 {
 fn arguments(a: std.mem.Allocator, kind: Workload, sample: usize) ![]u8 {
     const seed: u64 = 41 + @as(u64, @intCast(sample)) * 19;
     return switch (kind) {
-        .scalar, .higher_order => a.dupe(u8, &std.mem.toBytes(seed)),
+        .scalar, .scalar_chain, .higher_order => a.dupe(u8, &std.mem.toBytes(seed)),
         .dynamic_loop, .repeated_calls => a.dupe(u8, &(@as([16]u8, std.mem.toBytes(@as(u64, 16 + sample * 16)) ++ std.mem.toBytes(seed)))),
         .structured => a.dupe(u8, &(std.mem.toBytes(seed) ++ std.mem.toBytes(seed + 9))),
         .long_cleanup => a.dupe(u8, &std.mem.toBytes(@as(u64, 8 + sample * 8))),
