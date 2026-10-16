@@ -301,6 +301,11 @@ pub fn For(comptime runtime: type) type {
                 defer self.leave();
                 return binding(state);
             }
+            pub fn runtimeBytes(self: *Resident, a: std.mem.Allocator) ![]u8 {
+                const state = try self.enter();
+                defer self.leave();
+                return @import("../semantic/projection.zig").encode(@import("../semantic/artifact.zig").Bundle, a, state.session.driver.selected.content.value);
+            }
             pub fn realize(self: *Resident, expected: capsules.Binding, target: *const @import("../semantic/artifact.zig").Admitted, provenance: capsules.Provenance, publisher: capsules.SwitchOwner) !capsules.SwitchDecision {
                 const state = try self.enter();
                 defer self.leave();

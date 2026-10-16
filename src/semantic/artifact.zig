@@ -138,6 +138,11 @@ pub const Admitted = struct {
         const core = try self.acquire();
         return .{ .core = core, .content = core.content, .program = core.program, .helpers = core.helpers, .identity = core.identity };
     }
+    pub fn encode(self: *const Admitted, a: std.mem.Allocator) ![]u8 {
+        const core = try self.acquire();
+        defer core.release();
+        return projection.encode(Bundle, a, core.content.value);
+    }
     pub fn bridge(self: *const Admitted) profile.Bridge {
         return .{ .effects = self.program.program().effects };
     }

@@ -45,6 +45,16 @@ pub fn reference(bytes: []const u8) Reference {
     return .{ .digest = artifact.digest(bytes), .bytes = bytes.len };
 }
 
+/// Read-only content inspection. This supplies no custody or execution grant.
+pub fn read(a: std.mem.Allocator, bytes: []const u8) !projection.Owned(Envelope) {
+    var decoded = try projection.decode(Envelope, a, bytes);
+    errdefer decoded.deinit();
+    const canonical = try projection.encode(Envelope, a, decoded.value);
+    defer a.free(canonical);
+    if (!std.mem.eql(u8, bytes, canonical) or !std.mem.eql(u8, decoded.value.record.contract, identity)) return error.InvalidCapsule;
+    return decoded;
+}
+
 pub fn publish(a: std.mem.Allocator, pump: *driver.Driver, kind: Kind, provenance: Provenance) ![]u8 {
     if (pump.closed) return error.InvalidState;
     if (kind == .guest_cut and pump.operation != null) return error.GuestCutUnavailable;
