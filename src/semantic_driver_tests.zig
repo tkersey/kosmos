@@ -48,6 +48,87 @@ fn complete(pump: *driver.Driver) !projection.Owned(@import("semantic/service.zi
     };
 }
 
+test "approved source instrumentation preserves cuts and blocks publication without a guest failure" {
+    const compiler = @import("semantic/compiler.zig");
+    const facade = @import("semantic/session.zig");
+    const bytes = try compiler.compile(a, .{ .horos_package = "test-exact-horos", .hooks = .{ .control = true, .storage = true } });
+    defer a.free(bytes);
+    var selected = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer selected.deinit();
+    try compiler.validate(a, &selected);
+    const image = try @import("semantic/step_tests.zig").guestImage();
+    defer a.free(image);
+    try switchRealizations(image, &selected);
+    var prepared = try facade.Prepared.initWithRuntime(a, image, &selected);
+    defer prepared.deinit();
+    var generic = try facade.Prepared.init(a, image);
+    defer generic.deinit();
+    const input = std.mem.toBytes(@as(u64, 37));
+    var instrumented = try facade.Session.start(a, &prepared, &input);
+    defer instrumented.deinit();
+    var plain = try facade.Session.start(a, &generic, &input);
+    defer plain.deinit();
+    try std.testing.expect(plain.trace() == null);
+    for (0..6) |_| {
+        _ = try instrumented.run(1);
+        _ = try plain.run(1);
+        const actual = try instrumented.checkpoint(a);
+        defer a.free(actual);
+        const expected = try plain.checkpoint(a);
+        defer a.free(expected);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+        const trace = instrumented.trace().?;
+        try std.testing.expectEqualDeep(selected.identity, trace.realization);
+        try std.testing.expectEqualDeep(prepared.guest.core.?.admitted().identity(), trace.guest);
+        try std.testing.expect(trace.trace.storage.?.node_slots != 0);
+        try std.testing.expectEqual(instrumented.driver.last_cut.?.status, trace.trace.control.?.status);
+        try std.testing.expect(plain.trace() == null);
+    }
+    std.debug.print("instrumentation_witness guest_steps=6 generic_base={d} instrumented_base={d} generic_artifact_bytes={d} instrumented_artifact_bytes={d}\n", .{ plain.driver.outer.transitions, instrumented.driver.outer.transitions, packaged.bytes.len, bytes.len });
+    {
+        var builder = source.Builder.init(a);
+        defer builder.deinit();
+        var lowered = try source.lower(a, try source.examples.resourceScalar(&builder));
+        defer lowered.deinit();
+        const effect_image = try a.alloc(u8, try data.program_image.encodedLength(lowered.program));
+        defer a.free(effect_image);
+        _ = try lowered.encode(a, effect_image);
+        var effect_prepared = try facade.Prepared.initWithRuntime(a, effect_image, &selected);
+        defer effect_prepared.deinit();
+        var effect_session = try facade.Session.start(a, &effect_prepared, &.{});
+        defer effect_session.deinit();
+        const observed = try effect_session.run(100);
+        try std.testing.expect(observed == .requested);
+        try std.testing.expectEqual(observed.requested.effect, effect_session.trace().?.trace.control.?.effect.?);
+        try std.testing.expectEqual(.parked, effect_session.trace().?.trace.control.?.status);
+    }
+    var resident = try facade.Resident.start(a, &prepared, &input);
+    defer if (resident.live) {
+        const checkpoint = resident.takeCheckpoint(a) catch unreachable;
+        a.free(checkpoint);
+    };
+    const before = try resident.checkpoint(a);
+    defer a.free(before);
+    var no_space: [0]u8 = .{};
+    try std.testing.expectError(error.TracePublicationBlocked, resident.publish(.{ .record = a }, .none, .{ .quantum = 3, .checkpoint = .receipt, .trace_buffer = &no_space }));
+    const after = try resident.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    var room: [512]u8 = undefined;
+    var published = try resident.publish(.{ .record = a }, .none, .{ .quantum = 3, .checkpoint = .receipt, .trace_buffer = &room });
+    defer published.deinit();
+    try std.testing.expect(published.trace != null);
+    try std.testing.expect(published.outcome.record.record != .failed);
+    // A label on an uninstrumented artifact cannot authorize observer output.
+    var counterfeit = generic.runtime.content.value;
+    counterfeit.hooks = .{ .control = true, .storage = true };
+    const forged_bytes = try projection.encode(artifact.Bundle, a, counterfeit);
+    defer a.free(forged_bytes);
+    var forged = try artifact.Admitted.init(a, forged_bytes, artifact.digest(forged_bytes));
+    defer forged.deinit();
+    try std.testing.expectError(error.InvalidRealization, compiler.validate(a, &forged));
+}
+
 test "packaged specialized realization carries independently checked recovery and exact guest binding" {
     const image = try @import("semantic/step_tests.zig").guestImage();
     defer a.free(image);

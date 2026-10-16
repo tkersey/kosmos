@@ -15,6 +15,7 @@ const Id = data.program.Id;
 pub const Options = struct {
     horos_package: []const u8,
     guest: ?*const data.program_image.Admitted = null,
+    hooks: service.instrumentation.Hooks = .{},
     policy: source.specialize.Policy = .{ .work = 8_000_000, .keys_per_function = 128, .depth = 1024 },
 };
 pub const Derivation = struct {
@@ -38,7 +39,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
     const a = arena.allocator();
     var b = source.Builder.init(a);
     defer b.deinit();
-    const s = if (options.guest != null) try service.defineStaged(&b) else try service.define(&b);
+    const s = try service.defineWithHooks(&b, options.guest != null, options.hooks);
     const m = try machines.define(&b);
     const clone = try clones.define(&b, m);
     const graph = try @import("graph.zig").define(&b, m);
@@ -54,7 +55,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
     var specialized: ?source.specialize.Output = if (options.guest) |guest| try source.specialize.specialize(a, original, .{
         .function = s.entry,
         .arguments = &.{ .{ .known = .{ .schema = m.program, .bytes = try projection.programBytes(a, guest) } }, .dynamic },
-        .context = context(guest.identity()),
+        .context = contextWithHooks(guest.identity(), options.hooks),
         .policy = options.policy,
     }) else null;
     defer if (specialized) |*out| out.deinit();
@@ -98,6 +99,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
         .image = image,
         .guest = if (options.guest) |guest| guest.identity() else null,
         .specialization = if (specialized) |*out| out.key else null,
+        .hooks = options.hooks,
         .recovery = .{ .projector = helper_images[0], .storage = helper_images[1], .clone_context = helper_images[2], .clone_rebase = helper_images[3], .anchors = anchors },
         .branch_returns = try functionMap(a, clone.instantiate, &compiled, if (specialized) |*out| out else null),
         .template_entries = try functionMap(a, graph.template, &compiled, if (specialized) |*out| out else null),
@@ -110,10 +112,17 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
 }
 
 pub fn context(guest: artifact.Digest) source.specialize.Context {
+    return contextWithHooks(guest, .{});
+}
+
+pub fn contextWithHooks(guest: artifact.Digest, hooks: service.instrumentation.Hooks) source.specialize.Context {
+    var observation = std.crypto.hash.sha2.Sha256.init(.{});
+    observation.update("kosmos.canonical-pst3/3;cut-observation/1");
+    observation.update(&.{ @intFromBool(hooks.control), @intFromBool(hooks.storage) });
     return .{
         .core = @import("source_identity.zig").digest(),
         .guest = guest,
-        .observation = artifact.digest("kosmos.canonical-pst3/3"),
+        .observation = observation.finalResult(),
         .base_profile = artifact.digest(profile.identity),
         .admission_profile = artifact.digest(artifact.admission_profile),
         .compiler_policy = artifact.digest(artifact.build_policy),
@@ -134,6 +143,7 @@ fn anchorMap(a: std.mem.Allocator, b: *const source.Builder, s: service.Definiti
         .{ .function = s.publish, .role = .committed_service, .ordinals = &.{2} },
         .{ .function = s.commit, .role = .committed_machine, .ordinals = &.{0} },
         .{ .function = s.control_commit, .role = .committed_machine, .ordinals = &.{0} },
+        .{ .function = s.cut, .role = .committed_machine, .ordinals = &.{0} },
         .{ .function = clone.run, .role = .clone_context, .ordinals = &.{ 0, 1 } },
         .{ .function = clone.rebase, .role = .clone_rebase, .ordinals = &.{ 0, 1, 2, 3 } },
     };
@@ -213,7 +223,7 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
         !std.mem.eql(u8, bundle.manifest.compiler.policy, artifact.build_policy)) return error.UnsupportedSource;
     var expected_builder = source.Builder.init(scratch);
     defer expected_builder.deinit();
-    const s = if (bundle.guest != null) try service.defineStaged(&expected_builder) else try service.define(&expected_builder);
+    const s = try service.defineWithHooks(&expected_builder, bundle.guest != null, bundle.hooks);
     const m = try machines.define(&expected_builder);
     const clone = try clones.define(&expected_builder, m);
     const graph = try @import("graph.zig").define(&expected_builder, m);
@@ -255,7 +265,7 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
             try @field(out.builder, name).appendSlice(out.builder.allocator(), @field(evidence.module, name));
         }
         out.builder.region_count = evidence.module.region_count;
-        if (!data.record.equal(source.specialize.Context, d.request.context, context(admitted.content.value.guest orelse return error.InvalidRealization))) return error.InvalidRealization;
+        if (!data.record.equal(source.specialize.Context, d.request.context, contextWithHooks(admitted.content.value.guest orelse return error.InvalidRealization, bundle.hooks))) return error.InvalidRealization;
         try source.specialize.validate(scratch, d.original, d.request, &out);
         anchors = try anchorMap(scratch, &expected_builder, s, clone, &compiled, &out);
         branch_returns = try functionMap(scratch, clone.instantiate, &compiled, &out);

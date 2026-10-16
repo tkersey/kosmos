@@ -24,6 +24,7 @@ pub fn digest() [32]u8 {
         .{ "graph.zig", @embedFile("graph.zig") },
         .{ "handlers.zig", @embedFile("handlers.zig") },
         .{ "instructions.zig", @embedFile("instructions.zig") },
+        .{ "instrumentation.zig", @embedFile("instrumentation.zig") },
         .{ "lifecycle.zig", @embedFile("lifecycle.zig") },
         .{ "machine.zig", @embedFile("machine.zig") },
         .{ "map.zig", @embedFile("map.zig") },

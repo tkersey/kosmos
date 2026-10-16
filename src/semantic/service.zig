@@ -9,30 +9,31 @@ const edges = @import("edges.zig");
 const Author = @import("author.zig").Author;
 const Id = data.program.Id;
 const Error = source.Error;
-pub const identity = "kosmos.semantic-service/1";
+pub const identity = "kosmos.semantic-service/2";
+pub const instrumentation = @import("instrumentation.zig");
 pub const Initial = union(enum) { arguments: []const u8, state: data.process_state.State };
 /// Reply bytes are the value of an already bound ERS3, never that envelope.
 pub const Control = union(enum) { none, answer: []const u8, resume_yield, cancel: data.invocation.Reason };
 pub const Command = union(enum) { advance: struct { control: Control, quantum: u64 }, observe, project, finish };
-pub const Cut = struct { status: data.process_state.Status, guest_work: u64 };
+pub const Cut = struct { status: data.process_state.Status, guest_work: u64, trace: ?instrumentation.Trace = null };
 pub const Event = union(enum) { cut: Cut, observation: @import("observe.zig").Observation, projection: data.process_state.State };
-pub const Definition = struct { entry: Id, effect: Id, state: Id, loop: Id, dispatch: Id, receive: Id, advance: Id, commit: Id, control_commit: Id, publish: Id, command: Id, event: Id };
+pub const Definition = struct { entry: Id, effect: Id, state: Id, loop: Id, dispatch: Id, receive: Id, advance: Id, commit: Id, control_commit: Id, publish: Id, cut: Id, command: Id, event: Id };
 
 fn statusTag(e: Author, m: machines.Definition, input: Id) Error!Id {
     return e.b.primitive(try e.b.scalar(u32), .enum_tag, &.{try edges.field(e, try m.field(e, input, .header), machines.Header, "status")}, 0);
 }
 pub fn define(b: *source.Builder) Error!Definition {
-    return defineWithDispatch(b, false);
+    return defineWithHooks(b, false, .{});
 }
 
 /// The same service protocol with source-level finite address dispatch. Its
 /// program parameter stays explicit across dynamic calls and bridge responses.
 pub fn defineStaged(b: *source.Builder) Error!Definition {
-    return defineWithDispatch(b, true);
+    return defineWithHooks(b, true, .{});
 }
 
-fn defineWithDispatch(b: *source.Builder, comptime staged: bool) Error!Definition {
-    const cache = try b.specialization(Definition, "kosmos.semantic.service/1", @intFromBool(staged));
+pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.Hooks) Error!Definition {
+    const cache = try b.specialization(Definition, "kosmos.semantic.service/2", @as(u64, @intFromBool(staged)) | (@as(u64, @intFromBool(hooks.control)) << 1) | (@as(u64, @intFromBool(hooks.storage)) << 2));
     if (cache.cached) |saved| return saved;
     const e = try Author.init(b);
     const m = try machines.define(b);
@@ -43,6 +44,18 @@ fn defineWithDispatch(b: *source.Builder, comptime staged: bool) Error!Definitio
     const observe = try @import("observe.zig").define(b, m);
     const command_type = try projection.schema(Command, b);
     const event_type = try projection.schema(Event, b);
+    const cut_type = try projection.schema(Cut, b);
+    const cut_function = try b.declare(&.{m.schema}, cut_type, &.{}, &.{});
+    {
+        const input = try e.param(cut_function, 0);
+        const optional_trace = try projection.schema(?instrumentation.Trace, b);
+        const trace = try b.variable(try projection.schema(instrumentation.Trace, b));
+        const payload = if (hooks.enabled()) try e.variant(optional_trace, 1, try b.reference(trace)) else try e.variant(optional_trace, 0, e.unit_value);
+        var body = try b.pure(try e.tuple(cut_type, &.{ try edges.field(e, try m.field(e, input, .header), machines.Header, "status"), try m.field(e, input, .work), payload }));
+        // Disabled hooks emit no observer call, graph traversal or trace data.
+        if (hooks.enabled()) body = try b.bind(trace, try e.call(try instrumentation.define(b, m, hooks), &.{input}), body);
+        try b.define(cut_function, body);
+    }
     const effect = try b.effect(.{ .identity = identity, .payload = event_type, .result = command_type });
     // The countdown is a retention policy, not a guest work/lifetime limit.
     const state = try b.schema(.{ .product = &.{ m.schema, e.integer } });
@@ -123,11 +136,11 @@ fn defineWithDispatch(b: *source.Builder, comptime staged: bool) Error!Definitio
                     const controlled = try b.variable(m.schema);
                     const advanced = try b.variable(state);
                     const after = try e.field(try b.reference(advanced), 0);
-                    const cut = try e.tuple(try projection.schema(Cut, b), &.{ try edges.field(e, try m.field(e, after, .header), machines.Header, "status"), try m.field(e, after, .work) });
+                    const cut = try b.variable(cut_type);
                     // Passing the original service state after advance keeps
                     // the committed command predecessor in the real outer
                     // continuation throughout control, cloning, and cleanup.
-                    body = try b.bind(advanced, try e.call(advance, &.{ program, try e.tuple(state, &.{ try e.replace(try b.reference(controlled), @backingInt(machines.Field.work), e.zero), try e.field(saved, 1) }), try e.field(operation, 1) }), try e.call(publish, &.{ program, saved, try b.reference(advanced), try e.variant(event_type, 0, cut) }));
+                    body = try b.bind(advanced, try e.call(advance, &.{ program, try e.tuple(state, &.{ try e.replace(try b.reference(controlled), @backingInt(machines.Field.work), e.zero), try e.field(saved, 1) }), try e.field(operation, 1) }), try b.bind(cut, try e.call(cut_function, &.{after}), try e.call(publish, &.{ program, saved, try b.reference(advanced), try e.variant(event_type, 0, try b.reference(cut)) })));
                     body = try b.bind(controlled, try e.call(control_commit, &.{ input, try b.reference(changed) }), body);
                     var controls: [4]Case = undefined;
                     inline for (@typeInfo(Control).@"union".field_types, 0..) |C, j| {
@@ -168,9 +181,9 @@ fn defineWithDispatch(b: *source.Builder, comptime staged: bool) Error!Definitio
             .{ .variable = restored, .body = try e.call(m.hydrate, &.{ try e.param(entry, 0), try b.reference(restored) }) },
         } } });
         const machine = try b.reference(initialized);
-        const cut = try e.tuple(try projection.schema(Cut, b), &.{ try edges.field(e, try m.field(e, machine, .header), machines.Header, "status"), e.zero });
+        const cut = try b.variable(cut_type);
         const saved = try e.tuple(state, &.{ machine, interval });
-        try b.define(entry, try b.bind(initialized, start, try e.call(loop, &.{ try e.param(entry, 0), saved, try e.variant(event_type, 0, cut), saved })));
+        try b.define(entry, try b.bind(initialized, start, try b.bind(cut, try e.call(cut_function, &.{machine}), try e.call(loop, &.{ try e.param(entry, 0), saved, try e.variant(event_type, 0, try b.reference(cut)), saved }))));
     }
-    return cache.finish(b, .{ .entry = entry, .effect = effect, .state = state, .loop = loop, .dispatch = dispatch, .receive = receive, .advance = advance, .commit = commit, .control_commit = control_commit, .publish = publish, .command = command_type, .event = event_type });
+    return cache.finish(b, .{ .entry = entry, .effect = effect, .state = state, .loop = loop, .dispatch = dispatch, .receive = receive, .advance = advance, .commit = commit, .control_commit = control_commit, .publish = publish, .cut = cut_function, .command = command_type, .event = event_type });
 }

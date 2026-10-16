@@ -75,6 +75,12 @@ pub fn encode(comptime T: type, a: std.mem.Allocator, value: T) Error![]u8 {
     return bytes;
 }
 
+pub fn encodeInto(comptime T: type, buffer: []u8, value: T) Error![]const u8 {
+    var writer: wire.Writer = .{ .output = buffer };
+    try write(T, value, &writer);
+    return buffer[0..writer.position];
+}
+
 pub fn Owned(comptime T: type) type {
     return struct {
         arena: std.heap.ArenaAllocator,

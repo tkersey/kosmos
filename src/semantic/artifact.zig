@@ -7,7 +7,7 @@ const profile = @import("../base/profile.zig");
 const service = @import("service.zig");
 const Prepared = @import("../interpreter_v2/prepared.zig").Prepared;
 
-pub const identity = "kosmos.semantic-artifact/1";
+pub const identity = "kosmos.semantic-artifact/2";
 pub const admission_profile = "kosmos.horos-admission/3";
 pub const build_policy = "kosmos.source-lower/1";
 pub const Digest = [32]u8;
@@ -45,6 +45,7 @@ pub const Bundle = struct {
     image: []const u8,
     guest: ?Digest,
     specialization: ?Digest,
+    hooks: service.instrumentation.Hooks = .{},
     recovery: Recovery,
     branch_returns: []const data.program.Id,
     template_entries: []const data.program.Id,

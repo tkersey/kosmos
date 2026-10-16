@@ -10,8 +10,14 @@ pub fn For(comptime runtime: type) type {
     return struct {
         const invocation = runtime.invocation;
         pub const Drive = struct { quantum: ?u64 = null, checkpoint: bool = false };
-        pub const Error = runtime.Error || error{ Busy, UnfinishedSession, PublicationUncertain };
-        pub const Publish = struct { quantum: ?u64 = null, checkpoint: invocation.CheckpointMode = .none };
+        pub const Error = runtime.Error || error{ Busy, UnfinishedSession, PublicationUncertain, TracePublicationBlocked };
+        pub const Publish = struct {
+            quantum: ?u64 = null,
+            checkpoint: invocation.CheckpointMode = .none,
+            /// Optional caller capacity witness. Failure rolls back the entire
+            /// publication; it is an observer blockage, never a guest failure.
+            trace_buffer: ?[]u8 = null,
+        };
         pub const Destination = union(enum) { record: std.mem.Allocator, encoded: std.mem.Allocator, buffer: []u8 };
         pub const Published = union(enum) { record: invocation.Outcome, encoded: []u8, buffer: []const u8 };
 
@@ -94,6 +100,7 @@ pub fn For(comptime runtime: type) type {
             outcome: Published,
             checkpoint: ?*Checkpoint = null,
             allocator: ?std.mem.Allocator,
+            trace: ?@import("../semantic/instrumentation.zig").Output = null,
 
             pub fn takeCheckpoint(self: *Publication) ?*Checkpoint {
                 const receipt = self.checkpoint;
@@ -260,6 +267,10 @@ pub fn For(comptime runtime: type) type {
                     finished.checkpoint = null;
                 }
                 errdefer if (receipt) |checkpoint_receipt| checkpoint_receipt.deinit();
+                const trace = if (@hasDecl(runtime.Session, "trace")) session.trace() else null;
+                if (trace) |observation| if (options.trace_buffer) |buffer| {
+                    _ = @import("../semantic/projection.zig").encodeInto(@TypeOf(observation), buffer, observation) catch return error.TracePublicationBlocked;
+                };
                 const published: Published = switch (destination) {
                     .record => .{ .record = finished.outcome },
                     .encoded, .buffer => blk: {
@@ -274,7 +285,7 @@ pub fn For(comptime runtime: type) type {
                 state.generation = generation;
                 transaction.commit(session);
                 if (@hasField(runtime.Session, "driver")) session.driver.outer.store.compactImported() catch {} else session.store.compactImported() catch {};
-                return .{ .outcome = published, .checkpoint = receipt, .allocator = if (destination == .encoded) destination.encoded else null };
+                return .{ .outcome = published, .checkpoint = receipt, .allocator = if (destination == .encoded) destination.encoded else null, .trace = trace };
             }
 
             pub fn drive(self: *Resident, output: std.mem.Allocator, control: protocol.Control, options: Drive) Error!invocation.Outcome {

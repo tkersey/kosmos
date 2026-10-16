@@ -277,6 +277,12 @@ pub const Session = struct {
         }
     }
     pub const Pump = union(enum) { suspended, cut: service.Cut };
+    /// Last established cut only. Reading never advances, collects or records
+    /// additional guest events. Disabled source hooks return null.
+    pub fn trace(self: *const Session) ?service.instrumentation.Output {
+        const cut = self.driver.last_cut orelse return null;
+        return .{ .source = self.driver.selected.content.value.manifest.source, .realization = self.driver.artifact_identity, .guest = self.driver.guest.admitted().identity(), .guest_revision = self.driver.guest_revision, .trace = cut.trace orelse return null };
+    }
     pub fn pumpAdvance(self: *Session, quantum: u64) Error!Pump {
         if (self.driver.operation != .advance) return error.NoOperation;
         self.attachCounters();

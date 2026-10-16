@@ -154,6 +154,11 @@ pub const Driver = struct {
                 switch (operation) {
                     .initialize, .advance => {
                         if (event.value != .cut) return error.InvalidServiceEvent;
+                        const hooks = self.selected.content.value.hooks;
+                        if (hooks.enabled() != (event.value.cut.trace != null)) return error.InvalidServiceEvent;
+                        if (event.value.cut.trace) |trace| {
+                            if (hooks.control != (trace.control != null) or hooks.storage != (trace.storage != null)) return error.InvalidServiceEvent;
+                        }
                         if (operation == .initialize and event.value.cut.guest_work != 0) return error.InvalidServiceEvent;
                         if (operation == .advance) {
                             var command = try projection.decode(service.Command, self.allocator, self.command);
