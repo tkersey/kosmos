@@ -70,3 +70,55 @@ test "base bridge response binding survives checkpoint and transaction rollback"
     try std.testing.expectEqualSlices(u8, &result, try restored.bytes(&second.completed));
     try std.testing.expectError(error.InvalidState, restored.answer(reply));
 }
+
+const AllocationCounter = struct {
+    backing: std.mem.Allocator,
+    allocations: usize = 0,
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, length: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.allocations += 1;
+        return self.backing.rawAlloc(length, alignment, address);
+    }
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.backing.rawResize(memory, alignment, length, address);
+    }
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.backing.rawRemap(memory, alignment, length, address);
+    }
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.backing.rawFree(memory, alignment, address);
+    }
+};
+
+test "base temporary allocation cost preserves recursive dynamic results" {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const e = try @import("../semantic/author.zig").Author.init(&builder);
+    const integer = try builder.scalar(u64);
+    const unit = try builder.scalar(void);
+    const entry = try builder.declare(&.{integer}, integer, &.{}, &.{});
+    const count = try e.param(entry, 0);
+    const zero = try builder.constant(u64, 0);
+    const one = try builder.constant(u64, 1);
+    try builder.define(entry, try e.when(try e.binary(.equal, count, zero), try builder.pure(count), try e.call(entry, &.{try e.binary(.integer_sub, count, one)})));
+    const image = try encode(builder.module(entry, unit));
+    defer a.free(image);
+    for ([_]u64{ 64, 512 }) |iterations| {
+        var counted: AllocationCounter = .{ .backing = a };
+        const input = std.mem.toBytes(iterations);
+        var session = try Session.initImage(counted.allocator(), image, &input, .{});
+        defer session.deinit();
+        const before = counted.allocations;
+        const result = try session.run(null);
+        try std.testing.expect(result == .completed);
+        try std.testing.expectEqualSlices(u8, &std.mem.toBytes(@as(u64, 0)), try session.bytes(&result.completed));
+        try std.testing.expect(counted.allocations - before <= 8);
+        std.debug.print("base recursive iterations={d} physical_allocations={d}\n", .{ iterations, counted.allocations - before });
+    }
+}

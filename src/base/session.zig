@@ -49,6 +49,10 @@ pub const Session = struct {
     terminal: ?g.NodeRef = null,
     poisoned: bool = false,
     transitions: usize = 0,
+    // Scratch contains no continuation state. Keep a small reusable block;
+    // larger temporary operations still use the ordinary fallible allocator.
+    step_scratch: std.heap.ArenaAllocator.State = .init,
+    edge_values: std.ArrayList(g.Value) = .empty,
     statistics: ?*@import("../interpreter_v2/runtime_types.zig").Statistics = null,
     /// Optional observation of ordinary function entries and completed returns. This has no
     /// effect on control, values or grants and is never serialized.
@@ -123,8 +127,11 @@ pub const Session = struct {
             const op = code.instructions[frame.position];
             const layout = self.program.functions[@intCast(code.function)].layout.slots;
             const reader = try self.frames.slots.reader(frame.view);
-            var temporary = std.heap.ArenaAllocator.init(self.allocator);
-            defer temporary.deinit();
+            var temporary = self.step_scratch.promote(self.allocator);
+            defer {
+                _ = temporary.reset(.{ .retain_with_limit = 64 * 1024 });
+                self.step_scratch = temporary.state;
+            }
             var values: @import("../interpreter_v2/values.zig").Values = .{
                 .allocator = temporary.allocator(),
                 .schemas = self.program.schemas,
@@ -160,8 +167,11 @@ pub const Session = struct {
 
     fn executeControl(self: *Session, current: g.NodeRef, saved: g.Control, code: ir.Block, frame: *bindings.Frame) Error!void {
         const reader = try self.frames.slots.reader(frame.view);
-        var temporary = std.heap.ArenaAllocator.init(self.allocator);
-        defer temporary.deinit();
+        var temporary = self.step_scratch.promote(self.allocator);
+        defer {
+            _ = temporary.reset(.{ .retain_with_limit = 64 * 1024 });
+            self.step_scratch = temporary.state;
+        }
         const scratch = temporary.allocator();
         switch (code.terminator) {
             .return_value => |slot| {
@@ -286,6 +296,9 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        var temporary = self.step_scratch.promote(self.allocator);
+        temporary.deinit();
+        self.edge_values.deinit(self.allocator);
         self.frames.deinit();
         self.store.deinit();
         self.flow.deinit();
@@ -504,8 +517,8 @@ pub const Session = struct {
     }
 
     fn assignEdge(self: *Session, frame: *bindings.Frame, next: ir.Edge, returned: ?g.Value) Error!void {
-        const values = try self.allocator.alloc(g.Value, next.assignments.len);
-        defer self.allocator.free(values);
+        try self.edge_values.resize(self.allocator, next.assignments.len);
+        const values = self.edge_values.items;
         const live = self.flow.facts.live[@intCast(next.block)][0];
         for (values, next.assignments) |*value, assignment| {
             if (!self.flow.facts.pool.contains(live, assignment.destination)) continue;
