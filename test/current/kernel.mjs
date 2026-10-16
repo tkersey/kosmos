@@ -15,7 +15,10 @@ assert.equal(inspection.memory.shared, false);
 assert.equal(inspection.memory.maximumPages, 4096);
 const module = new WebAssembly.Module(bytes);
 assert.deepEqual(WebAssembly.Module.exports(module).map(x => x.name).sort(), [...KERNEL_EXPORT_NAMES].sort());
-const limits = { input: 2 << 20, working: 8 << 20, output: 2 << 20 };
+// The authored evaluator carries its admitted code and ordinary machine state.
+// Keep physical capacity explicit; the capacity/rollback checks below still
+// lower each arena to its measured live usage or zero.
+const limits = { input: 2 << 20, working: 128 << 20, output: 2 << 20 };
 let identity = 1n;
 async function kernel() {
   const k = await Kernel.create({ bytes, expectedSha256, instanceId: identity++ });
@@ -25,6 +28,22 @@ async function kernel() {
 const image = name => new Uint8Array(execFileSync(fixtureTool, ["image", name], { maxBuffer: 8 << 20 }));
 const native = command => new Uint8Array(execFileSync(fixtureTool, ["invoke"], { input: command, maxBuffer: 8 << 20 }));
 const integer = n => { const bytes = new Uint8Array(8); new DataView(bytes.buffer).setBigUint64(0, BigInt(n), true); return bytes; };
+
+// A native specialization crosses only the existing canonical guest boundary.
+// The shipped generic WASM image is unchanged and receives no outer capsule.
+{
+  const program = image("recursive");
+  const command = encodeInput({ image: program, initialArgs: integer(9), quantum: 3 });
+  const specialized = new Uint8Array(execFileSync(fixtureTool, ["specialized-invoke"], { input: command, maxBuffer: 8 << 20 }));
+  assert.deepEqual(specialized, native(command));
+  const cut = decodeOutcome(specialized);
+  assert.ok(cut.state);
+  const continuation = encodeInput({ image: program, state: cut.state, quantum: 10000 });
+  const k = await kernel();
+  const result = k.invoke(continuation);
+  assert.deepEqual(result, native(continuation));
+  assert.equal(decodeOutcome(result).kind, "completed");
+}
 async function leaf(request) {
   const decoded = await decodeRequest(request);
   const name = decoded.semanticIdentity;

@@ -110,6 +110,9 @@ pub const Values = struct {
     store: *Store,
     facts: ?data.admission.SchemaFacts = null,
     traits: ?data.traits.Facts = null,
+    /// The restricted base retains ordinary recursive data as shared records.
+    /// Historical guest execution keeps its existing eager encoding policy.
+    aggregate_storage: enum { encoded, structured } = .encoded,
 
     fn schemaFacts(self: *Values) Error!data.admission.SchemaFacts {
         if (self.facts == null) self.facts = try data.admission.schemas(self.allocator, self.schemas);
@@ -147,7 +150,7 @@ pub const Values = struct {
         for (parts.fields) |field| if (field.body == .reference or field.body == .owned) {
             deferred = true;
         };
-        if (!deferred and (try self.schemaFacts()).exportable[@intCast(schema)]) {
+        if (self.aggregate_storage == .encoded and !deferred and (try self.schemaFacts()).exportable[@intCast(schema)]) {
             var measure: data.wire.Writer = .{};
             try self.write(&measure, schema, parts);
             const buffer = try self.store.allocator.alloc(u8, measure.position);

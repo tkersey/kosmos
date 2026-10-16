@@ -31,8 +31,8 @@ test "scalar batches preserve every quantum prefix and restored logical position
             defer fast.deinit();
             var slow = try runtime.Session.initImage(a, image, &args);
             defer slow.deinit();
-            var fast_stats: @import("runtime_types.zig").Statistics = .{};
-            var slow_stats: @import("runtime_types.zig").Statistics = .{};
+            var fast_stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
+            var slow_stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
             fast.statistics = &fast_stats;
             slow.statistics = &slow_stats;
             fast.transitions = initial_transitions;
@@ -114,7 +114,7 @@ test "scalar batch resident rollback preserves prior input at every allocation f
         var failing = std.testing.FailingAllocator.init(a, .{});
         var resident = try runtime.Resident.restore(failing.allocator(), &prepared, checkpoint);
         defer resident.close() catch unreachable;
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         try resident.setStatistics(&stats);
         failing.fail_index = failing.alloc_index + failure;
         failing.resize_fail_index = failing.resize_index;

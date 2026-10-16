@@ -9,7 +9,35 @@ pub fn main(init: std.process.Init) !void {
     const mode = arguments.next() orelse return error.MissingMode;
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
-    if (std.mem.eql(u8, mode, "invoke")) {
+    if (std.mem.eql(u8, mode, "specialized-invoke")) {
+        const data = horos.data;
+        var buffer: [4096]u8 = undefined;
+        var input = std.Io.File.stdin().reader(init.io, &buffer);
+        const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);
+        defer init.gpa.free(bytes);
+        var command = try data.invocation.decode(data.invocation.Input, init.gpa, bytes);
+        defer command.deinit();
+        const guest = try data.program_image.Admitted.decode(init.gpa, command.value.image);
+        defer guest.deinit();
+        const artifact = try runtime.RuntimeCompiler.compile(init.gpa, .{ .guest = guest, .horos_package = "qualified-kernel-fixture" });
+        defer init.gpa.free(artifact);
+        var selected = try runtime.RuntimeArtifact.init(init.gpa, artifact, runtime.RuntimeCapsule.reference(artifact).digest);
+        defer selected.deinit();
+        try runtime.RuntimeCompiler.validate(init.gpa, &selected);
+        var prepared = try runtime.Prepared.initWithRuntime(init.gpa, command.value.image, &selected);
+        defer prepared.deinit();
+        var session = switch (command.value.instance) {
+            .initial_args => |args| try runtime.Session.start(init.gpa, &prepared, args),
+            .state => |state| try runtime.Session.restore(init.gpa, &prepared, state),
+        };
+        defer session.deinit();
+        _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);
+        var outcome = try runtime.invocation.finish(init.gpa, &session, true);
+        defer outcome.deinit();
+        const result = try data.invocation.encodeOwned(data.invocation.Outcome, init.gpa, outcome.record);
+        defer init.gpa.free(result);
+        try output.interface.writeAll(result);
+    } else if (std.mem.eql(u8, mode, "invoke")) {
         var buffer: [4096]u8 = undefined;
         var input = std.Io.File.stdin().reader(init.io, &buffer);
         const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);

@@ -52,6 +52,12 @@ const Projection = struct {
 /// Store is read-only: repeated export cannot mutate cursor or custody state.
 pub fn project(allocator: std.mem.Allocator, schemas: []const data.program.Schema, store: *const Store, state: anytype) Error!@TypeOf(state) {
     if (store.encoded_sequences.count() == 0) return state;
+    return projectOrdinary(allocator, schemas, store, state);
+}
+
+/// The restricted base retains ordinary aggregates structurally as well as
+/// sequence cursors. Materialize those values only at an explicit wire boundary.
+pub fn projectOrdinary(allocator: std.mem.Allocator, schemas: []const data.program.Schema, store: *const Store, state: anytype) Error!@TypeOf(state) {
     const State = @TypeOf(state);
     const Node = std.meta.Elem(@FieldType(State, "nodes"));
     const facts = try data.admission.schemas(allocator, schemas);

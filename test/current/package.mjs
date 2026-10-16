@@ -37,12 +37,12 @@ try {
   kernel.setLimits({ input: 65536, working: 1, output: 65536 });
   assert.throws(() => kernel.invoke(input), error => error.code === "WORLD_CAPACITY" && error.details.arena === "working");
   assert.deepEqual(input, unchanged);
-  kernel.setLimits({ input: 65536, working: 8 << 20, output: 65536 });
+  kernel.setLimits({ input: 65536, working: 128 << 20, output: 65536 });
   assert.deepEqual(Buffer.from(kernel.invoke(input)), expected);
   const inputPath = join(scratch, "input.pki3");
   await writeFile(inputPath, input);
   const cli = join(root, "bin/kosmos.mjs");
-  const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(8 << 20), "--input", inputPath];
+  const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(128 << 20), "--input", inputPath];
   assert.deepEqual(execFileSync(process.execPath, args, { cwd: scratch }), expected);
   assert.equal(execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).trim(), manifest.version);
   const alias = join(scratch, "alias.pki3");

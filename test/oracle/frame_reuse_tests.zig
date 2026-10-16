@@ -31,7 +31,7 @@ test "mutual tail frame reuse retains prior views and falls back on incompatible
         const initial = try session.frames.get(session.roots.current.?.id);
         const retained = if (retain) try session.frames.forkFrame(initial) else null;
         defer if (retained) |frame| session.frames.releaseFrame(frame);
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         session.statistics = &stats;
         var steps: usize = 0;
         while (session.terminal == null) : (steps += 1) {
@@ -96,7 +96,7 @@ test "eight stack arguments and nine heap arguments preserve ordered predecessor
         for (0..count) |i| std.mem.writeInt(u64, bytes[i * 8 ..][0..8], i + 1, .little);
         var session = try runtime.Session.initImage(a, image, bytes);
         defer session.deinit();
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         session.statistics = &stats;
         try session.step();
         const checkpoint = try session.checkpoint(a);
@@ -150,7 +150,7 @@ test "wide exact layout classes survive shared preparation retained views and re
         var occupied = initial;
         occupied.custody.initialized = true;
         try std.testing.expect(!session.frames.canRestart(occupied, 1));
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         session.statistics = &stats;
         while (session.terminal == null) {
             try session.step();

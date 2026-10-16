@@ -43,7 +43,7 @@ fn rememberFailure(machine: anytype, value: g.Value) @TypeOf(machine.*).Executio
     const discarded = try discardedNormal(machine, exit);
     errdefer machine.allocator.free(discarded);
     exit.discarded = discarded;
-    const storage = @import("store.zig");
+    const storage = @import("../../src/interpreter_v2/store.zig");
     exit.cancellation = try storage.duplicate(@TypeOf(exit.cancellation), machine.allocator, exit.cancellation);
     errdefer storage.release(@TypeOf(exit.cancellation), machine.allocator, exit.cancellation);
     if (exit.reason == .normal or exit.reason == .abandoned) {
@@ -94,9 +94,9 @@ pub fn cancel(machine: anytype, reason: data.invocation.Reason) @TypeOf(machine.
 }
 
 pub fn protect(machine: anytype, protection: anytype, slots: anytype, control: g.Control) @TypeOf(machine.*).ExecutionError!void {
-    const body = try @import("operands.zig").read(slots, protection.body);
-    const resource: ?g.Value = if (protection.resource) |slot| (try @import("operands.zig").read(slots, slot)) else null;
-    const obligation = try machine.store.add(.{ .obligation = .{ .source_block = control.block, .cleanup = (try @import("operands.zig").read(slots, protection.cleanup)), .resource = resource, .status = .pending } });
+    const body = try @import("../../src/interpreter_v2/operands.zig").read(slots, protection.body);
+    const resource: ?g.Value = if (protection.resource) |slot| (try @import("../../src/interpreter_v2/operands.zig").read(slots, slot)) else null;
+    const obligation = try machine.store.add(.{ .obligation = .{ .source_block = control.block, .cleanup = (try @import("../../src/interpreter_v2/operands.zig").read(slots, protection.cleanup)), .resource = resource, .status = .pending } });
     const loan: ?g.NodeRef = if (protection.loan_region) |descriptor| try machine.store.add(.{ .region = .{ .descriptor = descriptor, .outer = control.region, .obligations = &.{} } }) else null;
     const extra: usize = @intFromBool(resource != null);
     const arguments = try machine.allocator.alloc(g.Value, protection.arguments.len + extra);
@@ -106,20 +106,20 @@ pub fn protect(machine: anytype, protection: anytype, slots: anytype, control: g
         const borrowed = try machine.store.add(.{ .borrow = .{ .schema = schema, .resource = owned.body.owned.node, .region = loan.? } });
         arguments[0] = .{ .schema = schema, .body = .{ .reference = borrowed } };
     }
-    for (arguments[extra..], protection.arguments) |*argument, slot| argument.* = (try @import("operands.zig").read(slots, slot));
+    for (arguments[extra..], protection.arguments) |*argument, slot| argument.* = (try @import("../../src/interpreter_v2/operands.zig").read(slots, slot));
     const after = try machine.continuation(control.block, slots, control);
     const frame = try machine.store.add(.{ .protection = .{ .source_block = control.block, .obligation = .{ .node = obligation }, .return_to = after, .evidence = control.evidence, .region = control.region, .loan = loan } });
     try machine.applyComputation(body, arguments, frame, control.evidence, loan orelse control.region);
 }
 
 pub fn dispose(machine: anytype, disposal: anytype, slots: anytype, control: g.Control) @TypeOf(machine.*).ExecutionError!void {
-    const token = try machine.takeCapture((try @import("operands.zig").read(slots, disposal.owned)));
+    const token = try machine.takeCapture((try @import("../../src/interpreter_v2/operands.zig").read(slots, disposal.owned)));
     const after = try machine.continuation(control.block, slots, control);
     try machine.activate(token, after);
     try begin(machine, .abandoned, token.capture, after, &.{});
 }
 
-fn information(machine: anytype, values: *@import("values.zig").Values, schema: p.Id, exit: g.Exit) @TypeOf(machine.*).ExecutionError!g.Value {
+fn information(machine: anytype, values: *@import("../../src/interpreter_v2/values.zig").Values, schema: p.Id, exit: g.Exit) @TypeOf(machine.*).ExecutionError!g.Value {
     const types = try data.cleanup_contract.types(machine.program, schema);
     const unit: g.Value = .{ .schema = types.unit, .body = .{ .scalar = @as([8]u8, @splat(0)) } };
     var reason_value = unit;
@@ -297,7 +297,7 @@ pub fn step(machine: anytype) @TypeOf(machine.*).ExecutionError!?@TypeOf(machine
             obligation.resource = null;
             obligation.status = .{ .running = frame };
             try machine.store.replace(protection.obligation.node, .{ .obligation = obligation });
-            var values: @import("values.zig").Values = .{ .allocator = temporary, .schemas = machine.program.schemas, .store = &machine.store };
+            var values: @import("../../src/interpreter_v2/values.zig").Values = .{ .allocator = temporary, .schemas = machine.program.schemas, .store = &machine.store };
             const info = try information(machine, &values, machine.program.schemas[@intCast(cleanup.schema)].internal.computation.parameters[0], root_exit);
             machine.status = .active;
             const arguments = if (resource) |owned| &[_]g.Value{ info, owned } else &[_]g.Value{info};
