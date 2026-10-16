@@ -13,6 +13,7 @@ pub const RuntimeCapsule = @import("semantic/capsule.zig");
 /// namespace is not part of the restricted base's execution closure.
 pub const RuntimeCompiler = @import("semantic/compiler.zig");
 pub const RuntimeViews = @import("semantic/views.zig");
+pub const RuntimeAnalysis = @import("semantic/analysis.zig");
 pub const RuntimeInstrumentation = @import("semantic/instrumentation.zig");
 pub const invocation = current.invocation;
 pub const Workspace = current.Workspace;
