@@ -142,10 +142,41 @@ fn switchRealizations(image: []const u8, specialized: *const artifact.Admitted) 
     const state = try resident.checkpoint(a);
     defer a.free(state);
     try std.testing.expectEqualSlices(u8, cut.checkpoint.?.bytes(), state);
-    var final = try resident.drive(a, .none, .{});
+    const Custody = struct {
+        capsule: capsules.Reference,
+        target: capsules.Reference,
+        consumed: bool = false,
+        fn claim(context: *anyopaque, actual: capsules.Reference, record: capsules.Record, target: capsules.Reference) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.consumed or !std.meta.eql(self.capsule, actual) or !std.meta.eql(self.target, target) or !std.meta.eql(record.provenance, provenance)) return error.UnauthorizedCapsule;
+            self.consumed = true;
+        }
+        fn verifier(self: *@This()) capsules.Verifier {
+            return .{ .context = self, .claim = claim };
+        }
+    };
+    var selected_prepared = try facade.Prepared.initWithRuntime(a, image, specialized);
+    defer selected_prepared.deinit();
+    const portable_cut = try resident.publishCapsule(a, .guest_cut, provenance);
+    defer portable_cut.deinit();
+    try resident.transferCapsule(portable_cut, .guest_cut);
+    var custody: Custody = .{ .capsule = capsules.reference(portable_cut.bytes()), .target = generic.artifact };
+    try std.testing.expectError(error.UnauthorizedCapsule, facade.Resident.restoreCapsuleSelected(a, &selected_prepared, &prepared.runtime, portable_cut.bytes(), custody.verifier()));
+    try std.testing.expect(!custody.consumed);
+    custody.target = .{ .digest = specialized.identity, .bytes = specialized.core.?.encoded_length };
+    var restored = try facade.Resident.restoreCapsuleSelected(a, &selected_prepared, &prepared.runtime, portable_cut.bytes(), custody.verifier());
+    defer if (restored.live) {
+        const bytes = restored.takeCheckpoint(a) catch unreachable;
+        a.free(bytes);
+    };
+    const reconstructed = try restored.checkpoint(a);
+    defer a.free(reconstructed);
+    try std.testing.expectEqualSlices(u8, state, reconstructed);
+    try std.testing.expectError(error.UnauthorizedCapsule, facade.Resident.restoreCapsuleSelected(a, &selected_prepared, &prepared.runtime, portable_cut.bytes(), custody.verifier()));
+    var final = try restored.drive(a, .none, .{});
     defer final.deinit();
     try std.testing.expect(final.record == .completed);
-    try resident.close();
+    try restored.close();
 }
 
 test "portable public session preserves observations checkpoint bytes and rollback" {
