@@ -12,6 +12,7 @@ pub const RuntimeCapsule = @import("semantic/capsule.zig");
 /// Host-side source construction and independent derivation validation. This
 /// namespace is not part of the restricted base's execution closure.
 pub const RuntimeCompiler = @import("semantic/compiler.zig");
+pub const RuntimeViews = @import("semantic/views.zig");
 pub const invocation = current.invocation;
 pub const Workspace = current.Workspace;
 pub const AllocationBudget = current.AllocationBudget;

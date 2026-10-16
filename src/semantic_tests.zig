@@ -4,6 +4,7 @@ test {
     _ = @import("base/value_tests.zig");
     _ = @import("base/session_tests.zig");
     _ = @import("semantic/projection.zig");
+    _ = @import("semantic/view_tests.zig");
     _ = @import("semantic/table_tests.zig");
     _ = @import("semantic/state_storage_tests.zig");
     _ = @import("semantic/scalar_tests.zig");
