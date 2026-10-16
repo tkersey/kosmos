@@ -41,6 +41,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
     const s = if (options.guest != null) try service.defineStaged(&b) else try service.define(&b);
     const m = try machines.define(&b);
     const clone = try clones.define(&b, m);
+    const graph = try @import("graph.zig").define(&b, m);
     const validators = try @import("clone_validation.zig").define(&b, m, clone);
     const helpers = [4]Id{
         try @import("recovery.zig").define(&b, m),
@@ -99,6 +100,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
         .specialization = if (specialized) |*out| out.key else null,
         .recovery = .{ .projector = helper_images[0], .storage = helper_images[1], .clone_context = helper_images[2], .clone_rebase = helper_images[3], .anchors = anchors },
         .branch_returns = try functionMap(a, clone.instantiate, &compiled, if (specialized) |*out| out else null),
+        .template_entries = try functionMap(a, graph.template, &compiled, if (specialized) |*out| out else null),
         .evidence = evidence,
     });
     errdefer allocator.free(bytes);
@@ -214,6 +216,7 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
     const s = if (bundle.guest != null) try service.defineStaged(&expected_builder) else try service.define(&expected_builder);
     const m = try machines.define(&expected_builder);
     const clone = try clones.define(&expected_builder, m);
+    const graph = try @import("graph.zig").define(&expected_builder, m);
     const validators = try @import("clone_validation.zig").define(&expected_builder, m, clone);
     const helper_entries = [4]Id{
         try @import("recovery.zig").define(&expected_builder, m),
@@ -227,6 +230,7 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
     try source.recovery.validate(scratch, evidence.module, &compiled);
     var anchors: []const artifact.Anchor = undefined;
     var branch_returns: []const Id = undefined;
+    var template_entries: []const Id = undefined;
     if (evidence.derivation) |d| {
         if (!data.record.equal(source.ast.Module, original, d.original) or d.request.function != s.entry or d.request.arguments.len != 2 or
             d.request.arguments[0] != .known or d.request.arguments[1] != .dynamic or d.request.arguments[0].known.schema != m.program) return error.InvalidRealization;
@@ -255,13 +259,15 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
         try source.specialize.validate(scratch, d.original, d.request, &out);
         anchors = try anchorMap(scratch, &expected_builder, s, clone, &compiled, &out);
         branch_returns = try functionMap(scratch, clone.instantiate, &compiled, &out);
+        template_entries = try functionMap(scratch, graph.template, &compiled, &out);
     } else {
         if (bundle.specialization != null or !data.record.equal(source.ast.Module, original, evidence.module)) return error.InvalidRealization;
         anchors = try anchorMap(scratch, &expected_builder, s, clone, &compiled, null);
         branch_returns = try functionMap(scratch, clone.instantiate, &compiled, null);
+        template_entries = try functionMap(scratch, graph.template, &compiled, null);
     }
     if (!data.record.equal([]const artifact.Anchor, anchors, bundle.recovery.anchors)) return error.InvalidRecovery;
-    if (!std.mem.eql(Id, branch_returns, bundle.branch_returns)) return error.InvalidRecovery;
+    if (!std.mem.eql(Id, branch_returns, bundle.branch_returns) or !std.mem.eql(Id, template_entries, bundle.template_entries)) return error.InvalidRecovery;
     for (evidence.helpers, admitted.helpers, helper_entries) |module, helper, entry| {
         if (!data.record.equal(source.ast.Module, expected_builder.module(entry, failure), module)) return error.InvalidRecovery;
         var lowered = try source.lower(scratch, module);

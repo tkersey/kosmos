@@ -440,8 +440,10 @@ pub fn For(comptime runtime: type) type {
             pub fn setStatistics(self: *Resident, statistics: ?*Statistics) Error!void {
                 const state = try self.enter();
                 defer self.leave();
-                state.session.statistics = statistics;
-                if (@hasField(runtime.Session, "driver")) state.session.driver.outer.store.statistics = if (statistics) |s| &s.storage else null else state.session.store.statistics = if (statistics) |s| &s.storage else null;
+                if (@hasDecl(runtime.Session, "setStatistics")) state.session.setStatistics(statistics) else {
+                    state.session.statistics = statistics;
+                    state.session.store.statistics = if (statistics) |s| &s.storage else null;
+                }
             }
             pub fn diagnostics(self: *Resident) Error!Diagnostics {
                 const state = try self.enter();

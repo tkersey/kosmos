@@ -142,7 +142,6 @@ pub fn define(b: *source.Builder, m: machines.Definition, calls: Calls) Error!De
         const bodies = try b.variable(values);
         const multi = try b.variable(e.boolean);
         const token = try b.variable(graph.appended);
-        const token_record = try b.variable(node);
         const changed = try b.variable(m.schema);
         const token_value = try b.variable(value);
         const token_ref = try e.field(try b.reference(token), 1);
@@ -151,7 +150,7 @@ pub fn define(b: *source.Builder, m: machines.Definition, calls: Calls) Error!De
         const use = try field(e, signature, p.ResumptionType, "use");
         const is_multi = try e.binary(.equal, try b.primitive(try b.scalar(u32), .enum_tag, &.{use}, 0), try b.constant(u32, @backingInt(p.Use.multi)));
         const capture = try e.tuple(try projection.schema(g.Capture, b), &.{ token_schema, try e.variant(optional_ref, 1, current), try b.reference(selected), try e.field(control, 2), try b.reference(use_site) });
-        const choose_record = try e.when(try b.reference(multi), try b.pure(try e.variant(node, @backingInt(g.NodeTag.multi_template), capture)), try b.pure(try e.variant(node, @backingInt(g.NodeTag.one_shot), capture)));
+        const choose_token = try e.when(try b.reference(multi), try e.call(graph.template, &.{ try b.reference(captured), capture }), try e.call(graph.append, &.{ try b.reference(captured), try e.variant(node, @backingInt(g.NodeTag.one_shot), capture) }));
         const choose_value = try e.when(try b.reference(multi), try b.pure(try graphs.value(e, token_schema, token_ref, false)), try b.pure(try graphs.value(e, token_schema, token_ref, true)));
         const args = try b.primitive(values, .sequence_concat, &.{ try b.primitive(values, .sequence_concat, &.{ state_and_payload, try b.reference(bodies) }, 0), try b.primitive(values, .sequence, &.{try b.reference(token_value)}, 0) }, 0);
         var general = try e.call(calls.enter, &.{ try b.reference(changed), try field(e, clause, ir.Clause, "function"), args, try e.field(attachment, 2), try e.field(handler, 2), try e.field(handler, 3) });
@@ -159,8 +158,7 @@ pub fn define(b: *source.Builder, m: machines.Definition, calls: Calls) Error!De
         suspended = try e.replace(suspended, 3, try e.literal(@FieldType(@FieldType(g.Node, "attachment"), "phase"), .suspended));
         general = try b.bind(changed, try e.call(graph.replace, &.{ try e.field(try b.reference(token), 0), try b.reference(selected), try e.variant(node, @backingInt(g.NodeTag.attachment), suspended) }), general);
         general = try b.bind(token_value, choose_value, general);
-        general = try b.bind(token, try e.call(graph.append, &.{ try b.reference(captured), try b.reference(token_record) }), general);
-        general = try b.bind(token_record, choose_record, general);
+        general = try b.bind(token, choose_token, general);
         general = try b.bind(captured, try e.call(calls.capture, &.{ input, current, control, frame, try field(e, operation, ir.Perform, "next") }), general);
         general = try b.bind(multi, try b.pure(is_multi), general);
         general = try b.bind(bodies, try e.call(edge.collect, &.{ frame, try field(e, operation, ir.Perform, "bodies") }), general);

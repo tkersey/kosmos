@@ -47,6 +47,7 @@ pub const Bundle = struct {
     specialization: ?Digest,
     recovery: Recovery,
     branch_returns: []const data.program.Id,
+    template_entries: []const data.program.Id,
     /// Host compiler evidence is retained for independent inspection. It is
     /// content, not an execution grant or a self-issued approval certificate.
     evidence: []const u8,
@@ -112,8 +113,10 @@ pub const Admitted = struct {
             const arity: usize = if (anchor.role == .clone_rebase) 4 else if (anchor.role == .clone_context) 2 else 1;
             if (anchor.parameters.len != arity) return error.InvalidRecovery;
         }
-        for (content.value.branch_returns, 0..) |function, i| {
-            if (function >= program.program().functions.len or std.mem.indexOfScalar(data.program.Id, content.value.branch_returns[0..i], function) != null) return error.InvalidRecovery;
+        for ([_][]const data.program.Id{ content.value.branch_returns, content.value.template_entries }) |functions| {
+            for (functions, 0..) |function, i| {
+                if (function >= program.program().functions.len or std.mem.indexOfScalar(data.program.Id, functions[0..i], function) != null) return error.InvalidRecovery;
+            }
         }
         // The canonical value codec rejects trailing data; this round trip also
         // rejects alternative natural-number spellings in reusable artifacts.

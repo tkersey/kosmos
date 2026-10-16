@@ -50,8 +50,9 @@ pub const Session = struct {
     poisoned: bool = false,
     transitions: usize = 0,
     statistics: ?*@import("../interpreter_v2/runtime_types.zig").Statistics = null,
-    /// Optional observation of completed ordinary function returns. This has no
+    /// Optional observation of ordinary function entries and completed returns. This has no
     /// effect on control, values or grants and is never serialized.
+    entry_counter: ?struct { functions: []const p.Id, count: *u64 } = null,
     return_counter: ?struct { functions: []const p.Id, count: *u64 } = null,
 
     pub const Transaction = struct {
@@ -473,6 +474,9 @@ pub const Session = struct {
         } else try self.frames.put(control.id, frame);
         self.roots.current = control;
         self.roots.evidence = evidence;
+        if (self.entry_counter) |counter| {
+            if (std.mem.indexOfScalar(p.Id, counter.functions, function) != null) counter.count.* +|= 1;
+        }
     }
 
     fn retainedSlots(self: *Session, edge: ir.Edge) Error!data.analysis_sets.Root {

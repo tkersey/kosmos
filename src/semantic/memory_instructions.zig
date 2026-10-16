@@ -54,8 +54,7 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     {
         const taken = try b.variable(captures.taken);
         const token = try e.replace(try e.field(try b.reference(taken), 1), machines.index(g.Capture, "schema"), result_schema);
-        const record = try e.variant(try projection.schema(g.Node, b), @backingInt(g.NodeTag.multi_template), token);
-        const body = try b.bind(left_var, left_read, try b.bind(taken, try e.call(captures.take, &.{ input, left }), try b.bind(created, try e.call(graph.append, &.{ try e.field(try b.reference(taken), 0), record }), finish_created)));
+        const body = try b.bind(left_var, left_read, try b.bind(taken, try e.call(captures.take, &.{ input, left }), try b.bind(created, try e.call(graph.template, &.{ try e.field(try b.reference(taken), 0), token }), finish_created)));
         dispatch = try e.when(try is(e, opcode, .clone_resumption), body, dispatch);
     }
     inline for ([_]p.Opcode{ .package, .resource_pack }) |kind| {

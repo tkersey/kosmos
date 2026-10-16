@@ -201,6 +201,15 @@ pub const Session = struct {
         self.driver.deinit();
         self.* = undefined;
     }
+    pub fn setStatistics(self: *Session, statistics: ?*@import("../interpreter_v2/runtime_types.zig").Statistics) void {
+        self.statistics = statistics;
+        self.attachCounters();
+        self.driver.outer.store.statistics = if (statistics) |value| &value.storage else null;
+    }
+    fn attachCounters(self: *Session) void {
+        self.driver.outer.entry_counter = if (self.statistics) |statistics| .{ .functions = self.driver.selected.content.value.template_entries, .count = &statistics.multi_templates } else null;
+        self.driver.outer.return_counter = if (self.statistics) |statistics| .{ .functions = self.driver.selected.content.value.branch_returns, .count = &statistics.branch_activations } else null;
+    }
     fn clearView(self: *Session) void {
         if (self.view) |*view| view.deinit();
         self.view = null;
@@ -238,7 +247,7 @@ pub const Session = struct {
     }
     fn control(self: *Session, command: service.Control, quantum: u64) Error!void {
         if (self.isTerminal()) return error.InvalidState;
-        self.driver.outer.return_counter = if (self.statistics) |statistics| .{ .functions = self.driver.selected.content.value.branch_returns, .count = &statistics.branch_activations } else null;
+        self.attachCounters();
         const before = self.driver.outer.transitions;
         defer if (self.statistics) |statistics| {
             statistics.base_transitions +|= self.driver.outer.transitions -% before;
@@ -270,7 +279,7 @@ pub const Session = struct {
     pub const Pump = union(enum) { suspended, cut: service.Cut };
     pub fn pumpAdvance(self: *Session, quantum: u64) Error!Pump {
         if (self.driver.operation != .advance) return error.NoOperation;
-        self.driver.outer.return_counter = if (self.statistics) |statistics| .{ .functions = self.driver.selected.content.value.branch_returns, .count = &statistics.branch_activations } else null;
+        self.attachCounters();
         const before = self.driver.outer.transitions;
         defer if (self.statistics) |statistics| {
             statistics.base_transitions +|= self.driver.outer.transitions -% before;

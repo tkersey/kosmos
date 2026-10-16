@@ -9,7 +9,7 @@ const Id = data.program.Id;
 const Error = source.Error;
 const g = data.graph;
 
-pub const Definition = struct { element: Id, record: Id, replace: Id, append: Id, appended: Id, value_ref: Id };
+pub const Definition = struct { element: Id, record: Id, replace: Id, append: Id, appended: Id, template: Id, value_ref: Id };
 
 pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     const cache = try b.specialization(Definition, "kosmos.semantic.graph/1", m.schema);
@@ -25,6 +25,7 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
         .replace = try b.declare(&.{ m.schema, reference, record_schema }, m.schema, &.{}, &.{}),
         .append = try b.declare(&.{ m.schema, record_schema }, appended, &.{}, &.{}),
         .appended = appended,
+        .template = try b.declare(&.{ m.schema, try projection.schema(g.Capture, b) }, appended, &.{}, &.{}),
         .value_ref = try b.declare(&.{value_schema}, reference, &.{}, &.{}),
     };
     {
@@ -61,6 +62,7 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
         const tag = try b.primitive(e.integer, .variant_tag, &.{body}, 0);
         try b.define(d.value_ref, try e.when(try e.binary(.equal, tag, try b.constant(u64, 2)), try b.pure(try e.payload(body, 2)), try b.pure(try e.field(try e.payload(body, 3), 0))));
     }
+    try b.define(d.template, try e.call(d.append, &.{ try e.param(d.template, 0), try e.variant(record_schema, @backingInt(g.NodeTag.multi_template), try e.param(d.template, 1)) }));
     return cache.finish(b, d);
 }
 
