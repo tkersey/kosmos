@@ -126,7 +126,7 @@ pub const Store = struct {
             .alive = self.alive.items[id],
             .borrowed = id < self.borrowed_nodes.len and self.borrowed_nodes[id],
             .fields = self.field_owners.get(id),
-            .sequence = self.encoded_sequences.get(id),
+            .sequence = if (self.nodes.items[id] == .aggregate and self.nodes.items[id].aggregate.fields.len == 0) self.encoded_sequences.get(id) else null,
         });
         if (self.statistics) |statistics| statistics.journal_nodes +|= 1;
         return true;
@@ -145,7 +145,7 @@ pub const Store = struct {
     fn retireNode(self: *Store, id: usize, value: g.Node, held: bool) void {
         if (held) {
             _ = self.field_owners.remove(id); // Physical ownership moves to the journal.
-            _ = self.encoded_sequences.remove(id);
+            if (value == .aggregate and value.aggregate.fields.len == 0) _ = self.encoded_sequences.remove(id);
             if (id < self.borrowed_nodes.len) self.borrowed_nodes[id] = false;
         } else self.releaseNode(id, value);
     }
@@ -214,7 +214,7 @@ pub const Store = struct {
     }
 
     fn releaseNode(self: *Store, id: usize, value: g.Node) void {
-        _ = self.encoded_sequences.remove(id);
+        if (value == .aggregate and value.aggregate.fields.len == 0) _ = self.encoded_sequences.remove(id);
         if (self.field_owners.fetchRemove(id)) |entry| {
             self.releaseFields(entry.value);
             return;
@@ -602,8 +602,10 @@ pub const Store = struct {
                 marks[@intCast(id)] = true;
                 const before = pending.items.len;
                 try data.graph_order.references(g.Node, self.nodes.items[@intCast(id)], pending, self.allocator);
-                if (self.encoded_sequences.get(@intCast(id))) |sequence|
-                    try pending.append(self.allocator, .{ .blob = sequence.backing.id });
+                const node = self.nodes.items[@intCast(id)];
+                if (node == .aggregate and node.aggregate.fields.len == 0)
+                    if (self.encoded_sequences.get(@intCast(id))) |sequence|
+                        try pending.append(self.allocator, .{ .blob = sequence.backing.id });
                 try frames.references(id, pending, self.allocator);
                 if (self.statistics) |s| {
                     s.traced_nodes +|= 1;

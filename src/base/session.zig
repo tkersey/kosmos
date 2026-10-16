@@ -49,6 +49,7 @@ pub const Session = struct {
     terminal: ?g.NodeRef = null,
     poisoned: bool = false,
     transitions: usize = 0,
+    collection_remaining: usize = 256,
     // Scratch contains no continuation state. Keep a small reusable block;
     // larger temporary operations still use the ordinary fallible allocator.
     step_scratch: std.heap.ArenaAllocator.State = .init,
@@ -65,6 +66,7 @@ pub const Session = struct {
         terminal: ?g.NodeRef,
         poisoned: bool,
         transitions: usize,
+        collection_remaining: usize,
 
         pub fn commit(self: *Transaction, session: *Session) void {
             session.store.commit();
@@ -79,6 +81,7 @@ pub const Session = struct {
             session.terminal = self.terminal;
             session.poisoned = self.poisoned;
             session.transitions = self.transitions;
+            session.collection_remaining = self.collection_remaining;
             self.* = undefined;
         }
     };
@@ -88,7 +91,7 @@ pub const Session = struct {
         try self.store.begin();
         errdefer self.store.rollback();
         try self.frames.begin(self.store.nodes.items.len);
-        return .{ .roots = self.roots, .status = self.status, .terminal = self.terminal, .poisoned = self.poisoned, .transitions = self.transitions };
+        return .{ .roots = self.roots, .status = self.status, .terminal = self.terminal, .poisoned = self.poisoned, .transitions = self.transitions, .collection_remaining = self.collection_remaining };
     }
 
     pub fn observe(self: *Session) Error!Observation {
@@ -161,8 +164,14 @@ pub const Session = struct {
             statistics.transitions +|= 1;
             statistics.dispatches +|= 1;
         }
-        if (self.terminal != null or self.status != .active or self.transitions % 256 == 0)
+        self.collection_remaining -|= 1;
+        if (self.terminal != null or self.status != .active or self.collection_remaining == 0) {
             try self.store.collectWith(self.roots, &self.frames);
+            // Amortize a complete graph/cache scan over its physical extent.
+            // Quiescent boundaries still reclaim immediately. This private
+            // cadence changes neither logical work nor checkpoint contents.
+            self.collection_remaining = @max(256, self.store.nodes.items.len +| self.store.blobs.items.len +| self.store.data_projections.count());
+        }
     }
 
     fn executeControl(self: *Session, current: g.NodeRef, saved: g.Control, code: ir.Block, frame: *bindings.Frame) Error!void {
@@ -371,6 +380,8 @@ pub const Session = struct {
             .allocator = self.allocator,
             .schemas = self.program.schemas,
             .store = &self.store,
+            .facts = self.value_facts,
+            .traits = self.uses,
             .aggregate_storage = .structured,
         };
         return values.bytes(value);
@@ -570,6 +581,8 @@ pub const Session = struct {
             .allocator = scratch,
             .schemas = self.program.schemas,
             .store = &self.store,
+            .facts = self.value_facts,
+            .traits = self.uses,
             .aggregate_storage = .structured,
         };
         switch (term) {
