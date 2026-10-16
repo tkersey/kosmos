@@ -143,18 +143,8 @@ fn nodeConversions(e: Author, d: Definition) Error!struct { hydrate: Id, project
         try b.define(hydrate, try e.call(loop, &.{ try e.param(hydrate, 0), try d.nodes.empty(b) }));
     }
     {
-        const output = try table.define(b, public_node);
-        const loop = try b.declare(&.{ d.nodes.table, e.integer, output.table }, output.table, &.{}, &.{});
-        const input = try e.param(loop, 0);
-        const offset = try e.param(loop, 1);
-        const prior = try e.param(loop, 2);
-        const selected = try b.variable(d.nodes.optional);
-        const converted = try b.variable(public_node);
-        const appended = try b.variable(output.table);
-        const more = try b.bind(selected, try e.call(d.nodes.get, &.{ input, offset }), try b.bind(converted, try e.call(to_node, &.{try e.payload(try b.reference(selected), 1)}), try b.bind(appended, try e.call(output.append, &.{ prior, try b.reference(converted) }), try e.call(loop, &.{ input, try e.binary(.integer_add, offset, e.one), try b.reference(appended) }))));
-        try b.define(loop, try e.when(try e.binary(.less, offset, try e.field(input, 0)), more, try b.pure(prior)));
-        const collected = try b.variable(output.table);
-        try b.define(project, try b.bind(collected, try e.call(loop, &.{ try e.param(project, 0), e.zero, try output.empty(b) }), try e.call(output.to_sequence, &.{try b.reference(collected)})));
+        const mapped = try table.mapToSequence(b, d.nodes, public_node, to_node);
+        try b.define(project, try e.call(mapped, &.{try e.param(project, 0)}));
     }
     return .{ .hydrate = hydrate, .project = project };
 }

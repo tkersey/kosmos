@@ -156,21 +156,40 @@ fn emitProjections(e: Author, d: Definition) Error!void {
     }
     try b.define(d.from_sequence, try e.call(fill, &.{ try e.param(d.from_sequence, 0), try d.empty(b) }));
 
+    try emitSequence(e, d, d.sequence, null, d.to_sequence);
+}
+
+/// Fuse element conversion with the ordered tree fold. Each table node is
+/// visited once; conversion does not repeatedly look up and append each ID.
+pub fn mapToSequence(b: *source.Builder, d: Definition, element: Id, convert: Id) Error!Id {
+    const e = try Author.init(b);
+    const sequence = try b.schema(.{ .seq = element });
+    const result = try b.declare(&.{d.table}, sequence, &.{}, &.{});
+    try emitSequence(e, d, sequence, convert, result);
+    return result;
+}
+
+fn emitSequence(e: Author, d: Definition, sequence: Id, convert: ?Id, result: Id) Error!void {
+    const b = e.b;
     // Projection follows tree structure, so concatenation copies at most one
     // level per element. It does not grow a flat output one element at a time.
-    const tree_sequence = try b.declare(&.{d.tree}, d.sequence, &.{}, &.{});
-    const forest_sequence = try b.declare(&.{d.forest}, d.sequence, &.{}, &.{});
+    const tree_sequence = try b.declare(&.{d.tree}, sequence, &.{}, &.{});
+    const forest_sequence = try b.declare(&.{d.forest}, sequence, &.{}, &.{});
     {
         const leaf = try b.variable(d.element);
         const branch = try b.variable(d.branch);
-        const left = try b.variable(d.sequence);
-        const right = try b.variable(d.sequence);
+        const left = try b.variable(sequence);
+        const right = try b.variable(sequence);
         const pair = try b.reference(branch);
-        const combine = try b.bind(left, try e.call(tree_sequence, &.{try e.field(pair, 0)}), try b.bind(right, try e.call(tree_sequence, &.{try e.field(pair, 1)}), try b.pure(try b.primitive(d.sequence, .sequence_concat, &.{ try b.reference(left), try b.reference(right) }, 0))));
+        const combine = try b.bind(left, try e.call(tree_sequence, &.{try e.field(pair, 0)}), try b.bind(right, try e.call(tree_sequence, &.{try e.field(pair, 1)}), try b.pure(try b.primitive(sequence, .sequence_concat, &.{ try b.reference(left), try b.reference(right) }, 0))));
+        const leaf_body = if (convert) |function| blk: {
+            const converted = try b.variable(b.schemas.items[@intCast(sequence)].seq);
+            break :blk try b.bind(converted, try e.call(function, &.{try b.reference(leaf)}), try b.pure(try b.primitive(sequence, .sequence, &.{try b.reference(converted)}, 0)));
+        } else try b.pure(try b.primitive(sequence, .sequence, &.{try b.reference(leaf)}, 0));
         try b.define(tree_sequence, try b.term(.{ .match_sum = .{
             .value = try e.param(tree_sequence, 0),
             .cases = &.{
-                .{ .variable = leaf, .body = try b.pure(try b.primitive(d.sequence, .sequence, &.{try b.reference(leaf)}, 0)) },
+                .{ .variable = leaf, .body = leaf_body },
                 .{ .variable = branch, .body = combine },
             },
         } }));
@@ -178,19 +197,19 @@ fn emitProjections(e: Author, d: Definition) Error!void {
     {
         const nil = try b.variable(e.unit);
         const cons = try b.variable(d.cons);
-        const head = try b.variable(d.sequence);
-        const tail = try b.variable(d.sequence);
+        const head = try b.variable(sequence);
+        const tail = try b.variable(sequence);
         const pair = try b.reference(cons);
-        const combine = try b.bind(head, try e.call(tree_sequence, &.{try e.field(pair, 0)}), try b.bind(tail, try e.call(forest_sequence, &.{try e.field(pair, 1)}), try b.pure(try b.primitive(d.sequence, .sequence_concat, &.{ try b.reference(tail), try b.reference(head) }, 0))));
+        const combine = try b.bind(head, try e.call(tree_sequence, &.{try e.field(pair, 0)}), try b.bind(tail, try e.call(forest_sequence, &.{try e.field(pair, 1)}), try b.pure(try b.primitive(sequence, .sequence_concat, &.{ try b.reference(tail), try b.reference(head) }, 0))));
         try b.define(forest_sequence, try b.term(.{ .match_sum = .{
             .value = try e.param(forest_sequence, 0),
             .cases = &.{
-                .{ .variable = nil, .body = try b.pure(try b.primitive(d.sequence, .sequence, &.{}, 0)) },
+                .{ .variable = nil, .body = try b.pure(try b.primitive(sequence, .sequence, &.{}, 0)) },
                 .{ .variable = cons, .body = combine },
             },
         } }));
     }
-    try b.define(d.to_sequence, try e.call(forest_sequence, &.{try e.field(try e.param(d.to_sequence, 0), 1)}));
+    try b.define(result, try e.call(forest_sequence, &.{try e.field(try e.param(result, 0), 1)}));
 }
 
 fn emitSize(e: Author, d: Definition) Error!void {

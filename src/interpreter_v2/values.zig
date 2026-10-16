@@ -228,7 +228,13 @@ pub const Values = struct {
         for (shape.product[0..@intCast(index)]) |schema|
             _ = try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
         const schema = shape.product[@intCast(index)];
-        const encoded = try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
+        // A product's final field occupies the remainder of its admitted
+        // encoding. Revalidating that subtree on every projection turns a
+        // recursive tail traversal into repeated whole-tail scans.
+        const encoded = if (index + 1 == shape.product.len)
+            reader.input[reader.position..]
+        else
+            try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
         // Materialize only the selected value into its own Store lifetime.
         const result = try self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
         if (key) |selected| try self.store.rememberProjection(selected, result);
@@ -271,13 +277,14 @@ pub const Values = struct {
                 .sum => |types| types[@intCast(tag)],
                 else => unreachable,
             };
-            const encoded = try data.admission.readValue(
-                self.allocator,
-                self.schemas,
-                facts,
-                schema,
-                &reader,
-            );
+            const encoded = if (index + 1 == fields.len) blk: {
+                // The last product field (or sole sum payload) ends exactly
+                // with this already admitted value. Earlier fields still
+                // require their schema-directed boundaries.
+                const remainder = reader.input[reader.position..];
+                reader.position = reader.input.len;
+                break :blk remainder;
+            } else try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
             field.* = try self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
         }
         try reader.finish();

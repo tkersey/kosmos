@@ -33,6 +33,13 @@ instead of eagerly serializing the entire tree. Exported bytes are materialized
 only when demanded. Stable guest IDs and canonical PST3 projection remain the
 public observation.
 
+Reconstruction traverses the table forest in chronological order. Node conversion
+is fused with that traversal, and storage validation walks one ordered sequence;
+neither repeatedly looks up and rebuilds every numeric ID. Table shape, frame and
+reference-bound checks still run before the reconstructed state reaches guest
+admission. The base also uses the known end of an admitted product or sum when
+extracting its final field, avoiding another full parse of that subtree.
+
 Specialized scalar frames split bindings into disjoint ordinary and raw maps.
 The raw entry is `(schema, bits:u64)`. Define `E(n)[i] = (n / 256^i) mod 256`
 and `D(b) = sum(b[i] * 256^i)`, for eight bytes. The source implementations in

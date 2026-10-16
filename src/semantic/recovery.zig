@@ -27,7 +27,7 @@ pub fn storage(b: *source.Builder, machine: machines.Definition) source.Error!Id
     if (cache.cached) |saved| return saved;
     const e = try Author.init(b);
     const entry = try b.declare(&.{machine.schema}, e.boolean, &.{}, &.{});
-    const walk = try b.declare(&.{ machine.schema, e.integer }, e.boolean, &.{}, &.{});
+    const walk = try b.declare(&.{ machine.nodes.sequence, e.integer, e.integer }, e.boolean, &.{}, &.{});
     const node_refs = try references.define(data.process_state.Node, b);
     const blob_refs = try references.defineBlobs(data.process_state.Node, b);
     const root_refs = try references.define(data.graph.Roots, b);
@@ -36,11 +36,14 @@ pub fn storage(b: *source.Builder, machine: machines.Definition) source.Error!Id
     const invalid = try b.pure(try b.constant(bool, false));
     {
         const input = try e.param(walk, 0);
-        const nodes = try machine.field(e, input, .nodes);
-        const blobs = try machine.field(e, input, .blobs);
-        const index = try e.param(walk, 1);
-        const found = try b.variable(machine.nodes.optional);
-        const node = try e.payload(try b.reference(found), 1);
+        const node_count = try e.param(walk, 1);
+        const blob_count = try e.param(walk, 2);
+        const pair_schema = try b.schema(.{ .product = &.{ machine.nodes.element, machine.nodes.sequence } });
+        const popped_schema = try b.schema(.{ .sum = &.{ e.unit, pair_schema } });
+        const missing = try b.variable(e.unit);
+        const found = try b.variable(pair_schema);
+        const pair = try b.reference(found);
+        const node = try e.field(pair, 0);
         const frame = try e.field(node, 1);
         const valid_frame = try b.variable(e.boolean);
         const public = try b.variable(try projection.schema(data.process_state.Node, b));
@@ -48,15 +51,21 @@ pub fn storage(b: *source.Builder, machine: machines.Definition) source.Error!Id
         const blob_list = try b.variable(blob_refs.refs.table);
         const valid_nodes = try b.variable(e.boolean);
         const valid_blobs = try b.variable(e.boolean);
-        const next = try e.call(walk, &.{ input, try e.binary(.integer_add, index, e.one) });
-        var inspect = try b.bind(valid_blobs, try e.call(bounded_blobs, &.{ try b.reference(blob_list), try e.field(blobs, 0), e.zero }), try e.when(try b.reference(valid_blobs), next, invalid));
+        const next = try e.call(walk, &.{ try e.field(pair, 1), node_count, blob_count });
+        var inspect = try b.bind(valid_blobs, try e.call(bounded_blobs, &.{ try b.reference(blob_list), blob_count, e.zero }), try e.when(try b.reference(valid_blobs), next, invalid));
         inspect = try b.bind(blob_list, try e.call(blob_refs.references, &.{try b.reference(public)}), inspect);
-        inspect = try b.bind(valid_nodes, try e.call(bounded_nodes, &.{ try b.reference(refs), try e.field(nodes, 0), e.zero }), try e.when(try b.reference(valid_nodes), inspect, invalid));
+        inspect = try b.bind(valid_nodes, try e.call(bounded_nodes, &.{ try b.reference(refs), node_count, e.zero }), try e.when(try b.reference(valid_nodes), inspect, invalid));
         inspect = try b.bind(refs, try e.call(node_refs.references, &.{try b.reference(public)}), inspect);
         inspect = try b.bind(public, try e.call(machine.node_to_public, &.{node}), inspect);
         const checked = try b.bind(valid_frame, try e.call(machine.frames.valid, &.{try e.payload(frame, 1)}), try e.when(try b.reference(valid_frame), inspect, invalid));
-        const select = try b.bind(found, try e.call(machine.nodes.get, &.{ nodes, index }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{frame}, 0), e.zero), inspect, checked));
-        try b.define(walk, try e.when(try e.binary(.less, index, try e.field(nodes, 0)), select, try b.pure(try b.constant(bool, true))));
+        const select = try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{frame}, 0), e.zero), inspect, checked);
+        try b.define(walk, try b.term(.{ .match_sum = .{
+            .value = try b.primitive(popped_schema, .sequence_pop, &.{input}, 0),
+            .cases = &.{
+                .{ .variable = missing, .body = try b.pure(try b.constant(bool, true)) },
+                .{ .variable = found, .body = select },
+            },
+        } }));
     }
     const input = try e.param(entry, 0);
     const header = try machine.field(e, input, .header);
@@ -64,7 +73,11 @@ pub fn storage(b: *source.Builder, machine: machines.Definition) source.Error!Id
     const valid_blobs = try b.variable(e.boolean);
     const valid_roots = try b.variable(e.boolean);
     const roots = try b.variable(root_refs.refs.table);
-    var checked = try b.bind(valid_roots, try e.call(bounded_nodes, &.{ try b.reference(roots), try e.field(try machine.field(e, input, .nodes), 0), e.zero }), try e.when(try b.reference(valid_roots), try e.call(walk, &.{ input, e.zero }), invalid));
+    const nodes = try machine.field(e, input, .nodes);
+    const blob_count = try e.field(try machine.field(e, input, .blobs), 0);
+    const node_list = try b.variable(machine.nodes.sequence);
+    const visit = try b.bind(node_list, try e.call(machine.nodes.to_sequence, &.{nodes}), try e.call(walk, &.{ try b.reference(node_list), try e.field(nodes, 0), blob_count }));
+    var checked = try b.bind(valid_roots, try e.call(bounded_nodes, &.{ try b.reference(roots), try e.field(nodes, 0), e.zero }), try e.when(try b.reference(valid_roots), visit, invalid));
     checked = try b.bind(roots, try e.call(root_refs.references, &.{try e.field(header, machines.index(machines.Header, "roots"))}), checked);
     const program_identity = try e.field(try machine.field(e, input, .program), machines.index(projection.Program, "identity"));
     const state_identity = try e.field(header, machines.index(machines.Header, "program_identity"));

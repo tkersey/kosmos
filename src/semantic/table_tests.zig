@@ -11,6 +11,42 @@ const a = std.testing.allocator;
 const Input = struct { values: []const u64, index: u64, replacement: u64 };
 const Result = struct { count: u64, original: ?u64, updated: ?u64, unchanged: ?u64 };
 
+test "authored table mapping preserves chronological order across forest boundaries" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try Author.init(&b);
+    const d = try table.define(&b, e.integer);
+    const Pair = struct { original: u64, successor: u64 };
+    const pair = try projection.schema(Pair, &b);
+    const convert = try b.declare(&.{e.integer}, pair, &.{}, &.{});
+    const value = try e.param(convert, 0);
+    try b.define(convert, try b.pure(try e.tuple(pair, &.{ value, try e.binary(.integer_add, value, e.one) })));
+    const mapped = try table.mapToSequence(&b, d, pair, convert);
+    const main = try b.declare(&.{d.sequence}, try projection.schema([]const Pair, &b), &.{}, &.{});
+    const saved = try b.variable(d.table);
+    try b.define(main, try b.bind(saved, try e.call(d.from_sequence, &.{try e.param(main, 0)}), try e.call(mapped, &.{try b.reference(saved)})));
+    var compiled = try source.lower(a, b.module(main, e.unit));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    var inputs: [65]u64 = undefined;
+    for (&inputs, 0..) |*item, i| item.* = i * 17 + 9;
+    for ([_]usize{ 0, 1, 2, 3, 7, 8, 9, 31, 32, 33, 64, 65 }) |count| {
+        const arguments = try projection.encode([]const u64, a, inputs[0..count]);
+        defer a.free(arguments);
+        var session = try Base.initImage(a, image, arguments);
+        defer session.deinit();
+        const outcome = try session.run(null);
+        try std.testing.expect(outcome == .completed);
+        var output = try projection.decode([]const Pair, a, try session.bytes(&outcome.completed));
+        defer output.deinit();
+        try std.testing.expectEqual(count, output.value.len);
+        for (output.value, inputs[0..count]) |item, original|
+            try std.testing.expectEqualDeep(Pair{ .original = original, .successor = original + 1 }, item);
+    }
+}
+
 fn fixture(b: *source.Builder) !source.Module {
     const e = try Author.init(b);
     const d = try table.define(b, e.integer);

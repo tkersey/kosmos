@@ -3,6 +3,45 @@ const data = @import("horos_data");
 const Store = @import("../interpreter_v2/store.zig");
 const Values = @import("../interpreter_v2/values.zig").Values;
 
+test "admitted aggregate tails preserve exact recursive field and payload bytes" {
+    const a = std.testing.allocator;
+    const schemas: []const data.program.Schema = &.{ .unit, .u64, .{ .sum = &.{ 0, 3 } }, .{ .product = &.{ 1, 2 } } };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const facts = try data.admission.schemas(scratch, schemas);
+    var store: Store.Store = .{ .allocator = a };
+    defer store.deinit();
+    var values: Values = .{ .allocator = scratch, .schemas = schemas, .facts = facts, .store = &store, .aggregate_storage = .structured };
+    var encoded: [300 * 9 + 1]u8 = undefined;
+    var writer: data.wire.Writer = .{ .output = &encoded };
+    for (0..300) |i| {
+        try writer.natural(1);
+        try writer.fixed(u64, i);
+    }
+    try writer.natural(0);
+    try data.admission.value(scratch, schemas, facts, .{ .schema = 2, .bytes = &encoded });
+    var current = try store.literal(schemas, .{ .schema = 2, .bytes = &encoded });
+    for (0..300) |i| {
+        const variant = try values.split(current);
+        try std.testing.expectEqual(1, variant.tag);
+        const product = variant.fields[0];
+        try std.testing.expectEqualSlices(u8, encoded[i * 9 + 1 ..], try values.bytes(&product));
+        const fields = try values.split(product);
+        try std.testing.expectEqualDeep(Values.natural(1, i), fields.fields[0]);
+        current = try values.evaluate(.{ .opcode = .field, .destination = 1, .immediate = 1, .operands = &.{0} }, 2, @as([]const data.graph.Value, &.{product}));
+        try std.testing.expectEqualSlices(u8, encoded[(i + 1) * 9 ..], try values.bytes(&current));
+        try std.testing.expectEqualDeep(fields.fields[1], current);
+    }
+    const terminal = try values.split(current);
+    try std.testing.expectEqual(0, terminal.tag);
+    try std.testing.expectEqualSlices(u8, &.{}, try values.bytes(&terminal.fields[0]));
+    // Tail extraction is downstream of complete admission; malformed unused
+    // data and trailing bytes never acquire this boundary guarantee.
+    try std.testing.expectError(error.InvalidValue, data.admission.value(scratch, schemas, facts, .{ .schema = 2, .bytes = &.{2} }));
+    try std.testing.expectError(error.NonCanonical, data.admission.value(scratch, schemas, facts, .{ .schema = 2, .bytes = &.{ 0, 1 } }));
+}
+
 test "immutable field memoization follows live source data and rejects rollback ID reuse" {
     const a = std.testing.allocator;
     const schemas: []const data.program.Schema = &.{ .u64, .{ .product = &.{ 0, 0 } } };
