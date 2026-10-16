@@ -3,6 +3,41 @@ const data = @import("horos_data");
 const Store = @import("../interpreter_v2/store.zig");
 const Values = @import("../interpreter_v2/values.zig").Values;
 
+test "immutable field memoization follows live source data and rejects rollback ID reuse" {
+    const a = std.testing.allocator;
+    const schemas: []const data.program.Schema = &.{ .u64, .{ .product = &.{ 0, 0 } } };
+    var statistics: Store.Statistics = .{};
+    var store: Store.Store = .{ .allocator = a, .statistics = &statistics };
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var values: Values = .{ .allocator = arena.allocator(), .schemas = schemas, .store = &store, .aggregate_storage = .structured };
+    const instruction: data.activation.Instruction = .{ .opcode = .field, .destination = 1, .immediate = 1, .operands = &.{0} };
+    const original = try store.literal(schemas, .{ .schema = 1, .bytes = &(std.mem.toBytes(@as(u64, 7)) ++ std.mem.toBytes(@as(u64, 41))) });
+    const projected = try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{original}));
+    try std.testing.expectEqualDeep(Values.natural(0, 41), projected);
+    try std.testing.expectEqualDeep(projected, try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{original})));
+    try std.testing.expectEqual(1, statistics.field_projection_hits);
+    try std.testing.expectEqual(1, statistics.field_projection_scans);
+    const root = try store.add(.{ .environment = .{ .values = &.{original}, .tail = null } });
+    try store.collect(.{ .current = root });
+    try std.testing.expectEqual(1, store.data_projections.count());
+    try std.testing.expectEqualDeep(projected, try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{original})));
+    try store.begin();
+    try store.collect(.{});
+    try std.testing.expectEqual(0, store.data_projections.count());
+    const changed = try store.literal(schemas, .{ .schema = 1, .bytes = &(std.mem.toBytes(@as(u64, 7)) ++ std.mem.toBytes(@as(u64, 99))) });
+    try std.testing.expectEqual(original.body.blob.id, changed.body.blob.id);
+    try std.testing.expectEqualDeep(Values.natural(0, 99), try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{changed})));
+    store.rollback();
+    try std.testing.expectEqual(0, store.data_projections.count());
+    try std.testing.expectEqualDeep(projected, try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{original})));
+    try store.collect(.{});
+    const replaced = try store.literal(schemas, .{ .schema = 1, .bytes = &(std.mem.toBytes(@as(u64, 7)) ++ std.mem.toBytes(@as(u64, 12))) });
+    try std.testing.expectEqual(original.body.blob.id, replaced.body.blob.id);
+    try std.testing.expectEqualDeep(Values.natural(0, 12), try values.evaluate(instruction, 0, @as([]const data.graph.Value, &.{replaced})));
+}
+
 test "recursive aggregate storage shares construction and preserves materialized bytes" {
     const a = std.testing.allocator;
     const schemas: []const data.program.Schema = &.{ .u64, .{ .sum = &.{ 0, 2 } }, .{ .product = &.{ 1, 1 } } };
@@ -33,4 +68,60 @@ test "recursive aggregate storage shares construction and preserves materialized
             std.debug.print("recursive aggregate {s} depth={d} constructed_blob_bytes={d} field_copies={d} final_bytes={d}\n", .{ @tagName(storage), depth, constructed.owned_blob_bytes, constructed.aggregate_field_copies, encoded.len });
         }
     }
+}
+
+fn retainedField(a: std.mem.Allocator) !void {
+    const schemas: []const data.program.Schema = &.{ .u64, .{ .product = &.{ 0, 0 } }, .{ .product = &.{ 1, 0 } } };
+    var store: Store.Store = .{ .allocator = a };
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var values: Values = .{ .allocator = arena.allocator(), .schemas = schemas, .store = &store, .aggregate_storage = .structured };
+    const bytes = std.mem.toBytes(@as(u64, 7)) ++ std.mem.toBytes(@as(u64, 41)) ++ std.mem.toBytes(@as(u64, 99));
+    const original = try store.literal(schemas, .{ .schema = 2, .bytes = &bytes });
+    const projected = try values.evaluate(.{ .opcode = .field, .destination = 1, .immediate = 0, .operands = &.{0} }, 1, @as([]const data.graph.Value, &.{original}));
+    const leaf = try values.evaluate(.{ .opcode = .field, .destination = 1, .immediate = 1, .operands = &.{0} }, 0, @as([]const data.graph.Value, &.{projected}));
+    try std.testing.expectEqualDeep(Values.natural(0, 41), leaf);
+    const root = try store.add(.{ .environment = .{ .values = &.{original}, .tail = null } });
+    try store.collect(.{ .current = root });
+    try std.testing.expectEqual(2, store.data_projections.count());
+    try std.testing.expectEqualSlices(u8, bytes[0..16], try values.bytes(&projected));
+    try store.collect(.{});
+    try std.testing.expectEqual(0, store.data_projections.count());
+    try std.testing.expectEqual(0, store.projection_heads.count());
+    for (store.blob_alive.items) |alive| try std.testing.expect(!alive);
+}
+
+test "derived field chains retain only reachable source data under allocation faults" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, retainedField, .{});
+}
+
+test "encoded element memoization preserves bounds and avoids zero-width history" {
+    const a = std.testing.allocator;
+    const schemas: []const data.program.Schema = &.{ .unit, .u64, .text, .{ .seq = 2 }, .{ .sum = &.{ 0, 2 } }, .{ .seq = 0 }, .{ .sum = &.{ 0, 0 } } };
+    var statistics: Store.Statistics = .{};
+    var store: Store.Store = .{ .allocator = a, .statistics = &statistics };
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var values: Values = .{ .allocator = arena.allocator(), .schemas = schemas, .store = &store, .aggregate_storage = .structured };
+    const instruction: data.activation.Instruction = .{ .opcode = .sequence_get, .destination = 2, .operands = &.{ 0, 1 } };
+    const original = try store.literal(schemas, .{ .schema = 3, .bytes = &.{ 3, 1, 'a', 2, 'b', 'c', 1, 'd' } });
+    for (0..2) |_| {
+        const found = try values.evaluate(instruction, 4, @as([]const data.graph.Value, &.{ original, Values.natural(1, 1) }));
+        try std.testing.expectEqualSlices(u8, &.{ 1, 2, 'b', 'c' }, try values.bytes(&found));
+    }
+    try std.testing.expectEqual(1, statistics.element_projection_hits);
+    const absent = try values.evaluate(instruction, 4, @as([]const data.graph.Value, &.{ original, Values.natural(1, 3) }));
+    try std.testing.expectEqualSlices(u8, &.{0}, try values.bytes(&absent));
+    const count = store.data_projections.count();
+    var encoded: [10]u8 = undefined;
+    var writer: data.wire.Writer = .{ .output = &encoded };
+    try writer.natural(std.math.maxInt(u64));
+    const empty_items = try store.literal(schemas, .{ .schema = 5, .bytes = encoded[0..writer.position] });
+    for ([_]u64{ 0, 17, std.math.maxInt(u64) - 1 }) |index| {
+        const found = try values.evaluate(instruction, 6, @as([]const data.graph.Value, &.{ empty_items, Values.natural(1, index) }));
+        try std.testing.expectEqualSlices(u8, &.{1}, try values.bytes(&found));
+    }
+    try std.testing.expectEqual(count, store.data_projections.count());
 }

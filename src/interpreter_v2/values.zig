@@ -20,6 +20,7 @@ const Collection = struct {
     offset: usize = 0,
     encoded_origin: ?g.BlobRef = null,
     byte_offset: usize = 0,
+    whole_encoded: bool = false,
     storage: union(enum) { encoded: []const u8, fields: []const g.Value },
 
     // A range owns the immutable collection view it was checked against. It
@@ -80,10 +81,26 @@ const Collection = struct {
     fn find(self: Collection, values: *Values, index: u64) Error!?g.Value {
         if (values.store.statistics) |statistics| statistics.collection_index_checks +|= 1;
         if (index >= self.count) return null;
+        return try self.elementAt(values, index);
+    }
+    fn elementAt(self: Collection, values: *Values, index: u64) Error!g.Value {
+        // Memoize only a whole encoded container with nonempty elements. A
+        // huge zero-width collection or many overlapping views must not grow
+        // a cache in proportion to access history instead of its source bytes.
+        const key: ?@import("store.zig").DataProjection = if (values.aggregate_storage == .structured and self.whole_encoded and self.encoded_origin != null and (try values.schemaFacts()).minimum[@intCast(self.element)] != 0)
+            .{ .blob = self.encoded_origin.?.id, .schema = self.element, .field = index, .element = true, .offset = self.byte_offset }
+        else
+            null;
+        if (key) |selected| if (values.store.data_projections.get(selected)) |cached| {
+            if (values.store.statistics) |statistics| statistics.element_projection_hits +|= 1;
+            return cached.value;
+        };
         // index < count proves that [index, index+1) is in this exact view,
         // including the maximum-u64 and zero-width element cases.
         const item = try (CheckedRange{ .collection = self, .start = index, .count = 1 }).materialize(values);
-        return try decodeItem(item, values);
+        const result = try decodeItem(item, values);
+        if (key) |selected| try values.store.rememberProjection(selected, result);
+        return result;
     }
     fn decodeItem(item: Collection, values: *Values) Error!g.Value {
         return switch (item.storage) {
@@ -93,7 +110,9 @@ const Collection = struct {
     }
 
     fn get(self: Collection, values: *Values, index: u64) Error!g.Value {
-        return decodeItem(try self.slice(values, index, 1), values);
+        if (values.store.statistics) |statistics| statistics.collection_range_checks +|= 1;
+        if (index >= self.count) return error.InvalidLength;
+        return self.elementAt(values, index);
     }
 
     fn write(self: Collection, values: *Values, writer: *data.wire.Writer) Error!void {
@@ -195,6 +214,15 @@ pub const Values = struct {
         if (try self.structured(value)) |parts| return parts.fields[@intCast(index)];
         const shape = self.schemas[@intCast(value.schema)];
         if (shape != .product or index >= shape.product.len) return error.TypeMismatch;
+        const key: ?@import("store.zig").DataProjection = if (self.aggregate_storage == .structured and value.body == .blob)
+            .{ .blob = value.body.blob.id, .schema = value.schema, .field = index }
+        else
+            null;
+        if (key) |selected| if (self.store.data_projections.get(selected)) |cached| {
+            if (self.store.statistics) |statistics| statistics.field_projection_hits +|= 1;
+            return cached.value;
+        };
+        if (self.store.statistics) |statistics| statistics.field_projection_scans +|= 1;
         var reader: data.wire.Reader = .{ .input = try self.bytes(&value) };
         const facts = try self.schemaFacts();
         for (shape.product[0..@intCast(index)]) |schema|
@@ -202,7 +230,9 @@ pub const Values = struct {
         const schema = shape.product[@intCast(index)];
         const encoded = try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
         // Materialize only the selected value into its own Store lifetime.
-        return self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
+        const result = try self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
+        if (key) |selected| try self.store.rememberProjection(selected, result);
+        return result;
     }
 
     fn variantPayload(self: *Values, value: g.Value, expected: p.Id) EvaluationError!g.Value {
@@ -290,6 +320,7 @@ pub const Values = struct {
             .storage = .{ .encoded = reader.input[reader.position..] },
             .encoded_origin = if (value.body == .blob) value.body.blob else null,
             .byte_offset = reader.position,
+            .whole_encoded = value.body == .blob,
         };
     }
 

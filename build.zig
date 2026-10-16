@@ -123,6 +123,17 @@ pub fn build(b: *std.Build) void {
     run_publication_bench.has_side_effects = true;
     b.step("bench-publication", "Measure native preparation, publication, receipt custody and restore (JSONL)")
         .dependOn(&b.addInstallFile(run_publication_bench.captureStdOut(.{}), "publication.jsonl").step);
+    const economy_bench = b.addExecutable(.{ .name = "semantic-economy", .root_module = b.createModule(.{
+        .root_source_file = b.path("bench_semantics.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = packaged_runtime } },
+    }) });
+    const run_economy_bench = b.addRunArtifact(economy_bench);
+    if (b.option([]const u8, "economy-workload", "Select one semantic economy workload")) |name| run_economy_bench.addArg(name);
+    run_economy_bench.has_side_effects = true;
+    b.step("bench-semantics", "Measure matched native, bootstrap, generic and specialized realizations (JSONL)")
+        .dependOn(&run_economy_bench.step);
     const stable_runtime = b.createModule(.{ .root_source_file = b.path("test_oracle.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     const oracle_tests = b.addRunArtifact(b.addTest(.{ .root_module = stable_runtime }));
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });

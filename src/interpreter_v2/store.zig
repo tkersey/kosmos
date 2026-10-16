@@ -20,10 +20,30 @@ pub const Statistics = struct {
     collection_range_checks: u64 = 0,
     retirement_table_entries: u64 = 0,
     blob_retirements: u64 = 0,
+    field_projection_hits: u64 = 0,
+    field_projection_scans: u64 = 0,
+    element_projection_hits: u64 = 0,
 };
 
 const SharedFields = struct { values: []g.Value, references: usize = 1 };
 pub const EncodedSequence = struct { backing: g.BlobRef, start: usize, length: usize, count: u64 };
+pub const DataProjection = struct {
+    blob: data.program.Id,
+    schema: data.program.Id,
+    field: data.program.Id,
+    element: bool = false,
+    offset: usize = 0,
+};
+const CachedProjection = struct { value: g.Value, next: ?DataProjection };
+const ProjectionContext = struct {
+    pub fn hash(_: ProjectionContext, key: DataProjection) u64 {
+        const words: [5]u64 = .{ key.blob, key.schema, key.field, @intFromBool(key.element), key.offset };
+        return std.hash.Wyhash.hash(0, std.mem.asBytes(&words));
+    }
+    pub fn eql(_: ProjectionContext, left: DataProjection, right: DataProjection) bool {
+        return left.blob == right.blob and left.schema == right.schema and left.field == right.field and left.element == right.element and left.offset == right.offset;
+    }
+};
 const SavedNode = struct { value: g.Node, alive: bool, borrowed: bool, fields: ?*SharedFields, sequence: ?EncodedSequence };
 const SavedBlob = struct { value: g.Blob, alive: bool, borrowed: bool };
 const Journal = struct {
@@ -74,6 +94,20 @@ pub const Store = struct {
     field_owners: std.AutoHashMapUnmanaged(usize, *SharedFields) = .empty,
     shared_field_values: usize = 0,
     encoded_sequences: std.AutoHashMapUnmanaged(usize, EncodedSequence) = .empty,
+    // Derived immutable data survives only while its source blob is reachable.
+    // These edges are private storage, not checkpoint state or independent roots.
+    data_projections: std.HashMapUnmanaged(DataProjection, CachedProjection, ProjectionContext, 80) = .empty,
+    projection_heads: std.AutoHashMapUnmanaged(data.program.Id, DataProjection) = .empty,
+
+    pub fn rememberProjection(self: *Store, key: DataProjection, value: g.Value) Error!void {
+        try self.data_projections.ensureUnusedCapacity(self.allocator, 1);
+        // Scalars have no retention edge. Only blob-valued projections need
+        // visiting when their immutable source is marked by the collector.
+        const retained = value.body == .blob;
+        if (retained) try self.projection_heads.ensureUnusedCapacity(self.allocator, 1);
+        self.data_projections.putAssumeCapacity(key, .{ .value = value, .next = if (retained) self.projection_heads.get(key.blob) else null });
+        if (retained) self.projection_heads.putAssumeCapacity(key.blob, key);
+    }
 
     pub fn begin(self: *Store) Error!void {
         if (self.journal != null) return error.InvalidState;
@@ -134,6 +168,8 @@ pub const Store = struct {
     }
 
     pub fn rollback(self: *Store) void {
+        self.data_projections.clearRetainingCapacity();
+        self.projection_heads.clearRetainingCapacity();
         var journal = self.journal.?;
         self.journal = null;
         var nodes = journal.nodes.iterator();
@@ -209,6 +245,8 @@ pub const Store = struct {
         self.interned.deinit(self.allocator);
         self.field_owners.deinit(self.allocator);
         self.encoded_sequences.deinit(self.allocator);
+        self.data_projections.deinit(self.allocator);
+        self.projection_heads.deinit(self.allocator);
         self.marks.deinit(self.allocator);
         self.blob_marks.deinit(self.allocator);
         self.pending.deinit(self.allocator);
@@ -574,9 +612,24 @@ pub const Store = struct {
             },
             .blob => |id| {
                 if (id >= blob_marks.len or !self.blob_alive.items[@intCast(id)]) return error.InvalidReference;
+                if (blob_marks[@intCast(id)]) continue;
                 blob_marks[@intCast(id)] = true;
+                var key = self.projection_heads.get(id);
+                while (key) |selected| {
+                    const cached = self.data_projections.get(selected) orelse return error.InvalidState;
+                    const before = pending.items.len;
+                    try data.graph_order.references(g.Value, cached.value, pending, self.allocator);
+                    if (self.statistics) |statistics| statistics.traced_edges +|= pending.items.len - before;
+                    key = cached.next;
+                }
             },
         };
+        // Retire cache entries before any slot can be reused. If collection
+        // fails later, surviving entries still refer only to live source data.
+        var projections = self.data_projections.iterator();
+        while (projections.next()) |entry| if (!blob_marks[@intCast(entry.key_ptr.blob)]) self.data_projections.removeByPtr(entry.key_ptr);
+        var heads = self.projection_heads.iterator();
+        while (heads.next()) |entry| if (!blob_marks[@intCast(entry.key_ptr.*)]) self.projection_heads.removeByPtr(entry.key_ptr);
         try self.free_nodes.ensureTotalCapacity(self.allocator, marks.len);
         try self.free_blobs.ensureTotalCapacity(self.allocator, blob_marks.len);
         if (self.statistics) |s| s.swept_slots +|= marks.len + blob_marks.len;
