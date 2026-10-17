@@ -65,7 +65,11 @@ qualification. One full fresh-invocation sweep retains its output/input atomicit
 assertions. These are complementary ownership boundaries, not cached test results.
 
 Instruction-by-instruction lifecycle comparisons share immutable preparation
-and reconstruct fresh mutable sessions at every cut. Source agreement likewise
+and reconstruct fresh mutable sessions at every cut. The reconstructed invocation
+also supplies the restoration comparison: `advance(.none)` directly calls
+`Session.run`, so a second restored execution would repeat that same transition.
+The independent direct session and transactional resident remain compared at
+every cut, after their input checkpoint buffer is overwritten. Source agreement likewise
 keeps a native peer process and one WASM prepared handle, restores every PST3,
 and alternates the actual native/WASM state producer. It retains all 47 examples,
 every quantum-one observation, cancellation frontier, independent source result,
@@ -74,6 +78,10 @@ exercises the complete fresh invocation entry point alongside resident execution
 The long recursion resource fixture retains all 10,000 calls and its node bound
 at every 31-step cut. It compares framing once, then executes each remaining
 slice once while retaining canonical checkpoint checks at every cut.
+The indirect recursion fixture retains inputs 7, 127 and 1024, both tail and
+non-tail calls, every 13-step cut and every seventh-cut restoration. Tail-space
+checks still export at every cut. The intentionally growing non-tail control
+exports only at those restoration points; its other exported bytes were unused.
 
 These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package

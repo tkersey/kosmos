@@ -913,24 +913,23 @@ fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Sessio
     // immutable preparation at every instruction adds no lifecycle case.
     var prepared = try retainedPreparation(subject);
     defer prepared.deinit();
-    var restored = try Session.restore(testing.allocator, &prepared, before);
-    defer restored.deinit();
     var invocation_session = try Session.restore(testing.allocator, &prepared, before);
     defer invocation_session.deinit();
+    var resident = try Resident.restore(testing.allocator, &prepared, before);
+    defer releaseResident(&resident);
+    @memset(before, 0xff);
+    const result = try subject.run(quantum);
+    // advance(.none) calls Session.run directly. This reconstructed owner
+    // proves both restoration and invocation agreement in one execution.
     _ = try @import("kosmos").invocation.advance(&invocation_session, .none, quantum);
     var fresh = try @import("kosmos").invocation.finish(testing.allocator, &invocation_session, true);
     defer fresh.deinit();
-    var resident = try Resident.restore(testing.allocator, &prepared, before);
-    defer releaseResident(&resident);
     var committed = try resident.drive(testing.allocator, .none, .{ .quantum = quantum, .checkpoint = true });
     defer committed.deinit();
     try testing.expectEqualDeep(fresh.record, committed.record);
-    @memset(before, 0xff);
-    const result = try subject.run(quantum);
-    _ = try restored.run(quantum);
     const expected = try subject.checkpoint(testing.allocator);
     defer testing.allocator.free(expected);
-    const actual = try restored.checkpoint(testing.allocator);
+    const actual = try invocation_session.checkpoint(testing.allocator);
     defer testing.allocator.free(actual);
     try testing.expectEqualSlices(u8, expected, actual);
     switch (result) {

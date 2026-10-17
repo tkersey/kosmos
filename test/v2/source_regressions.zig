@@ -1024,6 +1024,10 @@ test "tail indirect application retains its environment without accumulating ret
                     break;
                 }
                 try testing.expect(outcome == .progressed);
+                // Tail space is checked at every cut. The non-tail control
+                // intentionally grows; export it only at the existing restore
+                // points instead of constructing six unused copies per seven.
+                if (non_tail and rounds % 7 != 0) continue;
                 const state = try session.checkpoint(allocator);
                 defer allocator.free(state);
                 if (!non_tail) {
