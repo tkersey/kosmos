@@ -125,7 +125,7 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
             .{ .variable = absent, .body = try b.pure(count) },
             .{ .variable = present, .body = try b.bind(found, try e.call(m.nodes.get, &.{ prior, try e.field(current, 0) }), try e.when(try e.binary(.equal, record_tag, e.zero), try b.pure(try e.field(current, 0)), try b.pure(count))) },
         } } });
-        const empty_frame = try e.tuple(m.frames.schema, &.{ e.zero, e.zero, try m.frames.slots.empty(e), try e.literal([]const data.process_state.Owner, &.{}), try m.frames.scalars.empty(e) });
+        const empty_frame = try e.tuple(m.frames.schema, &.{ e.zero, e.zero, try m.frames.slots.empty(e), try e.literal([]const data.process_state.Owner, &.{}) });
         try b.define(d.enter, try b.bind(frame, try e.call(edge.write, &.{ empty_frame, try field(e, fn_code, ir.Function, "inputs"), try e.param(d.enter, 2) }), try b.bind(pruned, try e.call(m.frames.prune, &.{ try b.reference(frame), try edges.live(e, program, entry) }), try b.bind(chosen, select, save))));
     }
     {

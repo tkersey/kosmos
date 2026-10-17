@@ -86,8 +86,8 @@ test "portable frames preserve sparse bindings and lexical owner order" {
     }
 }
 
-test "portable scalar frames reconstruct retained bits and reject overlapping representations" {
-    const Output = struct { changed: Activation, overwritten: Activation, original: Activation, bits: u64, valid: bool, overlap: bool };
+test "portable scalar frames reconstruct retained bits with one representation per key" {
+    const Output = struct { changed: Activation, overwritten: Activation, original: Activation, bits: u64, valid: bool, duplicate_valid: bool };
     var b = source.Builder.init(a);
     defer b.deinit();
     const e = try Author.init(&b);
@@ -101,7 +101,7 @@ test "portable scalar frames reconstruct retained bits and reject overlapping re
     const generic = try b.variable(d.schema);
     const bits = try b.variable(e.integer);
     const valid = try b.variable(e.boolean);
-    const overlap = try b.variable(e.boolean);
+    const duplicate_valid = try b.variable(e.boolean);
     const duplicate = try b.variable(d.slots.tree);
     const projected = try b.variable(d.public);
     const overwritten = try b.variable(d.public);
@@ -109,13 +109,17 @@ test "portable scalar frames reconstruct retained bits and reject overlapping re
     const slot = try b.constant(u64, 5);
     const scalar_value = try e.tuple(scalar, &.{ try b.constant(u64, 1), try e.param(entry, 1) });
     const generic_value = try e.literal(data.graph.Value, .{ .schema = 1, .body = .{ .scalar = @splat(0) } });
-    var body = try b.pure(try e.tuple(output, &.{ try b.reference(projected), try b.reference(overwritten), try b.reference(saved), try b.reference(bits), try b.reference(valid), try b.reference(overlap) }));
+    var body = try b.pure(try e.tuple(output, &.{ try b.reference(projected), try b.reference(overwritten), try b.reference(saved), try b.reference(bits), try b.reference(valid), try b.reference(duplicate_valid) }));
     body = try b.bind(saved, try e.call(d.to_public, &.{try b.reference(original)}), body);
     body = try b.bind(overwritten, try e.call(d.to_public, &.{try b.reference(generic)}), body);
     body = try b.bind(projected, try e.call(d.to_public, &.{try b.reference(pruned)}), body);
     body = try b.bind(generic, try e.call(d.write, &.{ try b.reference(pruned), slot, generic_value }), body);
-    body = try b.bind(overlap, try e.call(d.valid, &.{try e.replace(try b.reference(pruned), 2, try b.reference(duplicate))}), body);
-    body = try b.bind(duplicate, try e.call(d.slots.set, &.{ try e.field(try b.reference(pruned), 2), slot, generic_value }), body);
+    body = try b.bind(duplicate_valid, try e.call(d.valid, &.{try e.replace(try b.reference(pruned), 2, try b.reference(duplicate))}), body);
+    // Two representations cannot inhabit one leaf. A forged tree with two
+    // leaves for the same key still fails the independent map-shape check.
+    const duplicate_leaf = try e.variant(d.slots.tree, 1, try e.tuple(d.slots.entry, &.{ slot, try e.variant(d.slot, 0, generic_value) }));
+    const duplicate_raw = try e.variant(d.slots.tree, 1, try e.tuple(d.slots.entry, &.{ slot, try e.variant(d.slot, 1, scalar_value) }));
+    body = try b.bind(duplicate, try b.pure(try e.variant(d.slots.tree, 2, try e.tuple(d.slots.branch, &.{ e.one, duplicate_leaf, duplicate_raw }))), body);
     body = try b.bind(valid, try e.call(d.valid, &.{try b.reference(pruned)}), body);
     body = try b.bind(bits, try e.call(d.read_raw, &.{ try b.reference(pruned), slot }), body);
     body = try b.bind(pruned, try e.call(d.prune, &.{ try b.reference(written), try e.literal([]const u64, &.{ 1, 5 }) }), try b.term(.{ .yield_then = body }));
@@ -146,7 +150,7 @@ test "portable scalar frames reconstruct retained bits and reject overlapping re
         try std.testing.expect(result == .completed);
         var decoded = try projection.decode(Output, a, try restored.bytes(&result.completed));
         defer decoded.deinit();
-        try std.testing.expect(decoded.value.valid and !decoded.value.overlap);
+        try std.testing.expect(decoded.value.valid and !decoded.value.duplicate_valid);
         try std.testing.expectEqual(input, decoded.value.bits);
         try std.testing.expectEqualDeep(initial, decoded.value.original);
         const expected: Activation = .{ .position = 17, .scope = 2, .bindings = &.{ .{ .slot = 1, .value = owned(1) }, .{ .slot = 5, .value = .{ .schema = 1, .body = .{ .scalar = std.mem.toBytes(input) } } } }, .owners = &.{.{ .scope = 0, .slot = 1 }} };

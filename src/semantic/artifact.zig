@@ -9,7 +9,7 @@ const Prepared = @import("../interpreter_v2/prepared.zig").Prepared;
 
 pub const identity = "kosmos.semantic-artifact/2";
 pub const admission_profile = "kosmos.horos-admission/3";
-pub const build_policy = "kosmos.source-lower/1";
+pub const build_policy = "kosmos.source-lower/2";
 pub const Digest = [32]u8;
 pub const Requirements = struct { base: []const u8, admission: []const u8, bridge: []const u8 };
 pub const Inventory = struct {

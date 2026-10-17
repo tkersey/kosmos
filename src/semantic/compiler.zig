@@ -19,18 +19,18 @@ pub const Options = struct {
     policy: source.specialize.Policy = .{ .work = 8_000_000, .keys_per_function = 128, .depth = 1024 },
 };
 pub const Derivation = struct {
-    original: source.ast.Module,
+    residual: source.ast.Module,
     request: source.specialize.Request,
     functions: []const source.specialize.FunctionProof,
     values: []const source.specialize.ValueProof,
     terms: []const source.specialize.TermProof,
 };
 pub const Evidence = struct {
-    module: source.ast.Module,
+    // The bound compiler reconstructs generic source, helper source and
+    // formal-parameter origins. Only residual source and finite derivations
+    // have information that cannot be recovered from that binding.
     recovery: @typeInfo(@FieldType(source.Compiled, "recovery_evidence")).optional.child,
-    parameters: []const source.RecoveryBinding,
     derivation: ?Derivation,
-    helpers: [4]source.ast.Module,
 };
 
 pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
@@ -62,30 +62,26 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
     const module = if (specialized) |*out| out.module() else original;
     var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
     defer compiled.deinit();
-    try source.recovery.validate(a, module, &compiled);
+    // Recovery lowering constructs formal origins and checks their actual
+    // correspondence. Reconstruct source when validating carried artifacts.
     const image = try encode(a, compiled.program);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
     const effects = admitted.program().effects;
     if (effects.len != 1 or !std.mem.eql(u8, effects[0].identity, service.identity)) return error.InvalidBridge;
     var helper_images: [4]artifact.Helper = undefined;
-    var helper_modules: [4]source.ast.Module = undefined;
     for (helpers, 0..) |helper, i| {
-        helper_modules[i] = b.module(helper, failure);
-        var lowered = try source.lower(a, helper_modules[i]);
+        var lowered = try source.lower(a, b.module(helper, failure));
         defer lowered.deinit();
         const bytes = try encode(a, lowered.program);
         const checked = try data.program_image.Admitted.decode(a, bytes);
         defer checked.deinit();
         helper_images[i] = .{ .image = bytes, .inventory = try artifact.inventory(a, try profile.check(checked, .{})) };
     }
-    const anchors = try anchorMap(a, &b, s, clone, &compiled, if (specialized) |*out| out else null);
+    const anchors = try anchorMap(a, &b, s, clone, compiled.parameters, if (specialized) |*out| out else null);
     const evidence = try encodeEvidence(a, .{
-        .module = module,
         .recovery = compiled.recovery_evidence.?,
-        .parameters = compiled.parameters,
-        .derivation = if (specialized) |*out| .{ .original = original, .request = out.request, .functions = out.functions.items, .values = out.value_proofs.items, .terms = out.term_proofs.items } else null,
-        .helpers = helper_modules,
+        .derivation = if (specialized) |*out| .{ .residual = module, .request = out.request, .functions = out.functions.items, .values = out.value_proofs.items, .terms = out.term_proofs.items } else null,
     });
     const bytes = try projection.encode(artifact.Bundle, allocator, .{
         .manifest = .{
@@ -101,8 +97,8 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
         .specialization = if (specialized) |*out| out.key else null,
         .hooks = options.hooks,
         .recovery = .{ .projector = helper_images[0], .storage = helper_images[1], .clone_context = helper_images[2], .clone_rebase = helper_images[3], .anchors = anchors },
-        .branch_returns = try functionMap(a, clone.instantiate, &compiled, if (specialized) |*out| out else null),
-        .template_entries = try functionMap(a, graph.template, &compiled, if (specialized) |*out| out else null),
+        .branch_returns = try functionMap(a, clone.instantiate, compiled.parameters, if (specialized) |*out| out else null),
+        .template_entries = try functionMap(a, graph.template, compiled.parameters, if (specialized) |*out| out else null),
         .evidence = evidence,
     });
     errdefer allocator.free(bytes);
@@ -131,7 +127,7 @@ pub fn contextWithHooks(guest: artifact.Digest, hooks: service.instrumentation.H
 
 const Selector = struct { function: Id, role: artifact.Role, ordinals: []const usize };
 
-fn anchorMap(a: std.mem.Allocator, b: *const source.Builder, s: service.Definition, clone: clones.Definition, compiled: *const source.Compiled, specialized: ?*const source.specialize.Output) ![]const artifact.Anchor {
+fn anchorMap(a: std.mem.Allocator, b: *const source.Builder, s: service.Definition, clone: clones.Definition, parameters: []const source.RecoveryBinding, specialized: ?*const source.specialize.Output) ![]const artifact.Anchor {
     var anchors: std.ArrayList(artifact.Anchor) = .empty;
     const selectors = [_]Selector{
         .{ .function = s.loop, .role = .published_service, .ordinals = &.{1} },
@@ -148,15 +144,15 @@ fn anchorMap(a: std.mem.Allocator, b: *const source.Builder, s: service.Definiti
         .{ .function = clone.rebase, .role = .clone_rebase, .ordinals = &.{ 0, 1, 2, 3 } },
     };
     for (selectors) |selector| {
-        try addAnchor(a, &anchors, compiled, selector, b.module(s.entry, 0), selector.function, null);
+        try addAnchor(a, &anchors, parameters, selector, b.module(s.entry, 0), selector.function, null);
         if (specialized) |out| for (out.functions.items) |f| {
-            if (f.before == selector.function) try addAnchor(a, &anchors, compiled, selector, out.module(), f.after, f.arguments);
+            if (f.before == selector.function) try addAnchor(a, &anchors, parameters, selector, out.module(), f.after, f.arguments);
         };
     }
     return anchors.toOwnedSlice(a);
 }
 
-fn addAnchor(a: std.mem.Allocator, anchors: *std.ArrayList(artifact.Anchor), compiled: *const source.Compiled, selector: Selector, module: source.ast.Module, function: Id, knowledge: ?[]const source.specialize.Knowledge) !void {
+fn addAnchor(a: std.mem.Allocator, anchors: *std.ArrayList(artifact.Anchor), bindings: []const source.RecoveryBinding, selector: Selector, module: source.ast.Module, function: Id, knowledge: ?[]const source.specialize.Knowledge) !void {
     var parameters: std.ArrayList(artifact.Parameter) = .empty;
     var final_function: ?Id = null;
     for (selector.ordinals, 0..) |original_ordinal, ordinal| {
@@ -170,7 +166,7 @@ fn addAnchor(a: std.mem.Allocator, anchors: *std.ArrayList(artifact.Anchor), com
         }
         const variable = module.functions[@intCast(function)].parameters[actual];
         var found = false;
-        for (compiled.parameters) |binding| if (binding.source_function == function and binding.variable == variable) {
+        for (bindings) |binding| if (binding.source_function == function and binding.variable == variable) {
             if (final_function) |prior| if (prior != binding.function) return error.InvalidRecovery;
             final_function = binding.function;
             try parameters.append(a, .{ .ordinal = ordinal, .slot = binding.slot, .schema = binding.schema });
@@ -188,9 +184,9 @@ fn encode(a: std.mem.Allocator, program: data.activation.Program) ![]u8 {
     return bytes;
 }
 
-fn functionMap(a: std.mem.Allocator, original: Id, compiled: *const source.Compiled, specialized: ?*const source.specialize.Output) ![]const Id {
+fn functionMap(a: std.mem.Allocator, original: Id, parameters: []const source.RecoveryBinding, specialized: ?*const source.specialize.Output) ![]const Id {
     var result: std.ArrayList(Id) = .empty;
-    for (compiled.parameters) |binding| {
+    for (parameters) |binding| {
         var selected = binding.source_function == original;
         if (specialized) |out| for (out.functions.items) |f| {
             if (f.before == original and f.after == binding.source_function) selected = true;
@@ -215,12 +211,12 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var reader: data.wire.Reader = .{ .input = admitted.content.value.evidence };
-    const evidence = try data.record.read(Evidence, &reader, scratch);
-    try reader.finish();
     const bundle = admitted.content.value;
     if (!std.mem.eql(u8, &bundle.manifest.source, &@import("source_identity.zig").digest()) or
         !std.mem.eql(u8, bundle.manifest.compiler.policy, artifact.build_policy)) return error.UnsupportedSource;
+    var reader: data.wire.Reader = .{ .input = bundle.evidence };
+    const evidence = try data.record.read(Evidence, &reader, scratch);
+    try reader.finish();
     var expected_builder = source.Builder.init(scratch);
     defer expected_builder.deinit();
     const s = try service.defineWithHooks(&expected_builder, bundle.guest != null, bundle.hooks);
@@ -236,13 +232,13 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
     };
     const failure = try expected_builder.scalar(void);
     const original = expected_builder.module(s.entry, failure);
-    var compiled: source.Compiled = .{ .arena = undefined, .program = admitted.program.program(), .flow = undefined, .parameters = evidence.parameters, .recovery_evidence = evidence.recovery };
-    try source.recovery.validate(scratch, evidence.module, &compiled);
+    const module = if (evidence.derivation) |d| d.residual else original;
+    const parameters = try source.recovery.parameters(scratch, module, admitted.program.program(), evidence.recovery);
     var anchors: []const artifact.Anchor = undefined;
     var branch_returns: []const Id = undefined;
     var template_entries: []const Id = undefined;
     if (evidence.derivation) |d| {
-        if (!data.record.equal(source.ast.Module, original, d.original) or d.request.function != s.entry or d.request.arguments.len != 2 or
+        if (d.request.function != s.entry or d.request.arguments.len != 2 or
             d.request.arguments[0] != .known or d.request.arguments[1] != .dynamic or d.request.arguments[0].known.schema != m.program) return error.InvalidRealization;
         var known = try projection.decode(projection.Program, scratch, d.request.arguments[0].known.bytes);
         defer known.deinit();
@@ -252,9 +248,9 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
             !std.mem.eql(u8, try projection.programBytes(scratch, guest), d.request.arguments[0].known.bytes)) return error.InvalidRealization;
         var out: source.specialize.Output = .{
             .builder = source.Builder.init(scratch),
-            .original = d.original,
+            .original = original,
             .request = d.request,
-            .entry = evidence.module.entry,
+            .entry = module.entry,
             .key = admitted.content.value.specialization orelse return error.InvalidRealization,
             .functions = .fromOwnedSlice(@constCast(d.functions)),
             .value_proofs = .fromOwnedSlice(@constCast(d.values)),
@@ -262,25 +258,24 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
         };
         defer out.deinit();
         inline for (.{ "schemas", "constants", "effects", "handlers", "resources", "variables", "values", "terms", "functions" }) |name| {
-            try @field(out.builder, name).appendSlice(out.builder.allocator(), @field(evidence.module, name));
+            try @field(out.builder, name).appendSlice(out.builder.allocator(), @field(module, name));
         }
-        out.builder.region_count = evidence.module.region_count;
+        out.builder.region_count = module.region_count;
         if (!data.record.equal(source.specialize.Context, d.request.context, contextWithHooks(admitted.content.value.guest orelse return error.InvalidRealization, bundle.hooks))) return error.InvalidRealization;
-        try source.specialize.validate(scratch, d.original, d.request, &out);
-        anchors = try anchorMap(scratch, &expected_builder, s, clone, &compiled, &out);
-        branch_returns = try functionMap(scratch, clone.instantiate, &compiled, &out);
-        template_entries = try functionMap(scratch, graph.template, &compiled, &out);
+        try source.specialize.validate(scratch, original, d.request, &out);
+        anchors = try anchorMap(scratch, &expected_builder, s, clone, parameters, &out);
+        branch_returns = try functionMap(scratch, clone.instantiate, parameters, &out);
+        template_entries = try functionMap(scratch, graph.template, parameters, &out);
     } else {
-        if (bundle.specialization != null or !data.record.equal(source.ast.Module, original, evidence.module)) return error.InvalidRealization;
-        anchors = try anchorMap(scratch, &expected_builder, s, clone, &compiled, null);
-        branch_returns = try functionMap(scratch, clone.instantiate, &compiled, null);
-        template_entries = try functionMap(scratch, graph.template, &compiled, null);
+        if (bundle.specialization != null or bundle.guest != null) return error.InvalidRealization;
+        anchors = try anchorMap(scratch, &expected_builder, s, clone, parameters, null);
+        branch_returns = try functionMap(scratch, clone.instantiate, parameters, null);
+        template_entries = try functionMap(scratch, graph.template, parameters, null);
     }
     if (!data.record.equal([]const artifact.Anchor, anchors, bundle.recovery.anchors)) return error.InvalidRecovery;
     if (!std.mem.eql(Id, branch_returns, bundle.branch_returns) or !std.mem.eql(Id, template_entries, bundle.template_entries)) return error.InvalidRecovery;
-    for (evidence.helpers, admitted.helpers, helper_entries) |module, helper, entry| {
-        if (!data.record.equal(source.ast.Module, expected_builder.module(entry, failure), module)) return error.InvalidRecovery;
-        var lowered = try source.lower(scratch, module);
+    for (admitted.helpers, helper_entries) |helper, entry| {
+        var lowered = try source.lower(scratch, expected_builder.module(entry, failure));
         defer lowered.deinit();
         if (!data.record.equal(data.activation.Program, lowered.program, helper.program())) return error.InvalidRecovery;
     }

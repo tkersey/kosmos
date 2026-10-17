@@ -24,6 +24,16 @@ derivation, lowering evidence and recovery helper images. The execution owner
 must approve that artifact and the work in which it will execute. Artifact bytes,
 hashes and capsule provenance fields confer no external authority.
 
+Compiler policy `kosmos.source-lower/2` reconstructs generic and helper source
+from the bound implementation. A specialized artifact carries its residual
+source and finite specialization derivation. Horos reconstructs the trusted
+frontend's lowering input and formal-parameter origins, then independently
+checks the carried structural correspondence against the actual final image.
+The evidence does not supply alternative generic source, helper source,
+lowering input, or parameter bindings. Recovery-preserving lowering retains
+general handler clauses when tail conversion has no checked origin transport;
+source specialization and structural coalescing remain available.
+
 ## Representation and correspondence
 
 Guest nodes and blobs live in persistent binary forests; frame bindings use
@@ -40,8 +50,9 @@ reference-bound checks still run before the reconstructed state reaches guest
 admission. The base also uses the known end of an admitted product or sum when
 extracting its final field, avoiding another full parse of that subtree.
 
-Specialized scalar frames split bindings into disjoint ordinary and raw maps.
-The raw entry is `(schema, bits:u64)`. Define `E(n)[i] = (n / 256^i) mod 256`
+Frames use one sparse map whose entry is either an ordinary guest value or a raw
+scalar `(schema, bits:u64)`. The map owns key uniqueness and the tagged entry
+contains exactly one representation. Define `E(n)[i] = (n / 256^i) mod 256`
 and `D(b) = sum(b[i] * 256^i)`, for eight bytes. The source implementations in
 `scalar.zig` satisfy `D(E(n)) = n` and `E(D(b)) = b` over their complete types:
 the positional sum is at most `2^64-1`, and every encoded digit is a byte.
@@ -52,19 +63,21 @@ through unchanged. Specialization removes the adjacent conversion operations.
 The representation law therefore depends on the following frame operations:
 
 - `read` packs a raw entry; `read_raw` decodes an ordinary scalar entry.
-- `write` removes the corresponding raw entry; `write_raw` clears ordinary
-  storage and old ownership before installing raw bits.
-- `clear` removes both representations; `retain` applies the same live-key set
-  to both maps. Raw scalars carry no owned guest resource.
-- `to_public` materializes the raw map into ordinary guest bindings; `valid`
-  independently rejects overlapping maps. Guest admission then checks the
+- `write` and `write_raw` replace the single entry and remove its old ownership;
+  an owned ordinary value establishes its new owner. Raw scalars carry no owned
+  guest resource.
+- `clear` removes the entry; `retain` selects the live keys from this one map.
+- `to_public` traverses the map in key order and materializes raw entries while
+  emitting ordinary guest bindings. `valid` independently rejects malformed map
+  structure, including duplicate keys. Guest admission then checks the
   reconstructed schema, width, layout, liveness and ownership.
 
-Hydration starts with ordinary bindings and an empty raw map, making every
+Hydration wraps each admitted ordinary binding in the ordinary-value variant, making every
 admitted guest cut available to either realization. This is a rule argument
 about these operations, not a universal claim inferred from benchmark samples.
 `frame_tests.zig` challenges mixed writes, clears, pruning, old versions and
-overlap. `scalar_tests.zig` compares arithmetic to Horos's independent scalar
+duplicate-key trees. The former cross-map overlap state has no representation in
+a valid single map. `scalar_tests.zig` compares arithmetic to Horos's independent scalar
 oracle. `semantic_specialization_tests.zig` compares actual residual execution
 and canonical states and counts removed packing work on dynamic inputs.
 

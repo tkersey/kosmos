@@ -60,6 +60,59 @@ fn complete(pump: *driver.Driver) !projection.Owned(@import("semantic/service.zi
     };
 }
 
+test "carried recovery binds admitted image and helpers to reconstructed source" {
+    const compiler = @import("semantic/compiler.zig");
+    var admitted = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    defer admitted.deinit();
+    var program = admitted.program.program();
+    const constants = try a.dupe(data.program.Literal, program.constants);
+    defer a.free(constants);
+    var changed_literal: [8]u8 = undefined;
+    var changed = false;
+    for (constants) |*literal| {
+        if (program.schemas[@intCast(literal.schema)] != .u64) continue;
+        @memcpy(&changed_literal, literal.bytes);
+        changed_literal[0] ^= 1;
+        literal.bytes = &changed_literal;
+        changed = true;
+        break;
+    }
+    try std.testing.expect(changed);
+    program.constants = constants;
+    const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+    defer a.free(image);
+    _ = try data.program_image.encode(a, program, image);
+    // Ordinary admission and recomputed content identities do not certify
+    // that this different valid program derives from the approved source.
+    const checked = try data.program_image.Admitted.decode(a, image);
+    defer checked.deinit();
+    var bundle = admitted.content.value;
+    bundle.image = image;
+    bundle.manifest.image = checked.identity();
+    const forged_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    defer a.free(forged_bytes);
+    var forged = try artifact.Admitted.init(a, forged_bytes, artifact.digest(forged_bytes));
+    defer forged.deinit();
+    try std.testing.expectError(error.InvalidCorrespondence, compiler.validate(a, &forged));
+
+    bundle = admitted.content.value;
+    bundle.recovery.storage = bundle.recovery.projector;
+    const helper_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    defer a.free(helper_bytes);
+    var helper = try artifact.Admitted.init(a, helper_bytes, artifact.digest(helper_bytes));
+    defer helper.deinit();
+    try std.testing.expectError(error.InvalidRecovery, compiler.validate(a, &helper));
+
+    bundle = admitted.content.value;
+    bundle.manifest.compiler.policy = "kosmos.source-lower/1";
+    bundle.evidence = &.{};
+    const legacy_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    defer a.free(legacy_bytes);
+    var legacy = try artifact.Admitted.init(a, legacy_bytes, artifact.digest(legacy_bytes));
+    defer legacy.deinit();
+    try std.testing.expectError(error.UnsupportedSource, compiler.validate(a, &legacy));
+}
+
 test "approved source instrumentation preserves cuts and blocks publication without a guest failure" {
     const compiler = @import("semantic/compiler.zig");
     const facade = @import("semantic/session.zig");
@@ -135,7 +188,9 @@ test "approved source instrumentation preserves cuts and blocks publication with
     defer a.free(forged_bytes);
     var forged = try artifact.Admitted.init(a, forged_bytes, artifact.digest(forged_bytes));
     defer forged.deinit();
-    try std.testing.expectError(error.InvalidRealization, compiler.validate(a, &forged));
+    // Reconstructed instrumented source already differs from this image at
+    // the structural correspondence check, before any claimed derivation.
+    try std.testing.expectError(error.InvalidCorrespondence, compiler.validate(a, &forged));
 }
 
 test "packaged specialized realization carries independently checked recovery and exact guest binding" {

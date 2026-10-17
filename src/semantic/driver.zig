@@ -77,11 +77,13 @@ pub const Driver = struct {
         errdefer runtime.release();
         if (selected.content.value.guest) |identity| if (!std.mem.eql(u8, &identity, &lease.admitted().identity())) return error.GuestIdentityMismatch;
         try admitInitial(a, lease.admitted(), initial);
-        const program = try projection.programBytes(a, lease.admitted());
-        defer a.free(program);
+        // Specialized code already binds the admitted guest program. Only the
+        // generic service accepts its projection as a dynamic argument.
+        const program = if (selected.content.value.guest == null) try projection.programBytes(a, lease.admitted()) else null;
+        defer if (program) |bytes| a.free(bytes);
         const input = try projection.encode(service.Initial, a, initial);
         errdefer a.free(input);
-        const arguments = if (selected.content.value.guest == null) try std.mem.concat(a, u8, &.{ program, input }) else try a.dupe(u8, input);
+        const arguments = if (program) |bytes| try std.mem.concat(a, u8, &.{ bytes, input }) else try a.dupe(u8, input);
         defer a.free(arguments);
         return .{
             .allocator = a,

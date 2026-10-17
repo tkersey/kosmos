@@ -8,14 +8,15 @@ const table = @import("table.zig");
 const Author = @import("author.zig").Author;
 const Id = data.program.Id;
 const Error = source.Error;
-pub const Field = enum(usize) { position, scope, bindings, owners, scalars };
+pub const Field = enum(usize) { position, scope, bindings, owners };
 pub const Scalar = struct { schema: Id, bits: u64 };
+pub const Slot = union(enum) { value: data.graph.Value, scalar: Scalar };
 
 pub const Definition = struct {
     schema: Id,
     public: Id,
+    slot: Id,
     slots: maps.Definition,
-    scalars: maps.Definition,
     read_raw: Id,
     write_raw: Id,
     valid: Id,
@@ -35,20 +36,20 @@ pub fn define(b: *source.Builder) Error!Definition {
     if (cache.cached) |saved| return saved;
     const e = try Author.init(b);
     const value = try projection.schema(data.graph.Value, b);
-    const slots = try maps.define(b, value);
+    const slot_type = try projection.schema(Slot, b);
+    const slots = try maps.define(b, slot_type);
     const scalar = try projection.schema(Scalar, b);
-    const scalars = try maps.define(b, scalar);
     const public = try projection.schema(data.process_state.Activation, b);
     const owners = try projection.schema([]const data.process_state.Owner, b);
-    const schema = try b.schema(.{ .product = &.{ e.integer, e.integer, slots.tree, owners, scalars.tree } });
+    const schema = try b.schema(.{ .product = &.{ e.integer, e.integer, slots.tree, owners } });
     const scopes = try projection.schema([]const data.activation.CustodyScope, b);
     const live = try projection.schema([]const Id, b);
     const keys = try @import("sets.zig").define(b);
     const d: Definition = .{
         .schema = schema,
         .public = public,
+        .slot = slot_type,
         .slots = slots,
-        .scalars = scalars,
         .read_raw = try b.declare(&.{ schema, e.integer }, e.integer, &.{}, &.{}),
         .write_raw = try b.declare(&.{ schema, e.integer, scalar }, schema, &.{}, &.{}),
         .valid = try b.declare(&.{schema}, e.boolean, &.{}, &.{}),
@@ -64,41 +65,31 @@ pub fn define(b: *source.Builder) Error!Definition {
     };
     const scalar_ops = try @import("scalar.zig").define(b);
     const materialize = try emitScalars(e, d, scalar_ops);
-    {
-        const input = try e.param(d.from_public, 0);
-        const bindings = try b.variable(slots.tree);
-        try b.define(d.from_public, try b.bind(bindings, try e.call(slots.from_sequence, &.{try e.field(input, 2)}), try b.pure(try e.tuple(schema, &.{ try e.field(input, 0), try e.field(input, 1), try b.reference(bindings), try e.field(input, 3), try scalars.empty(e) }))));
-        const hydrated = try e.param(d.to_public, 0);
-        const merged = try b.variable(slots.tree);
-        const published = try b.variable(slots.entries);
-        try b.define(d.to_public, try b.bind(merged, try e.call(materialize, &.{ try e.field(hydrated, 4), try e.field(hydrated, 2) }), try b.bind(published, try e.call(slots.to_sequence, &.{try b.reference(merged)}), try b.pure(try e.tuple(public, &.{ try e.field(hydrated, 0), try e.field(hydrated, 1), try b.reference(published), try e.field(hydrated, 3) })))));
-    }
+    try emitProjection(e, d, materialize);
     const without = try ownerWalk(e, slots, .remove);
     const rescope = try ownerWalk(e, slots, .scope);
     const retained = try ownerWalk(e, slots, .prune);
     const establish = try emitEstablish(e);
-    inline for (.{ true, false }) |writing| {
-        const function = if (writing) d.write else d.clear;
+    inline for (.{ d.write, d.write_raw, d.clear }, 0..) |function, kind| {
         const input = try e.param(function, 0);
         const slot = try e.param(function, 1);
         const changed_slots = try b.variable(slots.tree);
         const changed_owners = try b.variable(owners);
-        const changed_scalars = try b.variable(scalars.tree);
         const established = try b.variable(owners);
         const old_owners = try e.field(input, 3);
         const new_slots = try b.reference(changed_slots);
         const new_owners = try b.reference(changed_owners);
-        const result = try e.replace(try e.replace(input, 2, new_slots), 4, try b.reference(changed_scalars));
+        const result = try e.replace(input, 2, new_slots);
         const plain = try b.pure(try e.replace(result, 3, new_owners));
         var finish = plain;
-        if (writing) {
+        if (kind == 0) {
             const written = try e.param(function, 2);
             const tag = try b.primitive(e.integer, .variant_tag, &.{try e.field(written, 1)}, 0);
             finish = try e.when(try e.binary(.equal, tag, try b.constant(u64, 3)), try b.bind(established, try e.call(establish, &.{ new_owners, try e.field(input, 1), slot }), try b.pure(try e.replace(result, 3, try b.reference(established)))), plain);
         }
         finish = try b.bind(changed_owners, try e.call(without, &.{ old_owners, slot }), finish);
-        const updated = if (writing) try e.call(slots.set, &.{ try e.field(input, 2), slot, try e.param(function, 2) }) else try e.call(slots.remove, &.{ try e.field(input, 2), slot });
-        try b.define(function, try b.bind(changed_scalars, try e.call(scalars.remove, &.{ try e.field(input, 4), slot }), try b.bind(changed_slots, updated, finish)));
+        const updated = if (kind != 2) try e.call(slots.set, &.{ try e.field(input, 2), slot, try e.variant(slot_type, kind, try e.param(function, 2)) }) else try e.call(slots.remove, &.{ try e.field(input, 2), slot });
+        try b.define(function, try b.bind(changed_slots, updated, finish));
     }
     {
         const common = try b.declare(&.{ scopes, e.integer, e.integer }, e.integer, &.{}, &.{});
@@ -220,13 +211,11 @@ fn emitPrune(e: Author, d: Definition, retained_owners: Id) Error!void {
     const sets = try @import("sets.zig").define(b);
     const keys = sets.map;
     const retain = try emitRetain(e, d.slots, keys);
-    const retain_scalars = try emitRetain(e, d.scalars, keys);
     const frame = try e.param(d.retain, 0);
     const mask = try b.variable(keys.tree);
     const changed = try b.variable(d.slots.tree);
-    const changed_scalars = try b.variable(d.scalars.tree);
     const owners = try b.variable(try projection.schema([]const data.process_state.Owner, b));
-    try b.define(d.retain, try b.bind(changed_scalars, try e.call(retain_scalars, &.{ try e.field(frame, 4), try e.param(d.retain, 1) }), try b.bind(changed, try e.call(retain, &.{ try e.field(frame, 2), try e.param(d.retain, 1) }), try b.bind(owners, try e.call(retained_owners, &.{ try e.field(frame, 3), try b.reference(changed) }), try b.pure(try e.replace(try e.replace(try e.replace(frame, 2, try b.reference(changed)), 3, try b.reference(owners)), 4, try b.reference(changed_scalars)))))));
+    try b.define(d.retain, try b.bind(changed, try e.call(retain, &.{ try e.field(frame, 2), try e.param(d.retain, 1) }), try b.bind(owners, try e.call(retained_owners, &.{ try e.field(frame, 3), try b.reference(changed) }), try b.pure(try e.replace(try e.replace(frame, 2, try b.reference(changed)), 3, try b.reference(owners))))));
     try b.define(d.prune, try b.bind(mask, try e.call(sets.from_sequence, &.{try e.param(d.prune, 1)}), try e.call(d.retain, &.{ try e.param(d.prune, 0), try b.reference(mask) })));
 }
 
@@ -234,74 +223,84 @@ fn isEmpty(e: Author, value: Id) Error!Id {
     return e.binary(.equal, try e.b.primitive(e.integer, .variant_tag, &.{value}, 0), e.zero);
 }
 
-// Disjoint scalar storage is a representation of guest slots, not a second
-// execution. Generic accesses materialize one value; raw accesses retain bits.
+// A slot contains one tagged representation. Replacing it cannot leave a
+// second value in another map. Generic reads materialize only a selected scalar.
 fn emitScalars(e: Author, d: Definition, scalar: @import("scalar.zig").Definition) Error!Id {
     const b = e.b;
     const value = try projection.schema(data.graph.Value, b);
+    const raw_type = try projection.schema(Scalar, b);
     const body_schema = b.schemas.items[@intCast(value)].product[1];
-    const pack = try b.declare(&.{try projection.schema(Scalar, b)}, value, &.{}, &.{});
+    const pack = try b.declare(&.{raw_type}, value, &.{}, &.{});
     const bytes = try b.variable(try projection.schema([8]u8, b));
     const raw = try e.param(pack, 0);
     try b.define(pack, try b.bind(bytes, try e.call(scalar.encode, &.{try e.field(raw, 1)}), try b.pure(try e.tuple(value, &.{ try e.field(raw, 0), try e.variant(body_schema, 0, try b.reference(bytes)) }))));
-    inline for (.{ false, true }) |raw_access| {
-        const function = if (raw_access) d.read_raw else d.read;
-        const input = try e.param(function, 0);
-        const slot = try e.param(function, 1);
-        const found = try b.variable(d.scalars.optional);
-        const generic = try b.variable(d.slots.optional);
-        const selected = try e.payload(try b.reference(generic), 1);
-        const ordinary = if (raw_access)
-            try e.call(scalar.decode, &.{try e.payload(try e.field(selected, 1), 0)})
+    const materialize = try b.declare(&.{d.slot}, value, &.{}, &.{});
+    inline for (.{ materialize, d.read, d.read_raw }, 0..) |function, kind| {
+        const generic = try b.variable(value);
+        const retained = try b.variable(raw_type);
+        const ordinary = if (kind == 2)
+            try e.call(scalar.decode, &.{try e.payload(try e.field(try b.reference(generic), 1), 0)})
         else
-            try b.pure(selected);
-        const fallback = try b.bind(generic, try e.call(d.slots.get, &.{ try e.field(input, 2), slot }), ordinary);
-        const retained = try e.payload(try b.reference(found), 1);
-        const direct = if (raw_access) try b.pure(try e.field(retained, 1)) else try e.call(pack, &.{retained});
-        try b.define(function, try b.bind(found, try e.call(d.scalars.get, &.{ try e.field(input, 4), slot }), try e.when(try isEmpty(e, try b.reference(found)), fallback, direct)));
+            try b.pure(try b.reference(generic));
+        const direct = if (kind == 2) try b.pure(try e.field(try b.reference(retained), 1)) else try e.call(pack, &.{try b.reference(retained)});
+        const found = try b.variable(d.slots.optional);
+        const selected = if (kind == 0) try e.param(function, 0) else try e.payload(try b.reference(found), 1);
+        var body = try b.term(.{ .match_sum = .{ .value = selected, .cases = &.{
+            .{ .variable = generic, .body = ordinary },
+            .{ .variable = retained, .body = direct },
+        } } });
+        if (kind != 0) body = try b.bind(found, try e.call(d.slots.get, &.{ try e.field(try e.param(function, 0), 2), try e.param(function, 1) }), body);
+        try b.define(function, body);
     }
+    try b.define(d.valid, try e.call(d.slots.valid, &.{try e.field(try e.param(d.valid, 0), 2)}));
+    return materialize;
+}
+
+fn emitProjection(e: Author, d: Definition, materialize: Id) Error!void {
+    const b = e.b;
+    const binding = try projection.schema(data.process_state.Binding, b);
+    const bindings = try projection.schema([]const data.process_state.Binding, b);
+    const output = try table.define(b, binding);
+    const fill = try b.declare(&.{ bindings, d.slots.tree }, d.slots.tree, &.{}, &.{});
     {
-        const input = try e.param(d.write_raw, 0);
-        const slot = try e.param(d.write_raw, 1);
-        const cleared = try b.variable(d.schema);
-        const changed = try b.variable(d.scalars.tree);
-        // Clear removes old ownership as well as either old representation.
-        try b.define(d.write_raw, try b.bind(cleared, try e.call(d.clear, &.{ input, slot }), try b.bind(changed, try e.call(d.scalars.set, &.{ try e.field(try b.reference(cleared), 4), slot, try e.param(d.write_raw, 2) }), try b.pure(try e.replace(try b.reference(cleared), 4, try b.reference(changed))))));
-    }
-    const materialize = try b.declare(&.{ d.scalars.tree, d.slots.tree }, d.slots.tree, &.{}, &.{});
-    const disjoint = try b.declare(&.{ d.scalars.tree, d.slots.tree }, e.boolean, &.{}, &.{});
-    inline for (.{ false, true }) |checking| {
-        const function = if (checking) disjoint else materialize;
-        const input = try e.param(function, 0);
-        const generic = try e.param(function, 1);
+        const parts = try b.schema(.{ .product = &.{ binding, bindings } });
+        const popped = try b.schema(.{ .sum = &.{ e.unit, parts } });
         const nil = try b.variable(e.unit);
-        const leaf = try b.variable(d.scalars.entry);
-        const fork = try b.variable(d.scalars.branch);
+        const pair_var = try b.variable(parts);
+        const pair = try b.reference(pair_var);
+        const entry = try e.field(pair, 0);
+        const next = try b.variable(d.slots.tree);
+        try b.define(fill, try b.term(.{ .match_sum = .{
+            .value = try b.primitive(popped, .sequence_pop, &.{try e.param(fill, 0)}, 0),
+            .cases = &.{
+                .{ .variable = nil, .body = try b.pure(try e.param(fill, 1)) },
+                .{ .variable = pair_var, .body = try b.bind(next, try e.call(d.slots.set, &.{ try e.param(fill, 1), try e.field(entry, 0), try e.variant(d.slot, 0, try e.field(entry, 1)) }), try e.call(fill, &.{ try e.field(pair, 1), try b.reference(next) })) },
+            },
+        } }));
+        const input = try e.param(d.from_public, 0);
+        const filled = try b.variable(d.slots.tree);
+        try b.define(d.from_public, try b.bind(filled, try e.call(fill, &.{ try e.field(input, 2), try d.slots.empty(e) }), try b.pure(try e.tuple(d.schema, &.{ try e.field(input, 0), try e.field(input, 1), try b.reference(filled), try e.field(input, 3) }))));
+    }
+    const collect = try b.declare(&.{ d.slots.tree, output.table }, output.table, &.{}, &.{});
+    {
+        const nil = try b.variable(e.unit);
+        const leaf = try b.variable(d.slots.entry);
+        const fork = try b.variable(d.slots.branch);
         const node = try b.reference(fork);
         const entry = try b.reference(leaf);
-        const converted = try b.variable(value);
-        const found = try b.variable(d.slots.optional);
-        const left = try b.variable(if (checking) e.boolean else d.slots.tree);
-        const leaf_body = if (checking)
-            try b.bind(found, try e.call(d.slots.get, &.{ generic, try e.field(entry, 0) }), try b.pure(try isEmpty(e, try b.reference(found))))
-        else
-            try b.bind(converted, try e.call(pack, &.{try e.field(entry, 1)}), try e.call(d.slots.set, &.{ generic, try e.field(entry, 0), try b.reference(converted) }));
-        const right = try e.call(function, &.{ try e.field(node, 2), if (checking) generic else try b.reference(left) });
-        const branch = try b.bind(left, try e.call(function, &.{ try e.field(node, 1), generic }), if (checking) try e.when(try b.reference(left), right, try b.pure(try b.constant(bool, false))) else right);
-        try b.define(function, try b.term(.{ .match_sum = .{ .value = input, .cases = &.{
-            .{ .variable = nil, .body = try b.pure(if (checking) try b.constant(bool, true) else generic) },
-            .{ .variable = leaf, .body = leaf_body },
-            .{ .variable = fork, .body = branch },
+        const prior = try e.param(collect, 1);
+        const converted = try b.variable(try projection.schema(data.graph.Value, b));
+        const left = try b.variable(output.table);
+        try b.define(collect, try b.term(.{ .match_sum = .{ .value = try e.param(collect, 0), .cases = &.{
+            .{ .variable = nil, .body = try b.pure(prior) },
+            .{ .variable = leaf, .body = try b.bind(converted, try e.call(materialize, &.{try e.field(entry, 1)}), try e.call(output.append, &.{ prior, try e.tuple(binding, &.{ try e.field(entry, 0), try b.reference(converted) }) })) },
+            .{ .variable = fork, .body = try b.bind(left, try e.call(collect, &.{ try e.field(node, 1), prior }), try e.call(collect, &.{ try e.field(node, 2), try b.reference(left) })) },
         } } }));
+        const input = try e.param(d.to_public, 0);
+        const collected = try b.variable(output.table);
+        const published = try b.variable(bindings);
+        try b.define(d.to_public, try b.bind(collected, try e.call(collect, &.{ try e.field(input, 2), try output.empty(b) }), try b.bind(published, try e.call(output.to_sequence, &.{try b.reference(collected)}), try b.pure(try e.tuple(d.public, &.{ try e.field(input, 0), try e.field(input, 1), try b.reference(published), try e.field(input, 3) })))));
     }
-    const input = try e.param(d.valid, 0);
-    const generic_valid = try b.variable(e.boolean);
-    const scalar_valid = try b.variable(e.boolean);
-    const invalid = try b.pure(try b.constant(bool, false));
-    const check_disjoint = try e.call(disjoint, &.{ try e.field(input, 4), try e.field(input, 2) });
-    const check_scalars = try b.bind(scalar_valid, try e.call(d.scalars.valid, &.{try e.field(input, 4)}), try e.when(try b.reference(scalar_valid), check_disjoint, invalid));
-    try b.define(d.valid, try b.bind(generic_valid, try e.call(d.slots.valid, &.{try e.field(input, 2)}), try e.when(try b.reference(generic_valid), check_scalars, invalid)));
-    return materialize;
 }
 
 fn emitRetain(e: Author, slots: maps.Definition, keys: maps.Definition) Error!Id {
