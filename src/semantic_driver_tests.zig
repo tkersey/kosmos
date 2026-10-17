@@ -11,6 +11,17 @@ test {
     _ = @import("semantic/capsule_tests.zig");
 }
 
+test "downstream packaged core equals independently rebuilt and validated source" {
+    const retained = @import("semantic_packaged.zig");
+    // The build's packaged_runtime is freshly compiled, admitted and validated
+    // by semantic_artifact.zig, independently of the retained content below.
+    var admitted = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    defer admitted.deinit();
+    try retained.check(admitted.content.value.manifest.compiler.horos_package);
+    try std.testing.expectEqualSlices(u8, packaged.bytes, retained.bytes);
+    try std.testing.expectError(error.PackagedCompilerMismatch, retained.check("different-compiler-package"));
+}
+
 test "artifact admission binds exact content and independently scans its inventory" {
     var admitted = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
     defer admitted.deinit();

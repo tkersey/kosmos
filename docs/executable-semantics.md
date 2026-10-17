@@ -112,6 +112,22 @@ that request; checking active/unknown delivery belongs to the enclosing owner.
 
 ## Evidence and physical limits
 
+The source package also retains `src/semantic-core.kar` for authenticated
+downstream consumers. `src/semantic_packaged.zig` checks its exact source,
+compiler-package, Zig-version and content bindings before emitting those bytes.
+This avoids recompiling the unchanged host generator for each consumer. The
+fingerprints select previously checked content; they are not translation proof.
+Kosmos's ordinary build still constructs the core from source, and
+`check-semantic-driver` compares the retained bytes with that freshly compiled,
+admitted and independently validated result.
+
+After changing the semantic source, run `zig build semantic-artifact
+-Doptimize=safe`, copy `zig-out/semantic-core.kar` to `src/semantic-core.kar`,
+update the source/content/compiler bindings in `semantic_packaged.zig`, and run
+`zig build check-semantic-driver -Doptimize=safe`. The downstream emitter fails
+closed on stale bindings and prints the current digests to aid that update.
+Changing a fingerprint without rebuilding cannot pass the byte comparison.
+
 `check-native` includes the portable semantic suites and frozen native oracle;
 `check-semantic-driver` covers artifact admission, recovery, capsule custody and
 resident switching. `check-publication` retains the historical public byte,
