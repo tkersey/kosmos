@@ -125,6 +125,12 @@ that request; checking active/unknown delivery belongs to the enclosing owner.
 
 ## Evidence and physical limits
 
+The pure hypothetical-reply example admits argument and reply bytes against the
+embedded guest schemas before using them. Malformed values fail the analysis;
+valid assumptions remain explicitly hypothetical and confer no live authority.
+Its value parser is ordinary Horos code, checked against Horos's independent
+native admission rules, and does not add a native service to the example.
+
 The source package also retains `src/semantic-core.kar` for authenticated
 downstream consumers. `src/semantic_packaged.zig` checks its exact source,
 compiler-package, Zig-version and content bindings before emitting those bytes.
@@ -147,9 +153,11 @@ resident switching. `check-publication` retains the historical public byte,
 large-state and allocator-failure obligations. `check-kernel` compares ABI3 native
 and WASM boundaries and includes native-specialized to generic-WASM continuation.
 
-The WASM qualification harness explicitly supplies a 128 MiB working arena.
-The previous 8 MiB harness budget is insufficient even for preparation of the
-authored evaluator. This is a physical cost increase; guest semantics and ABI3
+The shipped WASM default and qualification harness allow 128 MiB of working
+allocation. The kernel initially reserves at most 1 MiB of working backing and
+grows physical memory as needed; the allowance does not eagerly reserve 128 MiB.
+The previous 8 MiB harness budget did not cover the complete qualification
+workload. This is a physical cost increase; guest semantics and ABI3
 formats do not change. Capacity-failure checks still lower arenas to zero or to
 measured live usage. Native allocation counters are not RSS measurements.
 

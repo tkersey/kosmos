@@ -31,6 +31,9 @@ try {
   const input = kosmos.encodeInput({ image, initialArgs: new Uint8Array() });
   const expected = execFileSync(fixtures, ["invoke"], { input });
   const kernel = await kosmos.Kernel.create({ bytes, expectedSha256 });
+  const defaultPrepared = kernel.prepare(image);
+  kernel.releasePrepared(defaultPrepared);
+  assert.deepEqual(Buffer.from(kernel.invoke(input)), expected);
   // Test an insufficient budget explicitly; optimization can make this fixture
   // fit the default budget without changing the capacity-failure contract.
   const unchanged = input.slice();
@@ -42,6 +45,7 @@ try {
   const inputPath = join(scratch, "input.pki3");
   await writeFile(inputPath, input);
   const cli = join(root, "bin/kosmos.mjs");
+  assert.deepEqual(execFileSync(process.execPath, [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--input", inputPath], { cwd: scratch }), expected);
   const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(128 << 20), "--input", inputPath];
   assert.deepEqual(execFileSync(process.execPath, args, { cwd: scratch }), expected);
   assert.equal(execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).trim(), manifest.version);

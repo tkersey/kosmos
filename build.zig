@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
     current_runtime.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = wasm_target, .optimize = kernel_mode }));
     const current_options = b.addOptions();
     current_options.addOption(usize, "input_capacity", b.option(usize, "input-capacity", "Initial current input budget") orelse profile.defaults.input);
-    current_options.addOption(usize, "working_capacity", b.option(usize, "working-capacity", "Initial current working budget and backing") orelse profile.defaults.working);
+    current_options.addOption(usize, "working_capacity", b.option(usize, "working-capacity", "Initial current working allocation budget") orelse profile.defaults.working);
     current_options.addOption(usize, "output_capacity", b.option(usize, "output-capacity", "Initial current output budget") orelse profile.defaults.output);
     const current_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/main.zig"),

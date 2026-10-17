@@ -1,5 +1,6 @@
 //! Guest bytes/text operations as ordinary Horos algorithms. Text slicing uses
-//! code-point boundaries in already admitted UTF-8; scalar encoding is explicit.
+//! code-point boundaries for nonempty ranges in admitted UTF-8. Every in-bounds
+//! empty range is valid; scalar encoding is explicit.
 const std = @import("std");
 const data = @import("horos_data");
 const source = @import("horos").source;
@@ -171,7 +172,8 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
         const capacity = try c.fault(input, .capacity_exceeded);
         const invalid_utf8 = try c.fault(input, .invalid_utf8);
         const build = try e.call(c.make, &.{ input, result_type, try e.slice(raw, a, z) });
-        const text_guard = try b.bind(valid_start, try e.call(boundary, &.{ raw, a }), try e.when(try b.reference(valid_start), try b.bind(valid_end, try e.call(boundary, &.{ raw, z }), try e.when(try b.reference(valid_end), build, invalid_utf8)), invalid_utf8));
+        const nonempty_text = try b.bind(valid_start, try e.call(boundary, &.{ raw, a }), try e.when(try b.reference(valid_start), try b.bind(valid_end, try e.call(boundary, &.{ raw, z }), try e.when(try b.reference(valid_end), build, invalid_utf8)), invalid_utf8));
+        const text_guard = try e.when(try e.binary(.equal, a, z), build, nonempty_text);
         const kind = try b.primitive(e.integer, .variant_tag, &.{shape}, 0);
         var checked = build;
         inline for ([_]p.SchemaTag{ .text, .bounded_text }) |tag| checked = try e.when(try e.binary(.equal, kind, try b.constant(u64, @backingInt(tag))), text_guard, checked);

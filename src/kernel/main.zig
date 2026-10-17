@@ -8,7 +8,9 @@ const Arena = runtime.Workspace;
 const Budget = runtime.AllocationBudget;
 const options = @import("kernel_options");
 
-var initial_working: [options.working_capacity]u8 align(16) = undefined;
+// The allowance is a logical limit, not an eager reservation. Larger workloads
+// obtain physical pages through Workspace.grow under the same allocation budget.
+var initial_working: [@min(options.working_capacity, 1 << 20)]u8 align(16) = undefined;
 var envelope: [256]u8 = undefined;
 var diagnostic: [256]u8 = undefined;
 var diagnostic_length: usize = 0;

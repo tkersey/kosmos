@@ -103,3 +103,41 @@ test "authored bytes and text rules match native instruction cuts" {
         try support.expectNativeCuts(&core, image, input_bytes, 60);
     }
 }
+
+test "text slices preserve empty ranges and fault precedence at every byte offset" {
+    var core = try support.prepareCore();
+    defer core.deinit();
+    const Input = struct { text: []const u8, start: u64, end: u64 };
+    // One representative of each UTF-8 width. Every pair of offsets includes
+    // interior empty ranges, nonempty partial characters, reversed ranges and
+    // one-past-end ranges. The frozen evaluator supplies every expected cut.
+    inline for (.{ data.program.Schema.text, data.program.Schema{ .bounded_text = 4 }, data.program.Schema{ .bounded_text = 0 } }) |result_shape| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const e = try Author.init(&b);
+        const text = try b.schema(.text);
+        const result = try b.schema(result_shape);
+        const failure = try b.scalar(u8);
+        const main = try b.declare(&.{ text, e.integer, e.integer }, result, &.{}, &.{});
+        const sliced = try b.value(.{ .schema = result, .expression = .{ .primitive = .{
+            .opcode = .blob_slice,
+            .operands = &.{ try e.param(main, 0), try e.param(main, 1), try e.param(main, 2) },
+            .failures = &.{
+                .{ .kind = .capacity_exceeded, .value = try b.failureLiteral(try b.constant(u8, 1)) },
+                .{ .kind = .invalid_utf8, .value = try b.failureLiteral(try b.constant(u8, 2)) },
+            },
+        } } });
+        try b.define(main, try b.pure(sliced));
+        const image = try support.encode(b.module(main, failure));
+        defer a.free(image);
+        for ([_][]const u8{ "", "A", "é", "€", "𐍈" }) |text_bytes| {
+            for (0..text_bytes.len + 2) |start| {
+                for (0..text_bytes.len + 2) |end| {
+                    const input = try projection.encode(Input, a, .{ .text = text_bytes, .start = start, .end = end });
+                    defer a.free(input);
+                    try support.expectNativeCuts(&core, image, input, 20);
+                }
+            }
+        }
+    }
+}
