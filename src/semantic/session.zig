@@ -193,9 +193,11 @@ pub const Session = struct {
         return restore(a, &prepared, checkpoint_bytes);
     }
     pub fn restore(a: std.mem.Allocator, prepared: *const Prepared, checkpoint_bytes: []const u8) Error!Session {
+        var retained = try prepared.clone();
+        defer retained.deinit();
         var state = try data.state_image.decodeGraph(a, checkpoint_bytes);
         defer state.deinit();
-        return startSelected(a, prepared, &prepared.runtime, .{ .state = state.state });
+        return startSelected(a, &retained, &retained.runtime, .{ .state = state.state });
     }
     pub fn deinit(self: *Session) void {
         self.clearView();
