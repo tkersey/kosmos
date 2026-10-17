@@ -10,7 +10,7 @@ test {
     _ = @import("source_regressions.zig");
 }
 
-test "encoded cursors export canonical immutable checkpoints and restore as ordinary values" {
+test "ownership: encoded cursors export canonical immutable checkpoints and restore as ordinary values" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -68,7 +68,7 @@ test "encoded cursors export canonical immutable checkpoints and restore as ordi
     try testing.expectEqualSlices(u8, &expected, try restored.bytes(&result.completed));
 }
 
-test "owned FIFO package queues preserve scheduling through instruction checkpoints" {
+test "behavior: owned FIFO package queues preserve scheduling through instruction checkpoints" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.schedulerFifo(&builder));
@@ -96,7 +96,7 @@ test "owned FIFO package queues preserve scheduling through instruction checkpoi
     return error.TestUnexpectedResult;
 }
 
-test "fast projections still reject malformed unselected input payloads" {
+test "behavior: fast projections still reject malformed unselected input payloads" {
     for (0..3) |mode| {
         const variant = mode != 0;
         var builder = source.Builder.init(testing.allocator);
@@ -127,7 +127,7 @@ test "fast projections still reject malformed unselected input payloads" {
     }
 }
 
-test "higher-order scoped bodies retain definition and use capabilities with cleanup" {
+test "behavior: higher-order scoped bodies retain definition and use capabilities with cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.retainedScope(&builder));
@@ -187,7 +187,7 @@ fn compileDeclarations(module: source.Module) !source.Compiled {
     return (try source.component.compile(testing.allocator, module, .{ .exports = &.{} })).construction;
 }
 
-test "retained scoped interaction agrees at every quantum with general resumptions" {
+test "behavior: retained scoped interaction agrees at every quantum with general resumptions" {
     for ([_]bool{ false, true }) |general| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -247,7 +247,7 @@ test "retained scoped interaction agrees at every quantum with general resumptio
     }
 }
 
-test "branching tail handlers preserve results through every instruction checkpoint" {
+test "behavior: branching tail handlers preserve results through every instruction checkpoint" {
     for ([_]bool{ false, true }) |selected| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -310,7 +310,7 @@ fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !
     try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
 }
 
-test "tail clause checkpoints retain body cleanup on cancellation" {
+test "behavior: tail clause checkpoints retain body cleanup on cancellation" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.branchingTailProtected(&builder));
@@ -356,7 +356,7 @@ test "tail clause checkpoints retain body cleanup on cancellation" {
     try testing.expect(session.isTerminal());
 }
 
-test "immediate lexical calls preserve checked results and retained captures" {
+test "behavior: immediate lexical calls preserve checked results and retained captures" {
     for ([_]bool{ false, true }) |immediate| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -425,7 +425,7 @@ fn residentBeforeOwnedUnwind(allocator: std.mem.Allocator, prepared: *const @imp
     return resident;
 }
 
-test "live owned unwind preserves physical ownership and retry at every allocation failure" {
+test "ownership: live owned unwind preserves physical ownership and retry at every allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.ownership(&builder));
@@ -535,7 +535,7 @@ fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, check
     try testing.expectEqualDeep(expected.record, retried.record);
 }
 
-test "resident rollback preserves acquired replies, cleanup custody, and reentrant captures through failed publication" {
+test "ownership: resident rollback preserves acquired replies, cleanup custody, and reentrant captures through failed publication" {
     const protocol = horos.data.invocation;
     inline for (.{ retainedInputExample, source.examples.unwind, source.examples.reentrant, source.examples.cloned }, 0..) |example, index| {
         var builder = source.Builder.init(testing.allocator);
@@ -595,7 +595,7 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
     }
 }
 
-test "resident output capacity and checkpoint transfer preserve custody on failure" {
+test "behavior: resident output capacity and checkpoint transfer preserve custody on failure" {
     const protocol = horos.data.invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -650,7 +650,7 @@ test "resident output capacity and checkpoint transfer preserve custody on failu
     try testing.expectError(error.InvalidState, restored.drive(testing.allocator, .none, .{ .quantum = 0 }));
 }
 
-test "shallow resumption preserves every resident boundary after failed publication" {
+test "ownership: shallow resumption preserves every resident boundary after failed publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
@@ -717,7 +717,7 @@ fn expectResidentCheckpoint(resident: *Resident, expected: []const u8) !void {
     try testing.expectEqualSlices(u8, expected, actual);
 }
 
-test "independent native residents release shared preparation exactly once" {
+test "behavior: independent native residents release shared preparation exactly once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -793,7 +793,7 @@ test "independent native residents release shared preparation exactly once" {
     }
 }
 
-test "resident progress defers checkpoint publication until explicitly requested" {
+test "behavior: resident progress defers checkpoint publication until explicitly requested" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
@@ -821,7 +821,7 @@ test "resident progress defers checkpoint publication until explicitly requested
     try testing.expectEqualDeep(pending.record, polled.record);
 }
 
-test "resident gate rejects reentrant observation during allocator callbacks" {
+test "behavior: resident gate rejects reentrant observation during allocator callbacks" {
     const Callback = struct {
         child: std.mem.Allocator,
         resident: ?*Resident = null,
@@ -977,7 +977,7 @@ fn checkpointFailure(allocator: std.mem.Allocator, subject: *Session, before: []
     try testing.expectEqualSlices(u8, before, bytes);
 }
 
-test "failed PST3 export retains exactly the same resident instruction boundary" {
+test "ownership: failed PST3 export retains exactly the same resident instruction boundary" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
@@ -1011,7 +1011,7 @@ fn programBytes(program: horos.data.activation.Program) ![]u8 {
     return bytes;
 }
 
-test "prepared Programs reuse immutable code and facts across sequential Sessions" {
+test "behavior: prepared Programs reuse immutable code and facts across sequential Sessions" {
     const Prepared = @import("kosmos").Prepared;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1044,7 +1044,7 @@ test "prepared Programs reuse immutable code and facts across sequential Session
     }
 }
 
-test "Sessions retain preparation after all external prepared handles are released" {
+test "behavior: Sessions retain preparation after all external prepared handles are released" {
     const Prepared = @import("kosmos").Prepared;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1079,7 +1079,7 @@ fn restorePreparedFailure(allocator: std.mem.Allocator, prepared: *const @import
     var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
 }
-test "failed prepared starts and restores preserve the reusable owner" {
+test "ownership: failed prepared starts and restores preserve the reusable owner" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
@@ -1122,7 +1122,7 @@ fn invocationFailure(allocator: std.mem.Allocator, command: []const u8) !void {
     try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, decoded.value.completed);
 }
 
-test "current fresh invocation binds captured values and rejects stale replies without mutation" {
+test "ownership: current fresh invocation binds captured values and rejects stale replies without mutation" {
     const protocol = horos.data.invocation;
     const fresh = @import("kosmos").invocation;
     var builder = source.Builder.init(testing.allocator);
@@ -1192,7 +1192,7 @@ test "current fresh invocation binds captured values and rejects stale replies w
     try testing.expectEqualSlices(u8, original, command);
 }
 
-test "current invocation preserves explicit yield polling and cancellation before work" {
+test "behavior: current invocation preserves explicit yield polling and cancellation before work" {
     const fresh = @import("kosmos").invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1234,7 +1234,7 @@ test "current invocation preserves explicit yield polling and cancellation befor
     } else try testing.expectEqualStrings("stop", cancelled.record.cancelled.reason.text);
 }
 
-test "cancellation rebinds a pending cleanup without repeating its semantic operation" {
+test "behavior: cancellation rebinds a pending cleanup without repeating its semantic operation" {
     const protocol = horos.data.invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1272,7 +1272,7 @@ fn restoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos
     try testing.expectEqualSlices(u8, checkpoint, bytes);
 }
 
-test "PST3 restore releases every partial owner on allocation failure" {
+test "ownership: PST3 restore releases every partial owner on allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
@@ -1301,7 +1301,7 @@ fn rejectCheckpoint(image: []const u8, state: horos.data.process_state.State) !v
     } else |err| try testing.expect(err != error.OutOfMemory);
 }
 
-test "PST3 restore rejects wrong identity, code position, slots, and cleanup status" {
+test "behavior: PST3 restore rejects wrong identity, code position, slots, and cleanup status" {
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1366,7 +1366,7 @@ test "PST3 restore rejects wrong identity, code position, slots, and cleanup sta
     try testing.expect(checked_frame and checked_binding and checked_cleanup);
 }
 
-test "PST3 restore rejects aliased unique packages after graph renumbering" {
+test "behavior: PST3 restore rejects aliased unique packages after graph renumbering" {
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1398,7 +1398,7 @@ test "PST3 restore rejects aliased unique packages after graph renumbering" {
     return error.MissingIndependentPackages;
 }
 
-test "imported storage avoids payload copies and releases a large dead backing" {
+test "behavior: imported storage avoids payload copies and releases a large dead backing" {
     const data = horos.data;
     const Store = @FieldType(@FieldType(@FieldType(Session, "driver"), "outer"), "store");
     const big = try testing.allocator.alloc(u8, 128 * 1024);
@@ -1448,7 +1448,7 @@ test "imported storage avoids payload copies and releases a large dead backing" 
     try testing.expectEqual(1, interned.body.blob.id);
 }
 
-test "stable borrow admission distinguishes older from fresh references through return clauses" {
+test "behavior: stable borrow admission distinguishes older from fresh references through return clauses" {
     const fixture = @import("borrow_return_fixtures");
     for (std.enums.values(fixture.ResultFrom)) |from| {
         for ([_]bool{ false, true }) |initial| {
@@ -1476,7 +1476,7 @@ test "stable borrow admission distinguishes older from fresh references through 
     }
 }
 
-test "stable resource implementations preserve private authority and loans across requests" {
+test "behavior: stable resource implementations preserve private authority and loans across requests" {
     inline for (.{ source.examples.resourceScalar, source.examples.resourcePair }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1504,7 +1504,7 @@ test "stable resource implementations preserve private authority and loans acros
     }
 }
 
-test "stable cancellation releases the resource while its protected borrow is suspended" {
+test "behavior: stable cancellation releases the resource while its protected borrow is suspended" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.resourceScalar(&builder));
@@ -1525,7 +1525,7 @@ test "stable cancellation releases the resource while its protected borrow is su
     try testing.expect(try drive(&session, null) == .cancelled);
 }
 
-test "stable admission rejects a fresh store hidden by a later same-slot rebind" {
+test "behavior: stable admission rejects a fresh store hidden by a later same-slot rebind" {
     const fixture = @import("borrow_return_fixtures");
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
@@ -1558,7 +1558,7 @@ test "stable admission rejects a fresh store hidden by a later same-slot rebind"
     return error.TestUnexpectedResult;
 }
 
-test "stable source installs real handlers and keeps the final checked sum after them" {
+test "behavior: stable source installs real handlers and keeps the final checked sum after them" {
     for ([_]usize{ 1, 8, 64, 128, 256 }) |count| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1572,7 +1572,7 @@ test "stable source installs real handlers and keeps the final checked sum after
     }
 }
 
-test "stable source retains an external request and joins into the same activation" {
+test "behavior: stable source retains an external request and joins into the same activation" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -1607,7 +1607,7 @@ test "stable source retains an external request and joins into the same activati
     try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
 }
 
-test "stable source owns its input and keeps tail-recursive control bounded" {
+test "behavior: stable source owns its input and keeps tail-recursive control bounded" {
     var builder = source.Builder.init(testing.allocator);
     var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
     var session = initFromImage(testing.allocator, compiled.program, &.{ 16, 39, 0, 0, 0, 0, 0, 0 }) catch |err| {
@@ -1633,7 +1633,7 @@ test "stable source owns its input and keeps tail-recursive control bounded" {
     try testing.expectEqual(1, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable source resumes an owned package after its handler clause has returned" {
+test "behavior: stable source resumes an owned package after its handler clause has returned" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
@@ -1715,7 +1715,7 @@ fn failingSession(allocator: std.mem.Allocator, prepared: *const @import("kosmos
     try checkedCheckpoint(&session);
 }
 
-test "stable source releases partial native owners at every allocation failure" {
+test "ownership: stable source releases partial native owners at every allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.deep(&builder));
@@ -1735,7 +1735,7 @@ test "stable source releases partial native owners at every allocation failure" 
     try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{&prepared});
 }
 
-test "stable source reenters a live template-cell cycle without sharing branch control" {
+test "behavior: stable source reenters a live template-cell cycle without sharing branch control" {
     inline for (.{ source.examples.reentrant, source.examples.cloned }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1765,7 +1765,7 @@ test "stable source reenters a live template-cell cycle without sharing branch c
     }
 }
 
-test "stable source does not read a reclaimed copyable result only assigned to a dead binding" {
+test "behavior: stable source does not read a reclaimed copyable result only assigned to a dead binding" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -1782,7 +1782,7 @@ test "stable source does not read a reclaimed copyable result only assigned to a
     try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable retained template preserves an older activation across loop-slot rebindings" {
+test "behavior: stable retained template preserves an older activation across loop-slot rebindings" {
     const d = horos.data;
     const program: d.activation.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 2 },
@@ -1849,7 +1849,7 @@ test "stable retained template preserves an older activation across loop-slot re
     try testing.expectEqual(6, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable shallow value and computation resumptions omit the original return clause" {
+test "behavior: stable shallow value and computation resumptions omit the original return clause" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
@@ -1870,7 +1870,7 @@ test "stable shallow value and computation resumptions omit the original return 
     }
 }
 
-test "stable injection selects definition-site versus use-site capabilities" {
+test "behavior: stable injection selects definition-site versus use-site capabilities" {
     inline for (.{ source.examples.injection, source.examples.shallowInjection }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1898,7 +1898,7 @@ test "stable injection selects definition-site versus use-site capabilities" {
     }
 }
 
-test "stable cleanup preserves primary failure and resumes external cleanup" {
+test "behavior: stable cleanup preserves primary failure and resumes external cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.unwind(&builder));
@@ -1922,7 +1922,7 @@ test "stable cleanup preserves primary failure and resumes external cleanup" {
     }
 }
 
-test "stable cancellation during yielded cleanup preserves the first reason" {
+test "behavior: stable cancellation during yielded cleanup preserves the first reason" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.yieldingCleanup(&builder));
@@ -1945,7 +1945,7 @@ test "stable cancellation during yielded cleanup preserves the first reason" {
     }
 }
 
-test "stable unwind preserves lexical and temporary-owner cleanup order" {
+test "behavior: stable unwind preserves lexical and temporary-owner cleanup order" {
     for (0..10) |mode| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1979,7 +1979,7 @@ test "stable unwind preserves lexical and temporary-owner cleanup order" {
     }
 }
 
-test "stable cancellation preserves cleanup at entry yield request and answered boundaries" {
+test "behavior: stable cancellation preserves cleanup at entry yield request and answered boundaries" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
@@ -2034,7 +2034,7 @@ test "stable cancellation preserves cleanup at entry yield request and answered 
     }
 }
 
-test "stable clause failure abandons a captured cleanup without losing its primary exit" {
+test "behavior: stable clause failure abandons a captured cleanup without losing its primary exit" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.clauseAbort(&builder));
@@ -2052,7 +2052,7 @@ test "stable clause failure abandons a captured cleanup without losing its prima
     try testing.expectEqual(9, (try session.bytes(&result.failed))[0]);
 }
 
-test "stable generator resumes private state and closes its retained cleanup" {
+test "behavior: stable generator resumes private state and closes its retained cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.generator(&builder));
@@ -2085,7 +2085,7 @@ test "stable generator resumes private state and closes its retained cleanup" {
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
 }
 
-test "interaction phases follow atomic dispatch and the installed yield successor" {
+test "behavior: interaction phases follow atomic dispatch and the installed yield successor" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const module = try source.examples.deep(&builder);
@@ -2146,7 +2146,7 @@ test "interaction phases follow atomic dispatch and the installed yield successo
     try testing.expect(dispatched and yielded);
 }
 
-test "stateful service preserves labeled replies and exclusive turns through restore" {
+test "behavior: stateful service preserves labeled replies and exclusive turns through restore" {
     inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow, .paired }) |mode| {
         for ([_]bool{ false, true }) |restore| try serviceWitness(mode, restore);
     }
@@ -2249,7 +2249,7 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
     }), replies);
 }
 
-test "stable successor return clauses retain older capability and cell references" {
+test "behavior: stable successor return clauses retain older capability and cell references" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.successorState(&builder));
@@ -2367,7 +2367,7 @@ fn checkReturnPaths(session: *Session, image: []const u8, schema: u64, seen: *st
     session.* = restored;
 }
 
-test "PST3 normal return paths reject disposal markers while captured cleanup stays valid" {
+test "behavior: PST3 normal return paths reject disposal markers while captured cleanup stays valid" {
     var seen: std.EnumSet(ReturnPathKind) = .{};
     var captured_cleanup = false;
     for (0..3) |example| {
@@ -2416,7 +2416,7 @@ test "PST3 normal return paths reject disposal markers while captured cleanup st
     try testing.expect(captured_cleanup);
 }
 
-test "PST3 captured handler state obeys one-shot and multi bounds and reference kinds" {
+test "behavior: PST3 captured handler state obeys one-shot and multi bounds and reference kinds" {
     const data = horos.data;
     const g = data.graph;
     inline for (.{ false, true }) |multi| inline for (.{ false, true }) |allowed| {
@@ -2531,7 +2531,7 @@ fn argumentSessionFailure(allocator: std.mem.Allocator, prepared: *const @import
     try testing.expectEqualSlices(u8, &.{ 5, 's', 'm', 'a', 'l', 'l' }, try session.bytes(&result.completed));
 }
 
-test "argument backing releases every partial Session owner on allocation failure" {
+test "ownership: argument backing releases every partial Session owner on allocation failure" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
@@ -2541,7 +2541,7 @@ test "argument backing releases every partial Session owner on allocation failur
     try @import("allocation_testing.zig").check(testing.allocator, argumentSessionFailure, .{ &prepared, input });
 }
 
-test "argument Session survives caller release and sheds a large dead payload" {
+test "behavior: argument Session survives caller release and sheds a large dead payload" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     const input = try argumentBytes(1 << 20);
@@ -2599,7 +2599,7 @@ fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("
     try testing.expectEqualDeep(values[1], same);
 }
 
-test "argument backing survives journal collection and reuse then compacts a tiny survivor" {
+test "ownership: argument backing survives journal collection and reuse then compacts a tiny survivor" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
@@ -2609,7 +2609,7 @@ test "argument backing survives journal collection and reuse then compacts a tin
     try @import("allocation_testing.zig").check(testing.allocator, argumentStoreFailure, .{ &prepared, input });
 }
 
-test "resident terminal compaction preserves rollback and releases backing at commit" {
+test "ownership: resident terminal compaction preserves rollback and releases backing at commit" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
@@ -2652,7 +2652,7 @@ test "resident terminal compaction preserves rollback and releases backing at co
     }
 }
 
-test "handler continuation preserves staged operands across checkpoint restoration" {
+test "behavior: handler continuation preserves staged operands across checkpoint restoration" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));
@@ -2693,7 +2693,7 @@ fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8, runti
     defer prepared.deinit();
 }
 
-test "prepared contracts retain encoded bytes without canonicalization scratch" {
+test "ownership: prepared contracts retain encoded bytes without canonicalization scratch" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     var fields: [64]source.Id = undefined;
@@ -2743,7 +2743,7 @@ fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundar
     return b.module(entry, unit);
 }
 
-test "public suspension releases large dead input backing while preserving live aliases" {
+test "behavior: public suspension releases large dead input backing while preserving live aliases" {
     const count = 131072;
     const input = try testing.allocator.alloc(u8, count * 8 + 10);
     defer testing.allocator.free(input);
@@ -2804,7 +2804,7 @@ test "public suspension releases large dead input backing while preserving live 
     };
 }
 
-test "suspension reclamation preserves exhaustive rollback and large input publication" {
+test "ownership: suspension reclamation preserves exhaustive rollback and large input publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try smallSurvivorExample(&builder, false, true));
@@ -2846,7 +2846,7 @@ test "suspension reclamation preserves exhaustive rollback and large input publi
     }
 }
 
-test "retained recursive tail fixture preserves transactional rollback" {
+test "behavior: retained recursive tail fixture preserves transactional rollback" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try @import("retained_loop_bench.zig").build(&builder, 3));
@@ -2872,7 +2872,7 @@ test "retained recursive tail fixture preserves transactional rollback" {
     try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, (try session.bytes(&retried.completed))[0..8], .little));
 }
 
-test "handler return functions distinguish body value from state" {
+test "behavior: handler return functions distinguish body value from state" {
     for (0..3) |mode| {
         var b = source.Builder.init(testing.allocator);
         defer b.deinit();
@@ -2900,7 +2900,7 @@ test "handler return functions distinguish body value from state" {
     }
 }
 
-test "closed handler bodies preserve escaping values and bounded-step checkpoints" {
+test "behavior: closed handler bodies preserve escaping values and bounded-step checkpoints" {
     const ir = horos.data.activation;
     for (0..6) |mode| {
         var b = source.Builder.init(testing.allocator);
@@ -3008,7 +3008,7 @@ test "closed handler bodies preserve escaping values and bounded-step checkpoint
     }
 }
 
-test "a callable also used as handler state is materialized" {
+test "behavior: a callable also used as handler state is materialized" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const integer = try b.scalar(u64);
@@ -3042,7 +3042,7 @@ test "a callable also used as handler state is materialized" {
     try testing.expect(saw_callable);
 }
 
-test "sequence consumption keeps canonical state bounded and preserves resident retry" {
+test "behavior: sequence consumption keeps canonical state bounded and preserves resident retry" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try @import("sequence_fixture.zig").build(&builder));
@@ -3084,7 +3084,7 @@ test "sequence consumption keeps canonical state bounded and preserves resident 
     try testing.expectEqualSlices(u8, initial, unchanged);
 }
 
-test "mutual tail entry restores each changed guest function" {
+test "behavior: mutual tail entry restores each changed guest function" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
@@ -3127,7 +3127,7 @@ test "mutual tail entry restores each changed guest function" {
     try testing.expectEqualSlices(u8, &.{1}, try session.bytes(&result.completed));
 }
 
-test "handler returns preserve the caller results across every guest transition" {
+test "behavior: handler returns preserve the caller results across every guest transition" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));

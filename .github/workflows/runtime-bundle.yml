@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, native, source, portable, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, source, portable, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -60,9 +60,26 @@ jobs:
           zig build check-storage check-semantic-driver check-semantics
           check-semantic-specialization check-publication check-zig17
           -Doptimize=safe --summary all
-      - name: Check every current public session fixture
-        if: matrix.lane == 'sessions'
-        run: zig build check-sessions -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check every selected current session fixture
+        if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
+        run: |
+          set -o pipefail
+          if grep '^test "' test/v2/stable_source.zig | grep -Ev '^test "(behavior|ownership): '; then
+            exit 1
+          fi
+          case "${{ matrix.lane }}" in
+            sessions) group=behavior; expected=53 ;;
+            session-ownership) group=ownership; expected=15 ;;
+            source-regressions) group=regressions; expected=17 ;;
+          esac
+          zig build build-session-check -Dsession-group="$group" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
+          zig-out/verification/sessions 2>&1 | tee "$RUNNER_TEMP/session-tests.log"
+          if command -v rg >/dev/null; then
+            rg -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
+          else
+            grep -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
+          fi
       - name: Consume the actual native source package without a JS producer
         if: matrix.lane == 'consumer'
         run: |

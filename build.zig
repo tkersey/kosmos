@@ -182,16 +182,26 @@ pub fn build(b: *std.Build) void {
     b.step("bench-semantics", "Measure matched native, bootstrap, generic and specialized realizations (JSONL)")
         .dependOn(&run_economy_bench.step);
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });
+    const session_group = b.option(enum { behavior, ownership, regressions }, "session-group", "Select independent session qualification cases (default: all)");
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/stable_source.zig"),
         .target = b.graph.host,
         .optimize = host_mode,
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
-    }) });
+    }), .filters = if (session_group) |group| switch (group) {
+        .behavior => &.{"stable_source.test.behavior: "},
+        .ownership => &.{"stable_source.test.ownership: "},
+        .regressions => &.{"source_regressions."},
+    } else &.{} });
     const stable_source = b.addRunArtifact(stable_test);
     stable_source.has_side_effects = true;
     b.step("check-sessions", "Check current public session behavior, ownership and failure atomicity")
         .dependOn(&stable_source.step);
+    b.step("build-session-check", "Build the retained session test executable")
+        .dependOn(&b.addInstallArtifact(stable_test, .{
+        .dest_dir = .{ .override = .{ .custom = "verification" } },
+        .dest_sub_path = "sessions",
+    }).step);
     const native_checks = b.step("check-native", "Check native storage, source semantics, sessions and restore without an interpreter");
     const driver_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_driver.zig"),
