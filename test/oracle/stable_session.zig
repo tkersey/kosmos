@@ -6,17 +6,18 @@ const data = @import("horos_data");
 const p = data.program;
 const ir = data.activation;
 const g = data.graph;
-const heap = @import("store.zig");
-const bindings = @import("activation_frames.zig");
-const read = @import("operands.zig").read;
-const Slots = @import("activation_slots.zig").ActivationSlots;
+const heap = @import("../../src/interpreter_v2/store.zig");
+const bindings = @import("../../src/interpreter_v2/activation_frames.zig");
+const read = @import("../../src/interpreter_v2/operands.zig").read;
+const Slots = @import("../../src/interpreter_v2/activation_slots.zig").ActivationSlots;
 const protocol = data.invocation;
-pub const invocation = @import("invocation.zig");
-pub const Prepared = @import("prepared.zig").Prepared;
-pub const Resident = @import("resident.zig").Resident;
-pub const Workspace = @import("arena.zig").Arena;
-pub const AllocationBudget = @import("allocation_budget.zig").Budget;
-pub const Error = @import("runtime_types.zig").Error || bindings.Error || data.activation_ownership.Error || data.program_image.Error || protocol.Error;
+pub const invocation = @import("../../src/interpreter_v2/invocation.zig").For(@This());
+pub const Prepared = @import("../../src/interpreter_v2/prepared.zig").Prepared;
+pub const resident_types = @import("../../src/interpreter_v2/resident.zig").For(@This());
+pub const Resident = resident_types.Resident;
+pub const Workspace = @import("../../src/interpreter_v2/arena.zig").Arena;
+pub const AllocationBudget = @import("../../src/interpreter_v2/allocation_budget.zig").Budget;
+pub const Error = @import("../../src/interpreter_v2/runtime_types.zig").Error || bindings.Error || data.activation_ownership.Error || data.program_image.Error || protocol.Error;
 pub const Pending = struct {
     allocator: std.mem.Allocator,
     state: []u8,
@@ -45,7 +46,7 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
     program_identity: [32]u8,
-    prepared: *@import("prepared.zig").Core,
+    prepared: *@import("../../src/interpreter_v2/prepared.zig").Core,
     flow: data.program_image.Analysis,
     uses: data.traits.Facts,
     value_facts: data.admission.SchemaFacts,
@@ -60,7 +61,7 @@ pub const Session = struct {
     // Live cursor counts set a geometric threshold for early reclamation.
     collection_cursors: usize = 8,
     pending_blob_collection: bool = false,
-    statistics: ?*@import("runtime_types.zig").Statistics = null,
+    statistics: ?*@import("../../src/interpreter_v2/runtime_types.zig").Statistics = null,
 
     pub const Transaction = struct {
         roots: g.Roots,
@@ -213,7 +214,7 @@ pub const Session = struct {
             };
         }
 
-        const public_state = try @import("value_projection.zig").project(a, self.program.schemas, &self.store, data.process_state.State{
+        const public_state = try @import("../../src/interpreter_v2/value_projection.zig").project(a, self.program.schemas, &self.store, data.process_state.State{
             .program_identity = self.program_identity,
             .status = status,
             .roots = roots,
@@ -277,7 +278,7 @@ pub const Session = struct {
     }
 
     pub fn bytes(self: *Session, value: *const g.Value) Error![]const u8 {
-        const values: @import("values.zig").Values = .{
+        const values: @import("../../src/interpreter_v2/values.zig").Values = .{
             .allocator = self.allocator,
             .schemas = self.program.schemas,
             .store = &self.store,
@@ -368,7 +369,10 @@ pub const Session = struct {
     pub fn answer(self: *Session, input: []const u8) Error!void {
         var expected = try self.pendingBinding(self.allocator, false);
         defer expected.deinit();
-        try @import("response.zig").answer(self, input, expected.request.request_identity);
+        try @import("../../src/interpreter_v2/response.zig").answer(self, input, expected.request.request_identity);
+    }
+    pub fn answerExpected(self: *Session, input: []const u8, expected: [32]u8) Error!void {
+        try @import("../../src/interpreter_v2/response.zig").answer(self, input, expected);
     }
 
     pub fn step(self: *Session) Error!void {
@@ -530,7 +534,7 @@ pub const Session = struct {
         const reader = try self.frames.slots.reader(frame.view);
         var temporary = std.heap.ArenaAllocator.init(self.allocator);
         defer temporary.deinit();
-        var values: @import("values.zig").Values = .{
+        var values: @import("../../src/interpreter_v2/values.zig").Values = .{
             .allocator = temporary.allocator(),
             .schemas = self.program.schemas,
             .store = &self.store,
@@ -1003,7 +1007,7 @@ pub const Session = struct {
     }
 
     fn aggregateControl(self: *Session, current: g.NodeRef, control: g.Control, frame: *bindings.Frame, term: ir.Terminator, reader: anytype, scratch: std.mem.Allocator) Error!void {
-        var values: @import("values.zig").Values = .{
+        var values: @import("../../src/interpreter_v2/values.zig").Values = .{
             .allocator = scratch,
             .schemas = self.program.schemas,
             .store = &self.store,

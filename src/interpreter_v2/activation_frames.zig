@@ -385,14 +385,18 @@ pub const Frames = struct {
         if (function.inputs.len != values.len) return error.InvalidState;
         try self.protect(frame);
         var old = frame.live_bound.iterator(self.pool);
+        frame.function = target;
+        frame.custody.scope = 0;
+        // Arguments were gathered simultaneously before restart. Install them
+        // before clearing the old temporaries so a unique slot page need not
+        // become empty and be allocated again at every tail call.
+        try self.writeSelected(frame, live, function.inputs, values);
         while (old.next()) |slot| {
             if (slot >= function.layout.slots.len) break;
             if (std.mem.indexOfScalar(data.program.Id, function.inputs, slot) == null)
                 try self.clearProtected(frame, slot);
         }
-        frame.function = target;
-        frame.custody.scope = 0;
-        try self.applyProtected(frame, live, function.inputs, values);
+        try self.pruneProtected(frame, live);
         frame.position = 0;
     }
     /// Writes and reclamation share one owner. The admitted liveness bound may
@@ -403,6 +407,10 @@ pub const Frames = struct {
         try self.applyProtected(frame, live, destinations, values);
     }
     fn applyProtected(self: *Frames, frame: *Frame, live: sets.Root, destinations: anytype, values: []const data.graph.Value) Error!void {
+        try self.writeSelected(frame, live, destinations, values);
+        try self.pruneProtected(frame, live);
+    }
+    fn writeSelected(self: *Frames, frame: *Frame, live: sets.Root, destinations: anytype, values: []const data.graph.Value) Error!void {
         const selection: Bound = switch (frame.live_bound) {
             .bits => .{ .bits = self.pool.lowWord(live) },
             .tree => .{ .tree = live },
@@ -415,7 +423,6 @@ pub const Frames = struct {
             if (value.body == .owned) try self.custody.establish(&frame.custody, self.layouts.functions[@intCast(frame.function)].custody, @intCast(slot));
             try self.slots.set(frame.view, @intCast(slot), value);
         }
-        try self.pruneProtected(frame, live);
     }
     pub fn prune(self: *Frames, frame: *Frame, live: sets.Root) Error!void {
         try self.protect(frame);

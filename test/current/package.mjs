@@ -20,7 +20,7 @@ try {
   execFileSync("tar", ["-xf", join(scratch, packed.filename), "-C", directory]);
   const root = join(directory, "package");
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.version, "8.0.0");
+  assert.equal(manifest.version, "9.0.0");
   assert.deepEqual(Object.keys(manifest.exports), ["."]);
   const kosmos = await import(pathToFileURL(join(root, manifest.exports["."])));
   assert.equal(kosmos.packageVersion, manifest.version);
@@ -31,18 +31,22 @@ try {
   const input = kosmos.encodeInput({ image, initialArgs: new Uint8Array() });
   const expected = execFileSync(fixtures, ["invoke"], { input });
   const kernel = await kosmos.Kernel.create({ bytes, expectedSha256 });
+  const defaultPrepared = kernel.prepare(image);
+  kernel.releasePrepared(defaultPrepared);
+  assert.deepEqual(Buffer.from(kernel.invoke(input)), expected);
   // Test an insufficient budget explicitly; optimization can make this fixture
   // fit the default budget without changing the capacity-failure contract.
   const unchanged = input.slice();
   kernel.setLimits({ input: 65536, working: 1, output: 65536 });
   assert.throws(() => kernel.invoke(input), error => error.code === "WORLD_CAPACITY" && error.details.arena === "working");
   assert.deepEqual(input, unchanged);
-  kernel.setLimits({ input: 65536, working: 8 << 20, output: 65536 });
+  kernel.setLimits({ input: 65536, working: 128 << 20, output: 65536 });
   assert.deepEqual(Buffer.from(kernel.invoke(input)), expected);
   const inputPath = join(scratch, "input.pki3");
   await writeFile(inputPath, input);
   const cli = join(root, "bin/kosmos.mjs");
-  const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(8 << 20), "--input", inputPath];
+  assert.deepEqual(execFileSync(process.execPath, [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--input", inputPath], { cwd: scratch }), expected);
+  const args = [cli, "invoke", "--kernel", kernelPath, "--sha256", expectedSha256, "--working-budget", String(128 << 20), "--input", inputPath];
   assert.deepEqual(execFileSync(process.execPath, args, { cwd: scratch }), expected);
   assert.equal(execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).trim(), manifest.version);
   const alias = join(scratch, "alias.pki3");

@@ -13,6 +13,7 @@ pub const Statistics = struct {
     expected_binding_checks: u64 = 0,
     reused_expected_bindings: u64 = 0,
     transitions: u64 = 0,
+    base_transitions: u64 = 0,
     dispatches: u64 = 0,
     batched_scalar_operations: u64 = 0,
     tail_frame_reuses: u64 = 0,

@@ -60,7 +60,7 @@ test "measure consumed large blob residency and preserve a live alias" {
         var budget: runtime.AllocationBudget = .{ .parent = a, .limit = 8 << 20 };
         var resident = try runtime.Resident.start(budget.allocator(), &prepared, arguments[0..writer.position]);
         defer resident.close() catch unreachable;
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         try resident.setStatistics(&stats);
         const before = budget.live;
         var parked = try resident.drive(a, .none, .{ .quantum = if (kind == 2) 2 else 1, .checkpoint = true });
@@ -127,7 +127,7 @@ test "early blob collection rolls back byte-identically at every allocation fail
             failing.resize_fail_index = std.math.maxInt(usize);
             finish(&resident);
         }
-        var stats: @import("runtime_types.zig").Statistics = .{};
+        var stats: @import("../../src/interpreter_v2/runtime_types.zig").Statistics = .{};
         try resident.setStatistics(&stats);
         failing.fail_index = failing.alloc_index + failure;
         failing.resize_fail_index = failing.resize_index;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const data = @import("horos_data");
 const g = data.graph;
-const Store = @import("store.zig").Store;
+const Store = @import("../../src/interpreter_v2/store.zig").Store;
 const allocator = std.testing.allocator;
 
 fn value(ref: g.NodeRef) g.Value {
@@ -21,12 +21,12 @@ test "one eight and sixty-four branches share immutable environments and blobs" 
             .blocks = &.{},
             .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0 }},
         };
-        var frame_layouts = try @import("frame_layouts.zig").Layouts.init(allocator, program.functions);
+        var frame_layouts = try @import("../../src/interpreter_v2/frame_layouts.zig").Layouts.init(allocator, program.functions);
         defer frame_layouts.deinit();
-        var frames = try @import("activation_frames.zig").Frames.init(allocator, &pool, &frame_layouts);
+        var frames = try @import("../../src/interpreter_v2/activation_frames.zig").Frames.init(allocator, &pool, &frame_layouts);
         defer frames.deinit();
 
-        var statistics: @import("store.zig").Statistics = .{};
+        var statistics: @import("../../src/interpreter_v2/store.zig").Statistics = .{};
         var store: Store = .{ .allocator = allocator, .statistics = &statistics };
         defer store.deinit();
         const bytes = try allocator.alloc(u8, 65539);
@@ -126,7 +126,7 @@ test "owned insertion transfers buffers once and borrowed replacement tolerates 
 }
 
 fn ownedExitReplacementCase(a: std.mem.Allocator) !void {
-    const storage = @import("store.zig");
+    const storage = @import("../../src/interpreter_v2/store.zig");
     var store: Store = .{ .allocator = a };
     defer store.deinit();
     const scalar: g.Value = .{ .schema = 0, .body = .{ .scalar = @splat(1) } };

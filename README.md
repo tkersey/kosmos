@@ -1,13 +1,14 @@
-# Kosmos 8
+# Kosmos 9
 
 Formerly World; see the [rename notes](docs/rename.md).
 
-Kosmos executes complete Horos programs through one Zig interpreter, built
-natively and as an import-free wasm32 kernel. Computations, handlers, policies,
+Kosmos executes complete Horos programs through a Horos-authored semantic core
+on a first-order native or import-free wasm32 base. Computations, handlers,
 retained control and cleanup are program data. The environment supplies typed
-external results.
+external results. See [executable semantics](docs/executable-semantics.md) for
+the runtime artifacts, specialization, reconstruction, and trusted boundaries.
 
-Kosmos `8.0.0` requires exact Zig `0.17.0`; source builds use Horos 5.
+Kosmos `9.0.0` requires exact Zig `0.17.0`; source builds use Horos 6.
 It consumes BPI3 programs and PST3 states through ABI 3. See the
 [ABI contract](docs/kernel-abi.md) and [verification boundaries](docs/verification.md).
 Current source/package identities are selected by the consuming lock; published
@@ -42,7 +43,8 @@ terminal control. Cancellation and cleanup are executable operations, not physic
 handle destruction. Use `setLimits` to select input, working and output budgets.
 
 Native consumers import `kosmos.Session`, `kosmos.Prepared`, `kosmos.Resident`, and
-`kosmos.invocation`. Production builds import only Horos's pure data module.
+`kosmos.invocation`. Execution admits ordinary bytes through Horos's data
+module. Build-time artifact generation uses Horos authoring and specialization.
 
 `Resident.publish(destination, control, options)` is the native publication
 transaction. Destinations select a record, encoded bytes, or a caller buffer.

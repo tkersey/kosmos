@@ -5,7 +5,7 @@ self.onmessage = async ({ data }) => {
     if (data.op === "start" || data.op === "restore") {
       const bytes = new Uint8Array(await (await fetch(data.kernelPath ?? "/kernel.wasm")).arrayBuffer());
       kernel = await Kernel.create({ bytes, expectedSha256: data.sha256 });
-      kernel.setLimits({ input: 2 << 20, working: 8 << 20, output: 2 << 20 });
+      kernel.setLimits({ input: 2 << 20, working: 128 << 20, output: 2 << 20 });
       const prepared = kernel.prepare(new Uint8Array(data.image));
       session = data.op === "start" ? kernel.start(prepared, new Uint8Array(data.initialArgs ?? [])) : kernel.restore(prepared, new Uint8Array(data.state));
       kernel.releasePrepared(prepared);

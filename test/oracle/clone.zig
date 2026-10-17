@@ -4,9 +4,9 @@ const std = @import("std");
 const data = @import("horos_data");
 const p = data.program;
 const g = data.graph;
-const Store = @import("store.zig").Store;
-const Error = @import("runtime_types.zig").Error;
-const Frames = @import("activation_frames.zig").Frames;
+const Store = @import("../../src/interpreter_v2/store.zig").Store;
+const Error = @import("../../src/interpreter_v2/runtime_types.zig").Error;
+const Frames = @import("../../src/interpreter_v2/activation_frames.zig").Frames;
 const Map = std.AutoHashMap(p.Id, g.NodeRef);
 
 pub fn instantiate(allocator: std.mem.Allocator, store: *Store, template: g.Capture, frames: *Frames) Error!g.Capture {
@@ -199,9 +199,9 @@ test "nested templates rebase borrowed local scopes and preserve repeated aliase
         .blocks = &.{},
         .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0 }},
     };
-    var frame_layouts = try @import("frame_layouts.zig").Layouts.init(allocator, program.functions);
+    var frame_layouts = try @import("../../src/interpreter_v2/frame_layouts.zig").Layouts.init(allocator, program.functions);
     defer frame_layouts.deinit();
-    var frames = try @import("activation_frames.zig").Frames.init(allocator, &pool, &frame_layouts);
+    var frames = try @import("../../src/interpreter_v2/activation_frames.zig").Frames.init(allocator, &pool, &frame_layouts);
     defer frames.deinit();
     var store: Store = .{ .allocator = allocator };
     defer store.deinit();
