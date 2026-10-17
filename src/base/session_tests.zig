@@ -71,6 +71,60 @@ test "base bridge response binding survives checkpoint and transaction rollback"
     try std.testing.expectError(error.InvalidState, restored.answer(reply));
 }
 
+test "base transaction rolls back and retries complete recursive execution at every allocation failure" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const image = try encode(try source.examples.recursive(&b));
+    defer a.free(image);
+    var prepared = try @import("session.zig").Prepared.init(a, image);
+    defer prepared.deinit();
+    const input = std.mem.toBytes(@as(u64, 17));
+    var reference = try Session.start(a, &prepared, &input, .{});
+    defer reference.deinit();
+    const before = try reference.checkpoint(a);
+    defer a.free(before);
+    const result = try reference.run(null);
+    try std.testing.expect(result == .completed);
+    const expected = try a.dupe(u8, try reference.bytes(&result.completed));
+    defer a.free(expected);
+    var failures: usize = 0;
+    var failed_after_mutation = false;
+    while (true) : (failures += 1) {
+        var fixed_growth = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+        var failing = std.testing.FailingAllocator.init(fixed_growth.allocator(), .{});
+        var session = try Session.start(failing.allocator(), &prepared, &input, .{});
+        defer session.deinit();
+        var statistics: @import("../interpreter_v2/runtime_types.zig").Statistics = .{};
+        session.statistics = &statistics;
+        failing.fail_index = failing.alloc_index + failures;
+        const attempt = struct {
+            fn run(subject: *Session) !void {
+                var transaction = try subject.begin();
+                errdefer transaction.rollback(subject);
+                try std.testing.expect(try subject.run(null) == .completed);
+                transaction.commit(subject);
+            }
+        }.run;
+        attempt(&session) catch |err| {
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failed_after_mutation = failed_after_mutation or statistics.transitions != 0;
+            const unchanged = try session.checkpoint(a);
+            defer a.free(unchanged);
+            try std.testing.expectEqualSlices(u8, before, unchanged);
+            try attempt(&session);
+            const retried = try session.observe();
+            try std.testing.expectEqualSlices(u8, expected, try session.bytes(&retried.completed));
+            continue;
+        };
+        failing.fail_index = std.math.maxInt(usize);
+        const actual = try session.observe();
+        try std.testing.expectEqualSlices(u8, expected, try session.bytes(&actual.completed));
+        try std.testing.expect(failures != 0 and failed_after_mutation);
+        break;
+    }
+}
+
 const AllocationCounter = struct {
     backing: std.mem.Allocator,
     allocations: usize = 0,

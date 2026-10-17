@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "horos_data", .module = host_data }},
     }) });
     const run_native_tests = b.addRunArtifact(tests);
+    run_native_tests.has_side_effects = true;
     b.step("check-storage", "Check current private storage and allocation contracts")
         .dependOn(&run_native_tests.step);
     const activation_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -83,14 +84,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = host_data }},
     }) });
+    const run_activation_tests = b.addRunArtifact(activation_tests);
+    run_activation_tests.has_side_effects = true;
     b.step("check-activation-storage", "Check stable activation storage and failure atomicity")
-        .dependOn(&b.addRunArtifact(activation_tests).step);
+        .dependOn(&run_activation_tests.step);
     const host_mode = std.meta.stringToEnum(std.lang.Optimize, profile.hostMode) orelse @panic("invalid host mode");
     const source_data = if (host_mode == optimize) host_data else b.createModule(.{ .root_source_file = source.path(b, "src/data/root.zig"), .target = b.graph.host, .optimize = host_mode });
     const horos = b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
     public_kosmos.addImport("horos", if (target.query.isNative() and host_mode == optimize) horos else b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "horos_data", .module = data }} }));
     const artifact_options = b.addOptions();
     artifact_options.addOption([]const u8, "horos_package", package.dependencies.horos.hash);
+    // Qualification rebuilds the evaluator from source and compares exact
+    // packaged bytes. A downstream consumer checks the shipped source/compiler/
+    // content bindings instead of recompiling that host generator. Runtime
+    // artifact and guest admission are identical in both cases.
+    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse (b.dep_prefix.len != 0);
     const artifact_emitter = b.addExecutable(.{ .name = "kosmos-semantic-artifact", .root_module = b.createModule(.{
         .root_source_file = b.path("src/semantic_artifact.zig"),
         .target = b.graph.host,
@@ -100,14 +108,34 @@ pub fn build(b: *std.Build) void {
     artifact_emitter.root_module.addOptions("artifact_options", artifact_options);
     const emit_artifact = b.addRunArtifact(artifact_emitter);
     const semantic_artifact = emit_artifact.captureStdOut(.{});
+    const selected_artifact = if (use_packaged_runtime) packaged: {
+        const emitter = b.addExecutable(.{ .name = "kosmos-packaged-artifact", .root_module = b.createModule(.{
+            .root_source_file = b.path("src/semantic_packaged.zig"),
+            .target = b.graph.host,
+            .optimize = host_mode,
+        }) });
+        emitter.root_module.addOptions("artifact_options", artifact_options);
+        break :packaged b.addRunArtifact(emitter).captureStdOut(.{});
+    } else semantic_artifact;
     const runtime_files = b.addWriteFiles();
-    _ = runtime_files.addCopyFile(semantic_artifact, "semantic-core.kar");
+    _ = runtime_files.addCopyFile(selected_artifact, "semantic-core.kar");
     const runtime_source = runtime_files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n");
     const packaged_runtime = b.createModule(.{
         .root_source_file = runtime_source,
         .target = b.graph.host,
         .optimize = host_mode,
     });
+    // The source correspondence test must always receive an independent rebuild,
+    // including when `check` is requested with the packaged-runtime option.
+    const rebuilt_runtime = if (!use_packaged_runtime) packaged_runtime else rebuilt: {
+        const files = b.addWriteFiles();
+        _ = files.addCopyFile(semantic_artifact, "semantic-core.kar");
+        break :rebuilt b.createModule(.{
+            .root_source_file = files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n"),
+            .target = b.graph.host,
+            .optimize = host_mode,
+        });
+    };
     public_kosmos.addImport("packaged_runtime", if (target.query.isNative()) packaged_runtime else b.createModule(.{ .root_source_file = runtime_source, .target = target, .optimize = optimize }));
     b.step("semantic-artifact", "Compile and admit the reproducible portable evaluator bundle")
         .dependOn(&b.addInstallFile(semantic_artifact, "semantic-core.kar").step);
@@ -161,14 +189,18 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
     }) });
     const stable_source = b.addRunArtifact(stable_test);
+    stable_source.has_side_effects = true;
+    b.step("check-sessions", "Check current public session behavior, ownership and failure atomicity")
+        .dependOn(&stable_source.step);
     const native_checks = b.step("check-native", "Check native storage, source semantics, sessions and restore without an interpreter");
     const driver_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_driver.zig"),
         .target = b.graph.host,
         .optimize = host_mode,
-        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = packaged_runtime } },
+        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = rebuilt_runtime } },
     }) });
     const run_driver_tests = b.addRunArtifact(driver_tests);
+    run_driver_tests.has_side_effects = true;
     b.step("check-semantic-driver", "Check packaged artifact admission and guest/outer bridge framing").dependOn(&run_driver_tests.step);
     native_checks.dependOn(&run_driver_tests.step);
     const semantic_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -177,7 +209,11 @@ pub fn build(b: *std.Build) void {
         .optimize = host_mode,
         .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos } },
     }) });
-    native_checks.dependOn(&b.addRunArtifact(semantic_tests).step);
+    const run_semantic_tests = b.addRunArtifact(semantic_tests);
+    run_semantic_tests.has_side_effects = true;
+    b.step("check-semantics", "Check portable semantics against the immutable historical evaluator")
+        .dependOn(&run_semantic_tests.step);
+    native_checks.dependOn(&run_semantic_tests.step);
     const specialization_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_specialization.zig"),
         .target = b.graph.host,
@@ -185,6 +221,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos } },
     }) });
     const run_specialization_tests = b.addRunArtifact(specialization_tests);
+    run_specialization_tests.has_side_effects = true;
     b.step("check-semantic-specialization", "Check specialized transitions, scalar storage and retained reconstruction")
         .dependOn(&run_specialization_tests.step);
     native_checks.dependOn(&run_specialization_tests.step);
@@ -197,6 +234,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
     }) });
     const public_checks = b.addRunArtifact(public_test);
+    public_checks.has_side_effects = true;
     native_checks.dependOn(&public_checks.step);
     b.step("check-publication", "Check native public checkpoint recovery and receipt custody").dependOn(&public_checks.step);
     const wasm_target = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = profile.target, .cpu_features = profile.cpu }) catch @panic("invalid kernel target"));

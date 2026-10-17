@@ -509,7 +509,33 @@ fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, checkpoint:
     }
 }
 
-test "resident rollback preserves acquired replies, cleanup custody, and reentrant captures at every allocation failure" {
+fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, checkpoint: []const u8, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+    var reference = try Resident.restore(testing.allocator, prepared, checkpoint);
+    defer releaseResident(&reference);
+    var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    defer expected.deinit();
+    var resident = try Resident.restore(testing.allocator, prepared, checkpoint);
+    defer releaseResident(&resident);
+    var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+    try resident.setStatistics(&statistics);
+    const cursors = (try resident.diagnostics()).collection_cursors;
+    // Encoded output is allocated after execution and all observation staging,
+    // immediately before the shared commit fence. Fail there for every real
+    // guest fixture, including both publication modes, then retry its command.
+    var empty: [0]u8 = .{};
+    var output = std.heap.FixedBufferAllocator.init(&empty);
+    try testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), control, .{ .quantum = 1, .checkpoint = checkpoint_mode }));
+    try testing.expect(statistics.transitions != 0 or statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0);
+    try testing.expectEqual(cursors, (try resident.diagnostics()).collection_cursors);
+    const unchanged = try resident.checkpoint(testing.allocator);
+    defer testing.allocator.free(unchanged);
+    try testing.expectEqualSlices(u8, checkpoint, unchanged);
+    var retried = try resident.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    defer retried.deinit();
+    try testing.expectEqualDeep(expected.record, retried.record);
+}
+
+test "resident rollback preserves acquired replies, cleanup custody, and reentrant captures through failed publication" {
     const protocol = horos.data.invocation;
     inline for (.{ retainedInputExample, source.examples.unwind, source.examples.reentrant, source.examples.cloned }, 0..) |example, index| {
         var builder = source.Builder.init(testing.allocator);
@@ -528,8 +554,7 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
         var session = try Session.start(testing.allocator, &prepared, arguments);
         defer session.deinit();
         if (index == 3) {
-            // Fail inside actual graph cloning, rather than repeatedly replaying
-            // the common executor from the program's initial instruction.
+            // Roll back an actual clone, including all new guest identities.
             var found = false;
             for (0..256) |_| {
                 var snapshot = try guestState(&session);
@@ -540,7 +565,7 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
                 if (position < block.instructions.len and block.instructions[@intCast(position)].opcode == .clone_resumption) {
                     const before_clone = try session.checkpoint(testing.allocator);
                     defer testing.allocator.free(before_clone);
-                    for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, before_clone, .none, with_checkpoint);
+                    for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, before_clone, .none, with_checkpoint);
                     found = true;
                     break;
                 }
@@ -553,15 +578,19 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
         defer testing.allocator.free(checkpoint);
         if (index >= 2) {
             try testing.expect(observation == .yielded);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .resume_yield, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .resume_yield, with_checkpoint);
         } else {
             try testing.expect(observation == .requested);
             var pending = try session.pendingRequest(testing.allocator);
             defer pending.deinit();
             const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = pending.request.request_identity, .value = &.{} });
             defer testing.allocator.free(reply);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .{ .reply = reply }, with_checkpoint);
-            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .{ .reply = reply }, with_checkpoint);
+            // Exhaust the public reply/transaction/publication owner once.
+            // Guest cleanup, reentry and clone algorithms are ordinary data
+            // programs over the same native transaction and storage owners.
+            if (index == 0) try residentFailureSweep(&prepared, checkpoint, .{ .reply = reply }, true);
+            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
         }
     }
 }
@@ -648,9 +677,9 @@ test "shallow resumption preserves every resident boundary after failed publicat
                 if (!resuming or node != .one_shot) continue;
                 const signature = compiled.program.schemas[@intCast(node.one_shot.schema)].internal.resumption;
                 if (signature.mode != .shallow) continue;
-                // Sweep token consumption and publication at its exact resume.
+                // Fail publication after token consumption at its exact resume.
                 for ([_]bool{ false, true }) |checkpoint_mode|
-                    try residentFailureSweep(&prepared, before, .none, checkpoint_mode);
+                    try residentPublicationFailure(&prepared, before, .none, checkpoint_mode);
                 swept = true;
                 break;
             }
@@ -867,29 +896,35 @@ fn checkedCheckpoint(subject: *Session) !void {
     try testing.expectEqual(subject.program_identity, decoded.state.program_identity);
 }
 
+fn retainedPreparation(subject: *Session) !@import("kosmos").Prepared {
+    const core = subject.driver.selected;
+    const borrowed: @import("kosmos").Prepared = .{
+        .guest = .{ .core = subject.prepared },
+        .runtime = .{ .core = core, .content = core.content, .program = core.program, .helpers = core.helpers, .identity = core.identity },
+    };
+    return borrowed.clone();
+}
+
 fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Session.observe)).@"fn".return_type.?).error_union.payload {
     const before = try subject.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
-    const codec = horos.data.program_image;
-    const image = try testing.allocator.alloc(u8, try codec.encodedLength(subject.program));
-    defer testing.allocator.free(image);
-    _ = try codec.encode(testing.allocator, subject.program, image);
-    var restored = try Session.restoreImage(testing.allocator, image, before);
-    defer restored.deinit();
-    var fresh = try @import("kosmos").invocation.invoke(testing.allocator, .{
-        .image = image,
-        .instance = .{ .state = before },
-        .quantum = quantum,
-    });
-    defer fresh.deinit();
-    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    // Every cut still reconstructs fresh mutable owners. Image/evaluator
+    // admission and the invoke wrapper have their own tests; repeating their
+    // immutable preparation at every instruction adds no lifecycle case.
+    var prepared = try retainedPreparation(subject);
     defer prepared.deinit();
+    var restored = try Session.restore(testing.allocator, &prepared, before);
+    defer restored.deinit();
+    var invocation_session = try Session.restore(testing.allocator, &prepared, before);
+    defer invocation_session.deinit();
+    _ = try @import("kosmos").invocation.advance(&invocation_session, .none, quantum);
+    var fresh = try @import("kosmos").invocation.finish(testing.allocator, &invocation_session, true);
+    defer fresh.deinit();
     var resident = try Resident.restore(testing.allocator, &prepared, before);
     defer releaseResident(&resident);
     var committed = try resident.drive(testing.allocator, .none, .{ .quantum = quantum, .checkpoint = true });
     defer committed.deinit();
     try testing.expectEqualDeep(fresh.record, committed.record);
-    @memset(image, 0xff);
     @memset(before, 0xff);
     const result = try subject.run(quantum);
     _ = try restored.run(quantum);
@@ -1230,8 +1265,8 @@ test "cancellation rebinds a pending cleanup without repeating its semantic oper
     try testing.expectEqualStrings("stop", (try session.terminalExit()).cancellation.?.text);
 }
 
-fn restoreFailure(allocator: std.mem.Allocator, image: []const u8, checkpoint: []const u8) !void {
-    var session = try Session.restoreImage(allocator, image, checkpoint);
+fn restoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, checkpoint: []const u8) !void {
+    var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
     const bytes = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(bytes);
@@ -1250,7 +1285,11 @@ test "PST3 restore releases every partial owner on allocation failure" {
     defer testing.allocator.free(checkpoint);
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    try @import("allocation_testing.zig").check(testing.allocator, restoreFailure, .{ image, checkpoint });
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    // Image admission owns its failure sweep. This one owns state admission,
+    // partial restored sessions, and byte-identical checkpoint reconstruction.
+    try @import("allocation_testing.zig").check(testing.allocator, restoreFailure, .{ &prepared, checkpoint });
 }
 
 fn rejectCheckpoint(image: []const u8, state: horos.data.process_state.State) !void {
@@ -1663,8 +1702,8 @@ test "stable source resumes an owned package after its handler clause has return
     try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&observed.completed))[0..8], .little));
 }
 
-fn failingSession(allocator: std.mem.Allocator, program: horos.data.activation.Program) !void {
-    var session = try initFromImage(allocator, program, &.{});
+fn failingSession(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !void {
+    var session = try Session.start(allocator, prepared, &.{});
     defer session.deinit();
     const before = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
@@ -1684,7 +1723,13 @@ test "stable source releases partial native owners at every allocation failure" 
     var reference = try initFromImage(testing.allocator, compiled.program, &.{});
     defer reference.deinit();
     try testing.expect(try drive(&reference, null) == .completed);
-    try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{compiled.program});
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    // The allocator under test owns every mutable session allocation. Immutable
+    // preparation has its own sweep and is shared across all failure indices.
+    try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{&prepared});
 }
 
 test "stable source reenters a live template-cell cycle without sharing branch control" {
@@ -2640,8 +2685,8 @@ test "handler continuation preserves staged operands across checkpoint restorati
     return error.TestUnexpectedResult;
 }
 
-fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8) !void {
-    var prepared = try @import("kosmos").Prepared.init(allocator, image);
+fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8, runtime: *const @import("kosmos").RuntimeArtifact) !void {
+    var prepared = try @import("kosmos").Prepared.initWithRuntime(allocator, image, runtime);
     defer prepared.deinit();
 }
 
@@ -2671,7 +2716,7 @@ test "prepared contracts retain encoded bytes without canonicalization scratch" 
     // maps and schema graphs must not remain owned by preparation.
     const contract_storage = (try prepared.guest.storageBytes()) - admitted.storageBytes();
     try testing.expect(contract_storage <= 1024 + 4 * (contract.payload.len + contract.resume_value.len));
-    try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{image});
+    try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{ image, &prepared.runtime });
 }
 
 fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundary: bool) !source.Module {
@@ -3109,11 +3154,11 @@ fn guestState(session: *Session) !horos.data.state_image.Owned {
 }
 
 fn roundTrip(session: *Session) !void {
-    const image = try programBytes(session.program);
-    defer testing.allocator.free(image);
+    var prepared = try retainedPreparation(session);
+    defer prepared.deinit();
     const state = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(state);
-    const restored = try Session.restoreImage(session.allocator, image, state);
+    const restored = try Session.restore(session.allocator, &prepared, state);
     session.deinit();
     session.* = restored;
 }

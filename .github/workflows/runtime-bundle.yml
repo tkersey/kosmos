@@ -4,8 +4,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      compiler-cache:
+        description: Restore dependency and compiler artifacts (disable for a cold run)
+        type: boolean
+        default: true
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -15,9 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [native, portable]
+        lane: [sessions, native, source, portable]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -31,6 +37,7 @@ jobs:
           git ls-files '*.zig' | xargs zig fmt --check
       - name: Restore complete compiler cache
         id: cache
+        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
@@ -39,6 +46,7 @@ jobs:
           restore-keys: |
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Select working cache
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -48,7 +56,13 @@ jobs:
           mkdir -p .zig-cache/tmp
       - name: Check native owners and emit the shared consumer input
         if: matrix.lane == 'native'
-        run: zig build check-native check-zig17 emit-native-input -Doptimize=safe --summary all
+        run: >-
+          zig build check-storage check-semantic-driver check-semantics
+          check-semantic-specialization check-publication check-zig17 emit-native-input
+          -Doptimize=safe --summary all
+      - name: Check every current public session fixture
+        if: matrix.lane == 'sessions'
+        run: zig build check-sessions -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Consume the actual native source package without a JS producer
         if: matrix.lane == 'native'
         run: |
@@ -62,7 +76,7 @@ jobs:
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
           zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'portable'
+        if: matrix.lane == 'portable' || matrix.lane == 'source'
         with:
           node-version: '26.9.0'
       - name: Install only the browser boundary's tools
@@ -72,11 +86,15 @@ jobs:
           node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
         if: matrix.lane == 'portable'
-        # Together with the native lane these are every dependency of `check`.
+        # The four independent lanes cover every dependency of `check` once.
+        # Native qualification rebuilds and compares the exact packaged core.
         run: >-
-          zig build check-activation-storage-wasm check-kernel check-source
+          zig build check-activation-storage-wasm check-kernel
           check-capacity check-browser check-codecs check-package build-runtime
-          -Doptimize=safe --summary all
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Qualify every source example and instruction frontier
+        if: matrix.lane == 'source'
+        run: zig build check-source -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'
         working-directory: zig-out/runtime
@@ -114,3 +132,22 @@ jobs:
         with:
           path: .zig-cache-upload
           key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+  complete:
+    name: Complete qualification
+    needs: qualify
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require complete qualification within ten minutes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          QUALIFICATION: ${{ needs.qualify.result }}
+        run: |
+          test "$QUALIFICATION" = success
+          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
+          elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
+          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$elapsed" -le 600

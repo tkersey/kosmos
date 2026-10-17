@@ -2,7 +2,7 @@
 
 The native roots preserve the evaluator and language contracts:
 
-- `check-storage`: the existing native interpreter/storage/allocation root.
+- `check-storage`: current base storage and allocation contracts.
 - `check-native`: shared native source/session/restore checks and storage tests.
 - `check-publication`: the public-module subset for predecessor large-state
   recovery, typed/encoded native invocation, explicit finite decoder budgets,
@@ -30,9 +30,14 @@ public semantic runtime. Guest-state assertions inspect canonical checkpoints;
 physical storage assertions target storage still used by the current base.
 Retired native cache layouts, frame-handle identities, flow arenas and native
 optimization counters are not requirements of the new evaluator.
-Allocation sweeps select actual clone, owned resume, cleanup, reply and suspension
-transitions, then exhaust their native allocation sites and publication failures.
-The common base transaction is also checked across complete recursive execution.
+Storage-owner and base-transaction tests exhaust native allocation sites, including
+rollback and retry across complete recursive execution. Public sweeps separately
+cover owned unwind and acquired reply/transaction/publication ownership. Actual
+clone, shallow resume, cleanup, cancellation and reentry fixtures each fail the
+final encoded publication before commit, in both checkpoint modes, then require
+unchanged state and exact retry. Their algorithms execute as ordinary data
+programs over the same native owners; each does not require another exhaustive
+sweep of those owners through the full evaluator.
 Full-program result, effect-order and checkpoint fixtures remain separate from
 those failure sweeps; former native optimizer paths do not each require replaying
 the generic evaluator's complete allocation history.
@@ -45,10 +50,33 @@ import the historical test root. Passing reference-engine tests would not qualif
 the new engine. The table witnesses build one image for both evaluators and retain both execution
 paths, all boundary inputs and restore assertions.
 
+Qualification separates immutable preparation from mutable lifecycle checks.
+The deep-session and PST3 restore allocation sweeps reuse an admitted `Prepared`
+owner while exhausting every allocation of the session operation. Guest
+preparation separately sweeps the full 64-field contract fixture. Artifact
+admission sweeps bundle decoding, the bridge program, all four helper owners,
+canonical encoding and the final shared core using small admitted programs;
+the complete evaluator still has exact source/packaged-byte and differential
+qualification. One full fresh-invocation sweep retains its output/input atomicity
+assertions. These are complementary ownership boundaries, not cached test results.
+
+Instruction-by-instruction lifecycle comparisons share immutable preparation
+and reconstruct fresh mutable sessions at every cut. Source agreement likewise
+keeps a native peer process and one WASM prepared handle, restores every PST3,
+and alternates the actual native/WASM state producer. It retains all 47 examples,
+every quantum-one observation, cancellation frontier, independent source result,
+effect trace and canonical-byte assertion. The separate kernel suite still
+exercises the complete fresh invocation entry point alongside resident execution.
+
 These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package
 hash; modules and emitters then consume that captured package, so later edits to
 the supplied directory cannot change the compiled input. They do not need Node, Python, a WASM bundle or a package producer.
+
+Native semantic qualification rebuilds the evaluator from authored source. An extracted
+native package consumer uses the shipped ordinary artifact after checking its
+source, compiler and content fingerprints; it does not rebuild the host generator
+or run unrelated suites. Both paths perform the same runtime artifact admission.
 
 The native recovery test retains the exact 52-byte predecessor BPI3 and the
 three original PST3 hashes in `test/v2/native_decode.zig`. Large states are
@@ -78,6 +106,19 @@ The optional foreign-environment roots have distinct consumers:
 `check` composes these existing roots. Node/browser dependencies stop at these
 explicit checks and the optional JS consumer. Native and source-dependent checks
 share a build graph; no per-feature wrapper rebuilds the authoring machinery.
+
+CI runs session, native semantic, source-agreement and portable groups independently;
+their union is exactly the
+aggregate `check` dependency set. It does not invoke `check-native` and then the
+overlapping `check`. Native test run steps always execute, even when compilation
+is cached. Compiler caches may reuse content across dependency-lock changes;
+Zig's input hashes and the dependency admission guards remain authoritative.
+The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
+artifact whose source correspondence the native semantic lane checks. All lanes
+retain full runtime artifact and guest-state admission.
+The workflow-dispatch `compiler-cache=false` input disables compiler restoration
+for a cold measurement. Every job has at most ten minutes, and the terminal gate
+also checks the elapsed time of the complete workflow against 600 seconds.
 
 Historical Python/Wasmtime transfer, timing, layout, replay, scalar/blob/history
 measurement and duplicate platform campaigns are retired with their exclusive

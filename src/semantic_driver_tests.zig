@@ -53,6 +53,71 @@ test "artifact admission binds exact content and independently scans its invento
     try std.testing.expectError(error.InvalidRecovery, @import("semantic/compiler.zig").validate(a, &changed));
 }
 
+fn artifactAdmissionFailure(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var admitted = try artifact.Admitted.init(allocator, bytes, artifact.digest(bytes));
+    defer admitted.deinit();
+    var retained = try admitted.clone();
+    defer retained.deinit();
+    admitted.deinit();
+    try std.testing.expectEqual(@as(usize, 4), retained.helpers.len);
+    try std.testing.expect(retained.program.program().effects.len == 1);
+}
+
+test "artifact admission releases all five prepared owners at every allocation failure" {
+    // Admission owns the bundle, the bridge program, four helper preparations,
+    // and the final shared core. Exercise that complete ownership structure with
+    // small admitted programs; full evaluator semantics and exact packaged bytes
+    // are independently qualified above and in the differential suites.
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const integer = try b.scalar(u64);
+    const bridge = try b.effect(.{ .identity = @import("semantic/service.zig").identity, .payload = unit, .result = unit, .external = true });
+    const entry = try b.declare(&.{integer}, integer, &.{bridge}, &.{});
+    const call = try b.term(.{ .perform = .{ .effect = bridge, .payload = try b.constant(void, {}) } });
+    try b.define(entry, try b.bind(try b.variable(unit), call, try b.pure(try b.reference(b.parameter(entry, 0)))));
+    var compiled = try source.lower(a, b.module(entry, unit));
+    defer compiled.deinit();
+    const image = try support.encodeCompiled(&compiled);
+    defer a.free(image);
+    const program = try data.program_image.Admitted.decode(a, image);
+    defer program.deinit();
+    const helper_image = try support.guestImage();
+    defer a.free(helper_image);
+    const helper = try data.program_image.Admitted.decode(a, helper_image);
+    defer helper.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const profile = @import("base/profile.zig");
+    const helper_content: artifact.Helper = .{ .image = helper_image, .inventory = try artifact.inventory(arena.allocator(), try profile.check(helper, .{})) };
+    const root = compiled.program.functions[@intCast(compiled.program.roots.entry)];
+    const bytes = try projection.encode(artifact.Bundle, a, .{
+        .manifest = .{
+            .image = program.identity(),
+            .source = artifact.digest(image),
+            .compiler = .{ .horos_package = "allocation-owner-fixture", .zig = "0.17.0", .policy = artifact.build_policy },
+            .requirements = .{ .base = profile.identity, .admission = artifact.admission_profile, .bridge = @import("semantic/service.zig").identity },
+            .bridge = compiled.program.effects[0],
+            .inventory = try artifact.inventory(arena.allocator(), try profile.check(program, .{ .effects = compiled.program.effects })),
+        },
+        .image = image,
+        .guest = null,
+        .specialization = null,
+        .recovery = .{
+            .projector = helper_content,
+            .storage = helper_content,
+            .clone_context = helper_content,
+            .clone_rebase = helper_content,
+            .anchors = &.{.{ .function = compiled.program.roots.entry, .role = .published_service, .parameters = &.{.{ .ordinal = 0, .slot = root.inputs[0], .schema = root.layout.slots[@intCast(root.inputs[0])] }} }},
+        },
+        .branch_returns = &.{},
+        .template_entries = &.{},
+        .evidence = &.{},
+    });
+    defer a.free(bytes);
+    try @import("../test/v2/allocation_testing.zig").check(a, artifactAdmissionFailure, .{bytes});
+}
+
 fn complete(pump: *driver.Driver) !projection.Owned(@import("semantic/service.zig").Event) {
     return switch (try pump.pump(null)) {
         .event => |event| event,

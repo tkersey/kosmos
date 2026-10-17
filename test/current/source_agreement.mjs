@@ -4,7 +4,7 @@ import { readFile as read } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { preparedPeer } from "./prepared_peer.mjs";
 import { Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome } from "../../src/embedding/index.mjs";
 
 const requiredExamples = ["lexical","deep","recursive","choices-all","choices-first","generator","state-local","state-shared","resource-scalar","resource-pair","answers","scoped-reader","writer-raise","scheduler","queens-dfs","queens-bfs","cell-order","nested","shallow","injection","indexed","abort-custody","unwind","reentrant","cloned","clause-abort","bounded-values","scalar-contracts","ownership","shallow-resumptions","shallow-injection","handle-operand-order","protect-operand-order","successor-state","clause-payload","yielding-cleanup","borrow-operands","cleanup-disposal","cleanup-disposal-running","cleanup-disposal-failure","cleanup-disposal-owned","product-projection","local-one-shot","local-multi-shot"];
@@ -24,16 +24,35 @@ const host = await Kernel.create({ bytes: kernel, expectedSha256: createHash("sh
 host.setLimits({ input: 8 << 20, working: 64 << 20, output: 8 << 20 });
 const yielded = new Set();
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+const peer = preparedPeer(nativePath);
+let prepared, preparedImage;
 let observations = 0;
 async function compare(mode, input) {
   const control = input.cancel !== undefined ? "cancel_text" : input.result !== undefined ? "reply"
     : input.state && yielded.has(digest(input.state)) ? "resume_yield" : "none";
   const encoded = encodeInput({ image: input.image, initialArgs: input.initialArgs, state: input.state,
     control, value: input.cancel ?? input.result, quantum: mode === "advance" ? 1 : null });
-  const native = spawnSync(nativePath, ["invoke"], { input: encoded, maxBuffer: 64 << 20 });
+  const native = await peer.invoke(encoded);
   let bytes;
-  try { bytes = host.invoke(encoded); }
+  let session;
+  try {
+    // Code is immutable and admitted once per image. Mutable state is always
+    // reconstructed through the public restore boundary, including when it
+    // was produced by the other implementation on the preceding instruction.
+    if (!preparedImage || !Buffer.from(preparedImage).equals(input.image)) {
+      if (prepared) host.releasePrepared(prepared);
+      prepared = host.prepare(input.image);
+      preparedImage = input.image.slice();
+    }
+    session = input.state ? host.restore(prepared, input.state) : host.start(prepared, input.initialArgs);
+    bytes = host.drive(session, { control, value: input.cancel ?? input.result, quantum: mode === "advance" ? 1 : null, checkpoint: true });
+    const result = decodeOutcome(bytes);
+    if (result.state) assert.deepEqual(host.checkpoint(session, { transfer: true }), result.state);
+    else host.close(session);
+    session = undefined;
+  }
   catch (error) {
+    if (session) host.checkpoint(session, { transfer: true });
     assert.notEqual(native.status, 0);
     const diagnostic = error.details?.diagnostic;
     assert.ok(diagnostic, "expected a semantic rejection, not physical capacity");
@@ -426,4 +445,6 @@ for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-
 }
 assert.deepEqual([...visitedSources].sort(), requiredExamples.toSorted());
 assert.deepEqual([...visitedImages].sort(), requiredExamples.toSorted());
+if (prepared) host.releasePrepared(prepared);
+await peer.close();
 console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: requiredExamples.length, observations }));
