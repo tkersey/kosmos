@@ -120,7 +120,7 @@ pub fn For(comptime runtime: type) type {
 
         const State = struct {
             session: runtime.Session,
-            expected: ?[32]u8 = null,
+            expected: ?runtime.ExpectedReply = null,
             identity: *Identity,
             generation: u64 = 0,
             switching: ?*SwitchStorage = null,
@@ -232,11 +232,7 @@ pub fn For(comptime runtime: type) type {
                 const owned = try heap.duplicate(protocol.Control, input.allocator(), control);
                 // Restoration starts without private metadata. Establish it from the
                 // admitted parked state once; a rejected reply may keep this exact fact.
-                if (owned == .reply and state.expected == null) {
-                    var pending = try session.pendingBinding(session.allocator, false);
-                    defer pending.deinit();
-                    state.expected = pending.request.request_identity;
-                }
+                if (owned == .reply) try establishExpected(state);
                 const expected = state.expected;
                 errdefer state.expected = expected;
                 var transaction = try session.begin();
@@ -354,9 +350,8 @@ pub fn For(comptime runtime: type) type {
                         // Swapping leaves the old session in pending for disposal.
                         // The stable identity survives; every old receipt is stale.
                         std.mem.swap(runtime.Session, &state.session, &pending.candidate);
-                        state.session.statistics = pending.candidate.statistics;
+                        state.session.setStatistics(pending.candidate.statistics);
                         state.session.transitions = pending.candidate.transitions;
-                        state.session.driver.outer.store.statistics = if (state.session.statistics) |s| &s.storage else null;
                         state.generation = pending.generation;
                         state.switching = null;
                         pending.deinit();
@@ -364,13 +359,23 @@ pub fn For(comptime runtime: type) type {
                 }
                 return decision;
             }
+            fn establishExpected(state: *State) Error!void {
+                if (state.expected != null) return;
+                var pending = try state.session.pendingBinding(state.session.allocator, false);
+                defer pending.deinit();
+                state.expected = runtime.ExpectedReply.fromRequest(pending.request);
+            }
             pub fn beginAdvance(self: *Resident, control: protocol.Control, guest_quantum: u64) Error!void {
                 const state = try self.enter();
                 defer self.leave();
                 const generation = std.math.add(u64, state.generation, 1) catch return error.InvalidState;
+                if (control == .reply) try establishExpected(state);
                 var transaction = try state.session.begin();
                 errdefer transaction.rollback(&state.session);
-                try state.session.submitAdvance(control, guest_quantum);
+                if (control == .reply) if (state.session.statistics) |statistics| {
+                    statistics.reused_expected_bindings +|= 1;
+                };
+                try state.session.submitAdvance(control, guest_quantum, state.expected);
                 transaction.commit(&state.session);
                 state.expected = null;
                 state.generation = generation;
@@ -381,7 +386,7 @@ pub fn For(comptime runtime: type) type {
                 const generation = std.math.add(u64, state.generation, 1) catch return error.InvalidState;
                 var transaction = try state.session.begin();
                 errdefer transaction.rollback(&state.session);
-                const result = try state.session.pumpAdvance(base_quantum);
+                const result = try state.session.pump(base_quantum);
                 transaction.commit(&state.session);
                 state.generation = generation;
                 return result;

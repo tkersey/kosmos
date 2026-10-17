@@ -5,7 +5,7 @@ const service = @import("service.zig");
 const projection = @import("projection.zig");
 const base = @import("../base/session.zig");
 const profile = @import("../base/profile.zig");
-const native = @import("../../test/oracle/stable_session.zig");
+const native = @import("native_baseline");
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
 

@@ -15,7 +15,7 @@ test "hypothetical reply interpretation runs ordinary source without consuming a
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
     const arguments = [_]u8{ 10, 0, 0, 0, 0, 0, 0, 0 };
-    var live = try @import("../../test/oracle/stable_session.zig").Session.initImage(a, image, &arguments);
+    var live = try @import("native_baseline").Session.initImage(a, image, &arguments);
     defer live.deinit();
     try std.testing.expect(try live.run(null) == .requested);
     const before = try live.checkpoint(a);

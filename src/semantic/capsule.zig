@@ -73,6 +73,9 @@ pub fn publish(a: std.mem.Allocator, pump: *driver.Driver, kind: Kind, provenanc
     const selected = pump.selected;
     const artifact_ref: Reference = .{ .digest = selected.identity, .bytes = selected.encoded_length };
     const guest_ref = reference(guest_bytes);
+    // A completed initialization is represented by the committed evaluator
+    // state. Its input is no longer needed to resume any legal operation.
+    const initial: []const u8 = if (pump.operation == .initialize) pump.initial else &.{};
     return projection.encode(Envelope, a, .{
         .record = .{
             .kind = kind,
@@ -81,7 +84,7 @@ pub fn publish(a: std.mem.Allocator, pump: *driver.Driver, kind: Kind, provenanc
             .realization = .{ .image = reference(selected.content.value.image), .identity = selected.program.identity() },
             .guest = .{ .image = guest_ref, .identity = pump.guest.admitted().identity() },
             .checkpoint = reference(checkpoint),
-            .initial = reference(pump.initial),
+            .initial = reference(initial),
             .command = reference(pump.command),
             .requirements = selected.content.value.manifest.requirements,
             .last_cut = pump.last_cut,
@@ -93,7 +96,7 @@ pub fn publish(a: std.mem.Allocator, pump: *driver.Driver, kind: Kind, provenanc
             .provenance = provenance,
         },
         .checkpoint = checkpoint,
-        .initial = pump.initial,
+        .initial = initial,
         .command = pump.command,
     });
 }
@@ -185,9 +188,13 @@ pub fn restoreSelected(a: std.mem.Allocator, guest: *const preparation.Prepared,
         !std.meta.eql(record.dependencies[0], expected_artifact) or !std.meta.eql(record.dependencies[1], record.guest.image)) return error.InvalidCapsule;
     if (selected.content.value.guest) |binding| if (!std.mem.eql(u8, &binding, &record.guest.identity)) return error.GuestIdentityMismatch;
     try disposition(a, value);
-    var initial = try projection.decode(service.Initial, a, value.initial);
-    defer initial.deinit();
-    try driver.admitInitial(a, lease.admitted(), initial.value);
+    // Older capsules carried initialization input at later cuts too. Admit it
+    // when present, but retain it only for an unfinished initialization.
+    if (record.operation == .initialize or value.initial.len != 0) {
+        var initial = try projection.decode(service.Initial, a, value.initial);
+        defer initial.deinit();
+        try driver.admitInitial(a, lease.admitted(), initial.value);
+    }
     var result = if (record.kind == .guest_cut) guest_cut: {
         var state = try data.state_image.decodeGraph(a, value.checkpoint);
         defer state.deinit();
@@ -206,7 +213,7 @@ pub fn restoreSelected(a: std.mem.Allocator, guest: *const preparation.Prepared,
         errdefer runtime.release();
         const guest_lease = try guest.acquire();
         errdefer guest_lease.release();
-        const initial_copy = try a.dupe(u8, value.initial);
+        const initial_copy = try a.dupe(u8, if (record.operation == .initialize) value.initial else &.{});
         errdefer a.free(initial_copy);
         const command_copy = try a.dupe(u8, value.command);
         errdefer a.free(command_copy);

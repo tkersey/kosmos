@@ -24,9 +24,25 @@ The aggregate `check` includes the entire `check-native` root, including
 
 The semantic suites share setup in `src/semantic/test_support.zig`, which has
 no test declarations. Each suite retains its own cases and expected results.
-`test_oracle.zig` owns the frozen evaluator’s qualification cases. Semantic
-comparisons import the evaluator itself without importing that test root. The
-table witnesses build one image for both evaluators and retain both execution
+Behavioral, lifecycle, custody and restore regressions in `stable_source.zig`,
+`source_regressions.zig` and the public publication suite run against the new
+public semantic runtime. Guest-state assertions inspect canonical checkpoints;
+physical storage assertions target storage still used by the current base.
+Retired native cache layouts, frame-handle identities, flow arenas and native
+optimization counters are not requirements of the new evaluator.
+Allocation sweeps select actual clone, owned resume, cleanup, reply and suspension
+transitions, then exhaust their native allocation sites and publication failures.
+The common base transaction is also checked across complete recursive execution.
+Full-program result, effect-order and checkpoint fixtures remain separate from
+those failure sweeps; former native optimizer paths do not each require replaying
+the generic evaluator's complete allocation history.
+
+The build fetches the hash-pinned Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f`
+archive only as the independent evaluator for differential comparisons and
+benchmarks. Both use the selected Horos admission/codec module; the historical
+guest evaluator and its storage/lifecycle code are immutable. The build does not
+import the historical test root. Passing reference-engine tests would not qualify
+the new engine. The table witnesses build one image for both evaluators and retain both execution
 paths, all boundary inputs and restore assertions.
 
 These roots use Zig’s authenticated package cache and the ordinary `tar`

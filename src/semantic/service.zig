@@ -135,12 +135,23 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
                     const changed = try b.variable(m.schema);
                     const controlled = try b.variable(m.schema);
                     const advanced = try b.variable(state);
-                    const after = try e.field(try b.reference(advanced), 0);
+                    const settled = try b.variable(state);
+                    const collected = try b.variable(m.schema);
+                    const advanced_state = try b.reference(advanced);
+                    const advanced_machine = try e.field(advanced_state, 0);
+                    const tag = try statusTag(e, m, advanced_machine);
+                    const retain = try b.pure(advanced_state);
+                    const collect = try b.bind(collected, try e.call(collector.run, &.{advanced_machine}), try b.pure(try e.tuple(state, &.{ try b.reference(collected), interval })));
+                    // A public suspension must not retain dead guest input until
+                    // another guest transition. Collection preserves the cut and
+                    // work count; the predecessor stays live until acknowledgment.
+                    const settle = try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(data.process_state.Status.active))), retain, try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(data.process_state.Status.unwinding))), retain, collect));
+                    const after = try e.field(try b.reference(settled), 0);
                     const cut = try b.variable(cut_type);
                     // Passing the original service state after advance keeps
                     // the committed command predecessor in the real outer
                     // continuation throughout control, cloning, and cleanup.
-                    body = try b.bind(advanced, try e.call(advance, &.{ program, try e.tuple(state, &.{ try e.replace(try b.reference(controlled), @backingInt(machines.Field.work), e.zero), try e.field(saved, 1) }), try e.field(operation, 1) }), try b.bind(cut, try e.call(cut_function, &.{after}), try e.call(publish, &.{ program, saved, try b.reference(advanced), try e.variant(event_type, 0, try b.reference(cut)) })));
+                    body = try b.bind(advanced, try e.call(advance, &.{ program, try e.tuple(state, &.{ try e.replace(try b.reference(controlled), @backingInt(machines.Field.work), e.zero), try e.field(saved, 1) }), try e.field(operation, 1) }), try b.bind(settled, settle, try b.bind(cut, try e.call(cut_function, &.{after}), try e.call(publish, &.{ program, saved, try b.reference(settled), try e.variant(event_type, 0, try b.reference(cut)) }))));
                     body = try b.bind(controlled, try e.call(control_commit, &.{ input, try b.reference(changed) }), body);
                     var controls: [4]Case = undefined;
                     inline for (@typeInfo(Control).@"union".field_types, 0..) |C, j| {

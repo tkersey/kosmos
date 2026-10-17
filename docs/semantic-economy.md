@@ -1,5 +1,10 @@
 # Semantic economy measurements
 
+The tables below describe the earlier artifact named in this report. Its reference
+used copied guest execution code with the then-current native storage. This revision
+uses the immutable Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f` evaluator
+and adds collection at public suspension; measurements for that candidate are pending.
+
 Measured 2026-10-17 on Apple M2 Pro, macOS 27.2 (26B5112a), Zig 0.17.0, safe optimization. Runtime sources: Kosmos semantic source `81c7c457dc6fd8ccc75e3ed1fb0a8b77cfd8e98af792499dcfc4f4651ca671db`, Horos `a58967d541402b3661c05b4d599926114df75123`. The Kosmos source identity binds the authored implementation and compiler before this report is generated. This measurement ran separately from the native/platform qualification suites. These are local samples, not tail-latency or platform-independent claims.
 
 Reproduce with `zig build bench-semantics -Doptimize=safe`. Select one workload with `-Deconomy-workload=scalar_chain`. Every measured realization is checked against the independent direct-native trace, canonical checkpoints and outcomes for the same inputs and controls. The direct-native and bootstrap evaluators are verification dependencies only.

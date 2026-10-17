@@ -4,8 +4,8 @@
 const std = @import("std");
 pub const bytes = @embedFile("semantic-core.kar");
 pub const horos_package = "horos-6.0.0-flclaAXSQAD9argqy5ySN6anKQTKtjk1TPqkF61O1Adh";
-pub const source_sha256 = "81c7c457dc6fd8ccc75e3ed1fb0a8b77cfd8e98af792499dcfc4f4651ca671db";
-pub const artifact_sha256 = "2e5b5a1b7be183edfb1349904fb3df9a2c41f2d2740162ffafba20e5c3639750";
+pub const source_sha256 = "1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc";
+pub const artifact_sha256 = "cb4af30f5c58aee7159f56aa4a08a5fb41a6748061260066edc24f7dadf74714";
 
 pub fn check(selected_horos: []const u8) !void {
     if (!std.mem.eql(u8, selected_horos, horos_package) or

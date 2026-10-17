@@ -54,7 +54,7 @@ test "guest view capture derives reference paths from an admitted immutable cut"
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
-    var oracle = try @import("../../test/oracle/stable_session.zig").Session.initImage(a, image, &.{});
+    var oracle = try @import("native_baseline").Session.initImage(a, image, &.{});
     defer oracle.deinit();
     _ = try oracle.run(6);
     const checkpoint = try oracle.checkpoint(a);

@@ -142,9 +142,105 @@ test "resident capsule receipts bind level generation and exact outer progress" 
         a.free(bytes);
     };
     try std.testing.expectError(error.UnauthorizedCapsule, facade.Resident.restoreCapsule(a, &prepared, current.bytes(), custody.verifier()));
-    while (try restored.pump(64) == .suspended) {}
+    while (true) {
+        var progress = try restored.pump(64);
+        defer progress.deinit();
+        if (progress != .suspended) break;
+    }
     var result = try restored.drive(a, .resume_yield, .{});
     defer result.deinit();
     try std.testing.expectEqualSlices(u8, &.{ 1, 42 }, result.record.completed);
     try restored.close();
+}
+
+test "public resident resumes every admitted outer operation and owns its output" {
+    const facade = @import("session.zig");
+    const service = @import("service.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const integer = try b.scalar(u64);
+    const entry = try b.declare(&.{}, integer, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.constant(u64, 42)));
+    const image = try support.encode(b.module(entry, try b.scalar(void)));
+    defer a.free(image);
+    var prepared = try facade.Prepared.init(a, image);
+    defer prepared.deinit();
+    const provenance: capsule.Provenance = .{ .execution = @splat(11), .custody = @splat(12), .publication = null };
+    // This switch is exhaustive over the actual restorable operation domain.
+    inline for (std.meta.tags(driver.Operation)) |operation| {
+        var original = try driver.Driver.start(a, &prepared.guest, &prepared.runtime, .{ .arguments = &.{} });
+        var original_live = true;
+        defer if (original_live) original.deinit();
+        if (operation != .initialize) {
+            var initialized = try original.pump(null);
+            defer initialized.deinit();
+            if (operation == .finish) {
+                var terminal = try original.exchange(.{ .advance = .{ .control = .none, .quantum = 100 } });
+                defer terminal.deinit();
+                try std.testing.expectEqual(.completed, terminal.value.cut.status);
+            }
+            try original.submit(switch (operation) {
+                .initialize => unreachable,
+                .advance => .{ .advance = .{ .control = .none, .quantum = 1 } },
+                .observe => .observe,
+                .project => .project,
+                .finish => .finish,
+            });
+        }
+        var partial = try original.pump(1);
+        defer partial.deinit();
+        try std.testing.expect(partial == .suspended);
+        const bytes = try capsule.publish(a, &original, .outer_execution, provenance);
+        defer a.free(bytes);
+        var envelope = try capsule.read(a, bytes);
+        defer envelope.deinit();
+        try std.testing.expectEqual(operation == .initialize, envelope.value.initial.len != 0);
+        const guest_revision = original.guest_revision;
+        var expected = try original.pump(null);
+        defer expected.deinit();
+        try std.testing.expectEqual(@as(usize, 0), original.initial.len);
+        const final_revision = original.guest_revision;
+        original.deinit();
+        original_live = false;
+        var custody: Custody = .{ .expected = capsule.reference(bytes), .execution = provenance.execution };
+        var failing = std.testing.FailingAllocator.init(a, .{});
+        var restored = try facade.Resident.restoreCapsule(failing.allocator(), &prepared, bytes, custody.verifier());
+        defer if (restored.live) {
+            if (operation == .finish) restored.close() catch unreachable else {
+                const saved = restored.takeCheckpoint(a) catch unreachable;
+                a.free(saved);
+            }
+        };
+        try std.testing.expectError(error.UnauthorizedCapsule, facade.Resident.restoreCapsule(a, &prepared, bytes, custody.verifier()));
+        const before = try restored.runtimeBinding();
+        try std.testing.expectEqual(guest_revision, before.guest_revision);
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(error.OutOfMemory, restored.pump(1));
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expectEqualDeep(before, try restored.runtimeBinding());
+        while (true) {
+            var actual = try restored.pump(64);
+            defer actual.deinit();
+            if (actual == .suspended) continue;
+            try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
+            if (actual == .event) {
+                const expected_bytes = try projection.encode(service.Event, a, expected.event.value);
+                defer a.free(expected_bytes);
+                const actual_bytes = try projection.encode(service.Event, a, actual.event.value);
+                defer a.free(actual_bytes);
+                try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+            }
+            break;
+        }
+        try std.testing.expectEqual(final_revision, (try restored.runtimeBinding()).guest_revision);
+        if (operation != .advance) try std.testing.expectEqual(guest_revision, final_revision);
+        if (operation == .finish) {
+            var closed = try restored.pump(1);
+            defer closed.deinit();
+            try std.testing.expect(closed == .closed);
+            try restored.close();
+        } else {
+            try std.testing.expectError(error.NoOperation, restored.pump(1));
+        }
+    }
 }

@@ -10,7 +10,26 @@ const projection = @import("projection.zig");
 const protocol = data.invocation;
 
 pub const Operation = enum { initialize, advance, observe, project, finish };
-pub const Pump = union(enum) { suspended, event: projection.Owned(service.Event), closed };
+pub const Pump = union(enum) {
+    suspended,
+    event: projection.Owned(service.Event),
+    closed,
+
+    pub fn deinit(self: *Pump) void {
+        if (self.* == .event) self.event.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Derived only from the real published request and retained by its exclusive
+/// Resident owner. No state bytes or borrowed output backing are retained.
+pub const ExpectedReply = struct {
+    identity: [32]u8,
+    effect: data.program.Id,
+    pub fn fromRequest(request: protocol.Request) ExpectedReply {
+        return .{ .identity = request.request_identity, .effect = request.binding.effect };
+    }
+};
 
 pub const Driver = struct {
     allocator: std.mem.Allocator,
@@ -23,12 +42,14 @@ pub const Driver = struct {
     /// Retained until the next command, so an outer publication can name the
     /// exact operation whose control has already been consumed once.
     command: []u8 = &.{},
+    /// Needed only while initialization can still be resumed or rolled back.
     initial: []u8,
     last_cut: ?service.Cut = null,
     revision: u64 = 0,
     guest_revision: u64 = 0,
     closed: bool = false,
     transaction_active: bool = false,
+    statistics: ?*@import("../interpreter_v2/runtime_types.zig").Statistics = null,
 
     pub const Transaction = struct {
         outer: base.Session.Transaction,
@@ -43,6 +64,7 @@ pub const Driver = struct {
             self.outer.commit(&owner.outer);
             owner.allocator.free(self.command);
             owner.transaction_active = false;
+            owner.releaseInitial();
             self.* = undefined;
         }
         pub fn rollback(self: *Transaction, owner: *Driver) void {
@@ -102,6 +124,12 @@ pub const Driver = struct {
         self.guest.release();
         self.selected.release();
         self.* = undefined;
+    }
+
+    fn releaseInitial(self: *Driver) void {
+        if (self.operation == .initialize or self.transaction_active) return;
+        self.allocator.free(self.initial);
+        self.initial = &.{};
     }
 
     /// Submit exactly once. Pumping after suspension never re-applies this
@@ -176,6 +204,7 @@ pub const Driver = struct {
                     .finish => return error.InvalidServiceEvent,
                 }
                 self.operation = null;
+                self.releaseInitial();
                 return .{ .event = event };
             },
         }
@@ -202,6 +231,10 @@ pub const Driver = struct {
     }
 
     pub fn pendingBinding(self: *Driver, a: std.mem.Allocator, materialize: bool) !base.Pending {
+        if (self.statistics) |statistics| {
+            statistics.state_projections +|= 1;
+            statistics.pending_bindings +|= 1;
+        }
         var projected = try self.projectState();
         defer projected.deinit();
         const actual = projected.state;
@@ -248,12 +281,20 @@ pub const Driver = struct {
         if (self.operation != null) return error.OperationInProgress;
         var pending = try self.pendingBinding(self.allocator, false);
         defer pending.deinit();
+        try self.replyExpected(bytes, ExpectedReply.fromRequest(pending.request), quantum);
+    }
+
+    pub fn replyExpected(self: *Driver, bytes: []const u8, expected: ExpectedReply, quantum: u64) !void {
+        if (self.operation != null) return error.OperationInProgress;
         var response = try protocol.decode(protocol.Result, self.allocator, bytes);
         defer response.deinit();
-        if (!std.mem.eql(u8, &response.value.request_identity, &pending.request.request_identity)) return error.InvalidResult;
+        if (self.statistics) |statistics| statistics.expected_binding_checks +|= 1;
+        if (!std.mem.eql(u8, &response.value.request_identity, &expected.identity)) return error.InvalidResult;
+        if (self.closed or self.last_cut == null or self.last_cut.?.status != .parked) return error.InvalidState;
         const admitted = self.guest.admitted();
         const program = admitted.program();
-        const effect = program.effects[@intCast(pending.request.binding.effect)];
+        if (expected.effect >= program.effects.len) return error.InvalidResult;
+        const effect = program.effects[@intCast(expected.effect)];
         try data.admission.value(self.allocator, program.schemas, admitted.schemaFacts(), .{ .schema = effect.result, .bytes = response.value.value });
         try self.submit(.{ .advance = .{ .control = .{ .answer = response.value.value }, .quantum = quantum } });
     }

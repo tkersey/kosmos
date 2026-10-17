@@ -5,7 +5,7 @@ const std = @import("std");
 const horos = @import("horos");
 const data = @import("horos_data");
 const kosmos = @import("root.zig");
-const native = @import("../test/oracle/stable_session.zig");
+const native = @import("native_baseline");
 const service = @import("semantic/service.zig");
 const projection = @import("semantic/projection.zig");
 const artifact = @import("semantic/artifact.zig");
@@ -34,9 +34,9 @@ const Costs = struct {
     peak_bytes: usize = 0,
     restore_peak_bytes: usize = 0,
     copied_blob_bytes: u64 = 0,
-    field_projection_hits: u64 = 0,
-    field_projection_scans: u64 = 0,
-    element_projection_hits: u64 = 0,
+    field_projection_hits: ?u64 = null,
+    field_projection_scans: ?u64 = null,
+    element_projection_hits: ?u64 = null,
 };
 fn now(io: std.Io) std.Io.Timestamp {
     return std.Io.Clock.awake.now(io);
@@ -149,7 +149,7 @@ fn reply(a: std.mem.Allocator, request_bytes: []const u8, sample: usize) ![]u8 {
 }
 fn run(comptime runtime: type, io: std.Io, a: std.mem.Allocator, prepared: *const runtime.Prepared, input: []const u8, sample: usize, trace_allocator: std.mem.Allocator, trace: *std.ArrayList(Step), recording: bool) !Costs {
     var m = meter(a);
-    var statistics: kosmos.Statistics = .{};
+    var statistics: std.meta.Child(std.meta.Child(@FieldType(runtime.Session, "statistics"))) = .{};
     var costs: Costs = .{};
     var start = now(io);
     var session = try runtime.Session.start(m.allocator(), prepared, input);
@@ -232,11 +232,12 @@ fn run(comptime runtime: type, io: std.Io, a: std.mem.Allocator, prepared: *cons
     }
     if (!recording and costs.cuts != trace.items.len) return error.MissingGuestCut;
     costs.guest_work = statistics.transitions;
-    costs.base_work = statistics.base_transitions;
+    // The historical direct evaluator has no outer/base execution level.
+    costs.base_work = if (@hasField(@TypeOf(statistics), "base_transitions")) statistics.base_transitions else 0;
     costs.copied_blob_bytes = statistics.storage.copied_blob_bytes;
-    costs.field_projection_hits = statistics.storage.field_projection_hits;
-    costs.field_projection_scans = statistics.storage.field_projection_scans;
-    costs.element_projection_hits = statistics.storage.element_projection_hits;
+    if (@hasField(@TypeOf(statistics.storage), "field_projection_hits")) costs.field_projection_hits = statistics.storage.field_projection_hits;
+    if (@hasField(@TypeOf(statistics.storage), "field_projection_scans")) costs.field_projection_scans = statistics.storage.field_projection_scans;
+    if (@hasField(@TypeOf(statistics.storage), "element_projection_hits")) costs.element_projection_hits = statistics.storage.element_projection_hits;
     costs.live_bytes = m.live;
     costs.peak_bytes = m.peak;
     return costs;
@@ -270,7 +271,7 @@ fn bootstrap(io: std.Io, a: std.mem.Allocator, prepared: *const native.Prepared,
     var first = try event(a, &outer);
     first.deinit();
     costs.start_ns = elapsed(io, start);
-    var statistics: kosmos.Statistics = .{};
+    var statistics: std.meta.Child(std.meta.Child(@FieldType(native.Session, "statistics"))) = .{};
     outer.statistics = &statistics;
     outer.store.statistics = &statistics.storage;
     for (trace, 0..) |step, index| {

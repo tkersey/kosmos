@@ -2,8 +2,18 @@
 
 The public guest facade runs `semantic/service.zig` as ordinary Horos code on
 `base/session.zig`. The build emits `semantic-core.kar`; adding a guest image
-does not rebuild the generic evaluator. The frozen direct guest evaluator is in
-`test/oracle/` and is a qualification dependency only.
+does not rebuild the generic evaluator. The direct guest evaluator is fetched
+from the immutable, hash-pinned
+Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f` archive for qualification
+and benchmarks only. No copied native guest engine remains in this source tree.
+
+The resident pump continues every admitted outer operation after restore:
+initialization, advance, observation, projection and finish. Its result is
+`suspended`, an owned service `event`, or `closed`; callers release it with
+`deinit`. Observation and projection preserve the guest revision. Resident reply
+admission retains the actual published request identity and effect contract
+under its exclusive mutation gate, including bounded submission. Low-level
+Session replies independently reconstruct the current binding.
 
 ## Execution boundaries
 
@@ -90,9 +100,13 @@ operation are validated but are not reported as its completed guest result.
 
 `RuntimeCapsule.Kind.guest_cut` carries canonical guest state and permits checked
 hydration into an independently approved realization. `outer_execution` carries
-the exact base checkpoint, immutable initialization input, selected command,
-command disposition and realization identity. It restores only the same artifact.
+the exact base checkpoint, initialization input while initialization is unfinished,
+selected command, command disposition and realization identity. It restores only
+the same artifact.
 Both retain guest/outer revisions, exact dependencies and host provenance.
+Initialization input is released after its first committed cut; rollback retains
+it until that commit. Later capsules use the committed evaluator state and omit
+the dead input. Older capsules that carry it are admitted without retaining it.
 
 Restore checks canonical content, identities, command shape, guest admission and
 the available mapped source phases before calling the trusted custody verifier.
@@ -147,7 +161,8 @@ update the source/content/compiler bindings in `semantic_packaged.zig`, and run
 closed on stale bindings and prints the current digests to aid that update.
 Changing a fingerprint without rebuilding cannot pass the byte comparison.
 
-`check-native` includes the portable semantic suites and frozen native oracle;
+`check-native` runs the behavioral and lifecycle regressions on the public
+semantic runtime, plus differential comparisons with the immutable native oracle;
 `check-semantic-driver` covers artifact admission, recovery, capsule custody and
 resident switching. `check-publication` retains the historical public byte,
 large-state and allocator-failure obligations. `check-kernel` compares ABI3 native

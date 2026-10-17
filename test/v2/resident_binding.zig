@@ -1,7 +1,8 @@
-//! Independent response rejection and lifecycle checks for Resident-owned facts.
+//! Public production runtime retains exact reply contracts under exclusive ownership.
+const runtime = @import("kosmos");
+// Independent response rejection and lifecycle checks for Resident-owned facts.
 const std = @import("std");
 const horos = @import("horos");
-const runtime = @import("stable_runtime");
 const data = horos.data;
 const protocol = data.invocation;
 const a = std.testing.allocator;
@@ -10,7 +11,7 @@ const eq = std.testing.expectEqual;
 const bytesEq = std.testing.expectEqualSlices;
 const Statistics = std.meta.Child(std.meta.Child(@FieldType(runtime.Session, "statistics")));
 
-fn image(cleanup: bool) ![]u8 {
+fn makeImage(cleanup: bool) ![]u8 {
     var b = horos.source.Builder.init(a);
     defer b.deinit();
     const module = if (cleanup) try horos.source.examples.unwind(&b) else blk: {
@@ -50,7 +51,7 @@ fn rejected(session: *runtime.Session, reply: []const u8) anyerror {
 }
 
 test "resident reuses exact binding across independent invalid replies inspection and restore" {
-    const program = try image(false);
+    const program = try makeImage(false);
     defer a.free(program);
     var prepared = try runtime.Prepared.init(a, program);
     defer prepared.deinit();
@@ -113,7 +114,7 @@ test "resident reuses exact binding across independent invalid replies inspectio
 }
 
 test "every resident output route restores the cached binding after late publication failure" {
-    const program = try image(false);
+    const program = try makeImage(false);
     defer a.free(program);
     var prepared = try runtime.Prepared.init(a, program);
     defer prepared.deinit();
@@ -150,7 +151,7 @@ test "every resident output route restores the cached binding after late publica
 }
 
 test "resident cancellation replaces a cleanup binding and rejects its actual predecessor" {
-    const program = try image(true);
+    const program = try makeImage(true);
     defer a.free(program);
     var prepared = try runtime.Prepared.init(a, program);
     defer prepared.deinit();
@@ -187,75 +188,40 @@ test "resident cancellation replaces a cleanup binding and rejects its actual pr
     try std.testing.expectEqualStrings("stop", done.record.failed.cancellation.?.text);
 }
 
-test "low level Session mutation still requires a newly canonicalized binding" {
-    const program = try image(false);
-    defer a.free(program);
-    var session = try runtime.Session.initImage(a, program, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
-    defer session.deinit();
-    try expect(try session.run(null) == .requested);
-    var pending = try session.pendingRequest(a);
-    defer pending.deinit();
-    const old_reply = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = pending.request.request_identity, .value = &.{} });
-    defer a.free(old_reply);
-    const continuation = (try session.store.get(session.roots.pending.?)).pending.continuation;
-    const frame = try session.frames.getMutable(continuation.id);
-    var iterator = try session.frames.slots.iterator(frame.view);
-    var changed = false;
-    while (try iterator.next()) |binding| {
-        if (session.program.schemas[@intCast(binding.value.schema)] != .u64) continue;
-        var value = binding.value;
-        std.mem.writeInt(u64, value.body.scalar[0..8], 43, .little);
-        try session.frames.write(frame, binding.slot, value);
-        changed = true;
-        break; // The write invalidates the packed-slot iterator.
-    }
-    try expect(changed);
-    try std.testing.expectError(error.InvalidResult, session.answer(old_reply));
-    var current = try session.pendingRequest(a);
-    defer current.deinit();
-    const reply = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = current.request.request_identity, .value = &.{} });
+test "bounded resident reply uses retained binding and consumes control once" {
+    const image = try makeImage(false);
+    defer a.free(image);
+    var prepared = try runtime.Prepared.init(a, image);
+    defer prepared.deinit();
+    var owner = try runtime.Resident.start(a, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
+    defer if (owner.live) {
+        const state = owner.takeCheckpoint(a) catch unreachable;
+        a.free(state);
+    };
+    var first = try owner.drive(a, .none, .{});
+    defer first.deinit();
+    const reply = try encodeReply(first.record.requested.request, &.{});
     defer a.free(reply);
-    try session.answer(reply);
-    const done = try session.run(null);
-    try expect(done == .completed);
-    try eq(43, done.completed.body.scalar[0]);
-}
-
-test "low level preexisting frame borrow rolls back to the canonical pending state" {
-    const program = try image(false);
-    defer a.free(program);
-    var session = try runtime.Session.initImage(a, program, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
-    defer session.deinit();
-    try expect(try session.run(null) == .requested);
-    const before = try session.checkpoint(a);
-    defer a.free(before);
-    var pending = try session.pendingRequest(a);
-    defer pending.deinit();
-    const continuation = (try session.store.get(session.roots.pending.?)).pending.continuation;
-    const frame = try session.frames.getMutable(continuation.id);
-    var iterator = try session.frames.slots.iterator(frame.view);
-    var changed = false;
-    while (try iterator.next()) |binding| {
-        if (session.program.schemas[@intCast(binding.value.schema)] != .u64) continue;
-        var transaction = try session.begin();
-        var value = binding.value;
-        std.mem.writeInt(u64, value.body.scalar[0..8], 43, .little);
-        session.frames.write(frame, binding.slot, value) catch |err| {
-            transaction.rollback(&session);
-            return err;
-        };
-        transaction.rollback(&session);
-        changed = true;
-        break; // Rollback ends both the frame borrow and packed-slot iterator.
+    const invalid = try encodeReply(first.record.requested.request, &.{1});
+    defer a.free(invalid);
+    var stats: runtime.Statistics = .{};
+    try owner.setStatistics(&stats);
+    try std.testing.expectError(error.NonCanonical, owner.beginAdvance(.{ .reply = invalid }, 100));
+    try std.testing.expectEqual(@as(u64, 0), stats.state_projections);
+    try owner.beginAdvance(.{ .reply = reply }, 100);
+    try std.testing.expectEqual(@as(u64, 0), stats.state_projections);
+    try std.testing.expectEqual(@as(u64, 2), stats.reused_expected_bindings);
+    while (true) {
+        var progress = try owner.pump(64);
+        defer progress.deinit();
+        if (progress == .suspended) continue;
+        try std.testing.expect(progress == .event and progress.event.value == .cut);
+        break;
     }
-    try expect(changed);
-    const after = try session.checkpoint(a);
-    defer a.free(after);
-    try bytesEq(u8, before, after);
-    const reply = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = pending.request.request_identity, .value = &.{} });
-    defer a.free(reply);
-    try session.answer(reply);
-    const done = try session.run(null);
-    try expect(done == .completed);
-    try eq(42, done.completed.body.scalar[0]);
+    try std.testing.expectError(error.NoOperation, owner.pump(64));
+    var done = try owner.drive(a, .none, .{ .quantum = 0 });
+    defer done.deinit();
+    try std.testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, done.record.completed);
+    try std.testing.expectEqual(@as(u64, 0), stats.state_projections);
+    try owner.close();
 }

@@ -51,7 +51,7 @@ pub fn For(comptime runtime: type) type {
 
         /// Observe the identity already constructed for publication. This exports no
         /// validation authority and does not retain any output/checkpoint backing.
-        pub fn finishObserved(allocator: std.mem.Allocator, session: *runtime.Session, checkpoint: bool, binding: ?*?[32]u8) Error!Outcome {
+        pub fn finishObserved(allocator: std.mem.Allocator, session: *runtime.Session, checkpoint: bool, binding: ?*?runtime.ExpectedReply) Error!Outcome {
             return (try finishPublication(allocator, session, if (checkpoint) .inline_state else .none, binding)).outcome;
         }
 
@@ -64,7 +64,7 @@ pub fn For(comptime runtime: type) type {
 
         /// Sidecar bytes use the Session allocator, independently of the output arena.
         /// The caller must admit both before committing its resident transaction.
-        pub fn finishPublication(allocator: std.mem.Allocator, session: *runtime.Session, mode: CheckpointMode, binding: ?*?[32]u8) Error!Finished {
+        pub fn finishPublication(allocator: std.mem.Allocator, session: *runtime.Session, mode: CheckpointMode, binding: ?*?runtime.ExpectedReply) Error!Finished {
             const observation = try session.observe();
             if (binding) |output| output.* = null;
             var arena = std.heap.ArenaAllocator.init(allocator);
@@ -81,7 +81,7 @@ pub fn For(comptime runtime: type) type {
                     const pending_allocator = if (mode == .inline_state) a else session.allocator;
                     var pending = try session.pendingBinding(pending_allocator, mode != .none);
                     defer pending.deinit();
-                    if (binding) |output| output.* = pending.request.request_identity;
+                    if (binding) |output| output.* = runtime.ExpectedReply.fromRequest(pending.request);
                     pending_digest = pending.request.binding.pending_state_digest;
                     const request = try protocol.encodeOwned(protocol.Request, a, pending.request);
                     const state: ?[]const u8 = if (mode == .inline_state) pending.state else null;

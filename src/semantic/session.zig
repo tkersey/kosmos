@@ -9,6 +9,7 @@ const driver = @import("driver.zig");
 const realization = @import("realization.zig");
 const g = data.graph;
 const GuestPrepared = @import("../interpreter_v2/prepared.zig").Prepared;
+pub const ExpectedReply = driver.ExpectedReply;
 pub const Pending = @import("../base/session.zig").Pending;
 pub const Workspace = @import("../interpreter_v2/arena.zig").Arena;
 pub const AllocationBudget = @import("../interpreter_v2/allocation_budget.zig").Budget;
@@ -176,15 +177,15 @@ pub const Session = struct {
         return startSelected(a, prepared, &prepared.runtime, .{ .arguments = arguments });
     }
     pub fn startSelected(a: std.mem.Allocator, prepared: *const Prepared, selected: *const artifact.Admitted, initial: service.Initial) Error!Session {
-        var pump = try driver.Driver.start(a, &prepared.guest, selected, initial);
-        errdefer pump.deinit();
-        var first = try pump.pump(null);
+        var execution = try driver.Driver.start(a, &prepared.guest, selected, initial);
+        errdefer execution.deinit();
+        var first = try execution.pump(null);
         if (first != .event) return error.InvalidServiceEvent;
         defer first.event.deinit();
-        return fromDriver(pump);
+        return fromDriver(execution);
     }
-    pub fn fromDriver(pump: driver.Driver) Session {
-        return .{ .allocator = pump.allocator, .program = pump.guest.admitted().program(), .program_identity = pump.guest.admitted().identity(), .prepared = pump.guest, .driver = pump };
+    pub fn fromDriver(execution: driver.Driver) Session {
+        return .{ .allocator = execution.allocator, .program = execution.guest.admitted().program(), .program_identity = execution.guest.admitted().identity(), .prepared = execution.guest, .driver = execution };
     }
     pub fn restoreImage(a: std.mem.Allocator, image: []const u8, checkpoint_bytes: []const u8) Error!Session {
         var prepared = try Prepared.init(a, image);
@@ -203,6 +204,7 @@ pub const Session = struct {
     }
     pub fn setStatistics(self: *Session, statistics: ?*@import("../interpreter_v2/runtime_types.zig").Statistics) void {
         self.statistics = statistics;
+        self.driver.statistics = statistics;
         self.attachCounters();
         self.driver.outer.store.statistics = if (statistics) |value| &value.storage else null;
     }
@@ -223,7 +225,6 @@ pub const Session = struct {
         const cut = self.driver.last_cut orelse return error.InvalidState;
         switch (cut.status) {
             .active, .unwinding => return .progressed,
-            .yielded => return .yielded,
             else => {},
         }
         if (self.view == null) {
@@ -259,11 +260,11 @@ pub const Session = struct {
         self.transitions +%= @intCast(work);
         if (self.statistics) |statistics| statistics.transitions +|= work;
     }
-    /// Select once, then use pumpAdvance to make bounded outer progress.
-    pub fn submitAdvance(self: *Session, command: data.invocation.Control, quantum: u64) Error!void {
+    /// Select once, then use pump to make bounded outer progress.
+    pub fn submitAdvance(self: *Session, command: data.invocation.Control, quantum: u64, expected: ?ExpectedReply) Error!void {
         if (self.isTerminal()) return error.InvalidState;
         if (command == .reply) {
-            try self.driver.reply(command.reply, quantum);
+            if (expected) |binding| try self.driver.replyExpected(command.reply, binding, quantum) else try self.driver.reply(command.reply, quantum);
         } else {
             const control_value: service.Control = switch (command) {
                 .none => .none,
@@ -276,33 +277,28 @@ pub const Session = struct {
             try self.driver.submit(.{ .advance = .{ .control = control_value, .quantum = quantum } });
         }
     }
-    pub const Pump = union(enum) { suspended, cut: service.Cut };
+    pub const Pump = driver.Pump;
     /// Last established cut only. Reading never advances, collects or records
     /// additional guest events. Disabled source hooks return null.
     pub fn trace(self: *const Session) ?service.instrumentation.Output {
         const cut = self.driver.last_cut orelse return null;
         return .{ .source = self.driver.selected.content.value.manifest.source, .realization = self.driver.artifact_identity, .guest = self.driver.guest.admitted().identity(), .guest_revision = self.driver.guest_revision, .trace = cut.trace orelse return null };
     }
-    pub fn pumpAdvance(self: *Session, quantum: u64) Error!Pump {
-        if (self.driver.operation != .advance) return error.NoOperation;
+    /// Continue any admitted operation, including one restored before its first
+    /// cut. The caller owns observation/projection output until Pump.deinit.
+    pub fn pump(self: *Session, quantum: u64) Error!Pump {
         self.attachCounters();
         const before = self.driver.outer.transitions;
         defer if (self.statistics) |statistics| {
             statistics.base_transitions +|= self.driver.outer.transitions -% before;
         };
-        var result = try self.driver.pump(quantum);
-        switch (result) {
-            .suspended => return .suspended,
-            .closed => return error.InvalidServiceEvent,
-            .event => |*event| {
-                defer event.deinit();
-                if (event.value != .cut) return error.InvalidServiceEvent;
-                self.clearView();
-                self.transitions +%= @intCast(event.value.cut.guest_work);
-                if (self.statistics) |statistics| statistics.transitions +|= event.value.cut.guest_work;
-                return .{ .cut = event.value.cut };
-            },
+        const result = try self.driver.pump(quantum);
+        if (result == .event and result.event.value == .cut) {
+            self.clearView();
+            self.transitions +%= @intCast(result.event.value.cut.guest_work);
+            if (self.statistics) |statistics| statistics.transitions +|= result.event.value.cut.guest_work;
         }
+        return result;
     }
     pub fn run(self: *Session, quantum: ?u64) Error!Observation {
         if (self.isTerminal()) return self.observe();
@@ -333,17 +329,14 @@ pub const Session = struct {
         outcome.event.deinit();
         self.clearView();
     }
-    pub fn answerExpected(self: *Session, input: []const u8, expected: [32]u8) Error!void {
-        var response = try data.invocation.decode(data.invocation.Result, self.allocator, input);
-        defer response.deinit();
-        if (!std.mem.eql(u8, &response.value.request_identity, &expected)) return error.InvalidResult;
-        try self.answer(input);
+    pub fn answerExpected(self: *Session, input: []const u8, expected: ExpectedReply) Error!void {
+        try self.driver.replyExpected(input, expected, 0);
+        var outcome = try self.driver.pump(null);
+        defer outcome.deinit();
+        if (outcome != .event or outcome.event.value != .cut) return error.InvalidServiceEvent;
+        self.clearView();
     }
     pub fn pendingBinding(self: *Session, a: std.mem.Allocator, materialize: bool) Error!Pending {
-        if (self.statistics) |statistics| {
-            statistics.state_projections +|= 1;
-            statistics.pending_bindings +|= 1;
-        }
         return self.driver.pendingBinding(a, materialize);
     }
     pub fn pendingRequest(self: *Session, a: std.mem.Allocator) Error!Pending {
