@@ -67,6 +67,9 @@ and alternates the actual native/WASM state producer. It retains all 47 examples
 every quantum-one observation, cancellation frontier, independent source result,
 effect trace and canonical-byte assertion. The separate kernel suite still
 exercises the complete fresh invocation entry point alongside resident execution.
+The long recursion resource fixture retains all 10,000 calls and its node bound
+at every 31-step cut. It compares framing once, then executes each remaining
+slice once while retaining canonical checkpoint checks at every cut.
 
 These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package

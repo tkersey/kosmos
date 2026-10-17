@@ -1624,7 +1624,11 @@ test "stable source owns its input and keeps tail-recursive control bounded" {
         var cut = try guestState(&session);
         defer cut.deinit();
         try testing.expect(cut.state.nodes.len <= 512);
-        result = try drive(&session, 31);
+        // Keep all 10,000 recursive calls and the bound at every 31-step cut.
+        // The framing comparison above is independent of recursion depth;
+        // this resource fixture needs one execution of each remaining slice.
+        result = try session.run(31);
+        try checkedCheckpoint(&session);
     }
     try testing.expect(result == .completed);
     try testing.expectEqual(1, (try session.bytes(&result.completed))[0]);
