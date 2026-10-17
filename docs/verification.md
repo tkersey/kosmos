@@ -38,6 +38,10 @@ final encoded publication before commit, in both checkpoint modes, then require
 unchanged state and exact retry. Their algorithms execute as ordinary data
 programs over the same native owners; each does not require another exhaustive
 sweep of those owners through the full evaluator.
+Suspension reclamation exhausts rollback/retry with an eight-element encoded
+sequence, and retains the original 8192-element fixture at the final publication
+fence in both checkpoint modes. The independent 131072-element fixture preserves
+the live/dead backing bounds, aliases, canonical restore and continuation checks.
 Full-program result, effect-order and checkpoint fixtures remain separate from
 those failure sweeps; former native optimizer paths do not each require replaying
 the generic evaluator's complete allocation history.

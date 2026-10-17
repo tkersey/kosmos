@@ -2805,7 +2805,7 @@ test "public suspension releases large dead input backing while preserving live 
     };
 }
 
-test "suspension reclamation rolls back every allocation failure" {
+test "suspension reclamation preserves exhaustive rollback and large input publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try smallSurvivorExample(&builder, false, true));
@@ -2814,28 +2814,37 @@ test "suspension reclamation rolls back every allocation failure" {
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    var input: [65540]u8 = undefined;
-    var writer: horos.data.wire.Writer = .{ .output = &input };
-    try writer.natural(8192);
-    for (0..8192) |i| try writer.fixed(u64, i + 1);
-    var session = try Session.start(testing.allocator, &prepared, input[0..writer.position]);
-    defer session.deinit();
-    var found = false;
-    for (0..128) |_| {
-        var snapshot = try guestState(&session);
-        defer snapshot.deinit();
-        const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
-        const block = compiled.program.blocks[@intCast(current.record.control.block)];
-        if (current.activation.?.position == block.instructions.len and block.terminator == .perform) {
-            found = true;
-            break;
+    // The sequence is one encoded backing with one live prefix. Sweep native
+    // ownership with eight elements; retain the original 8192-element input at
+    // the final commit fence. The separate 131072-element fixture checks the
+    // resource bound, alias preservation, restore and continuation.
+    for ([_]usize{ 8, 8192 }) |count| {
+        var input: [65540]u8 = undefined;
+        var writer: horos.data.wire.Writer = .{ .output = &input };
+        try writer.natural(count);
+        for (0..count) |i| try writer.fixed(u64, i + 1);
+        var session = try Session.start(testing.allocator, &prepared, input[0..writer.position]);
+        defer session.deinit();
+        var found = false;
+        for (0..128) |_| {
+            var snapshot = try guestState(&session);
+            defer snapshot.deinit();
+            const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
+            const block = compiled.program.blocks[@intCast(current.record.control.block)];
+            if (current.activation.?.position == block.instructions.len and block.terminator == .perform) {
+                found = true;
+                break;
+            }
+            try session.step();
         }
-        try session.step();
+        try testing.expect(found);
+        const before = try session.checkpoint(testing.allocator);
+        defer testing.allocator.free(before);
+        for ([_]bool{ false, true }) |with_checkpoint| {
+            if (count == 8) try residentFailureSweep(&prepared, before, .none, with_checkpoint);
+            try residentPublicationFailure(&prepared, before, .none, with_checkpoint);
+        }
     }
-    try testing.expect(found);
-    const before = try session.checkpoint(testing.allocator);
-    defer testing.allocator.free(before);
-    for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, before, .none, with_checkpoint);
 }
 
 test "retained recursive tail fixture preserves transactional rollback" {
