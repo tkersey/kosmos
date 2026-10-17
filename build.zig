@@ -318,8 +318,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
     }) });
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{ .override = .{ .custom = "current/bin" } } });
-    const native_input = b.addRunArtifact(fixture);
-    native_input.addArgs(&.{ "image", "install" });
+    const native_input_emitter = b.addExecutable(.{ .name = "kosmos-consumer-input", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/native_consumer/emit.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{.{ .name = "horos", .module = horos }},
+    }) });
+    const native_input = b.addRunArtifact(native_input_emitter);
     b.step("emit-native-input", "Emit the shared native public-consumer input").dependOn(&b.addInstallFileWithDir(native_input.captureStdOut(.{}), .prefix, "native-consumer.bpi3").step);
     const current_package_check = b.addSystemCommand(&.{"node"});
     current_package_check.addFileArg2(b.path("test/current/package.mjs"), .{});

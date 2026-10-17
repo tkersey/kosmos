@@ -114,11 +114,17 @@ The optional foreign-environment roots have distinct consumers:
 explicit checks and the optional JS consumer. Native and source-dependent checks
 share a build graph; no per-feature wrapper rebuilds the authoring machinery.
 
+The source comparison overlaps the independent native child and WASM execution
+for each identical immutable command. It awaits both before the next observation,
+retaining every restore, transfer checkpoint, byte comparison and source assertion.
+
 CI runs session, native semantic, source-agreement and portable groups independently;
 their union is exactly the
 aggregate `check` dependency set. It does not invoke `check-native` and then the
 overlapping `check`. Native test run steps always execute, even when compilation
-is cached. Compiler caches may reuse content across dependency-lock changes;
+is cached. An independent native-consumer lane builds only its Horos-authored
+input producer and the extracted public package, without compiling the optional
+ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
 Zig's input hashes and the dependency admission guards remain authoritative.
 The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
 artifact whose source correspondence the native semantic lane checks. All lanes

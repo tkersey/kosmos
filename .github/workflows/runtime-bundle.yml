@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, native, source, portable]
+        lane: [sessions, native, source, portable, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -54,18 +54,19 @@ jobs:
             mv .zig-cache-upload .zig-cache
           fi
           mkdir -p .zig-cache/tmp
-      - name: Check native owners and emit the shared consumer input
+      - name: Check native owners and independently rebuild the core
         if: matrix.lane == 'native'
         run: >-
           zig build check-storage check-semantic-driver check-semantics
-          check-semantic-specialization check-publication check-zig17 emit-native-input
+          check-semantic-specialization check-publication check-zig17
           -Doptimize=safe --summary all
       - name: Check every current public session fixture
         if: matrix.lane == 'sessions'
         run: zig build check-sessions -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Consume the actual native source package without a JS producer
-        if: matrix.lane == 'native'
+        if: matrix.lane == 'consumer'
         run: |
+          zig build emit-native-input -Doptimize=safe -Dpackaged-runtime=true --summary all
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
@@ -86,7 +87,7 @@ jobs:
           node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
         if: matrix.lane == 'portable'
-        # The four independent lanes cover every dependency of `check` once.
+        # The independent lanes cover every dependency of `check` once.
         # Native qualification rebuilds and compares the exact packaged core.
         run: >-
           zig build check-activation-storage-wasm check-kernel

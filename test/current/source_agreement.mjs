@@ -27,12 +27,17 @@ const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const peer = preparedPeer(nativePath);
 let prepared, preparedImage;
 let observations = 0;
+const comparisonStarted = performance.now();
+console.error("source agreement: native/WASM comparison started");
 async function compare(mode, input) {
   const control = input.cancel !== undefined ? "cancel_text" : input.result !== undefined ? "reply"
     : input.state && yielded.has(digest(input.state)) ? "resume_yield" : "none";
   const encoded = encodeInput({ image: input.image, initialArgs: input.initialArgs, state: input.state,
     control, value: input.cancel ?? input.result, quantum: mode === "advance" ? 1 : null });
-  const native = await peer.invoke(encoded);
+  // The peers consume the same immutable input independently. Let the native
+  // child execute while this thread evaluates WASM; compare both before the
+  // next command. Every restore, checkpoint and observation remains exercised.
+  const nativeResult = peer.invoke(encoded);
   let bytes;
   let session;
   try {
@@ -52,6 +57,7 @@ async function compare(mode, input) {
     session = undefined;
   }
   catch (error) {
+    const native = await nativeResult;
     if (session) host.checkpoint(session, { transfer: true });
     assert.notEqual(native.status, 0);
     const diagnostic = error.details?.diagnostic;
@@ -59,10 +65,12 @@ async function compare(mode, input) {
     assert.ok(native.stderr.toString().includes(diagnostic), native.stderr.toString());
     throw new Error(diagnostic, { cause: error });
   }
+  const native = await nativeResult;
   assert.equal(native.status, 0, native.stderr.toString());
   assert.deepEqual(bytes, new Uint8Array(native.stdout));
   // Alternate the actual producer whose portable State is used next.
   const selected = observations++ % 2 ? new Uint8Array(native.stdout) : bytes;
+  if (observations % 2048 === 0) console.error(`source agreement: ${observations} observations in ${((performance.now() - comparisonStarted) / 1000).toFixed(1)}s`);
   const result = decodeOutcome(selected);
   if (result.kind === "yielded") yielded.add(digest(result.state));
   result.kind = result.kind[0].toUpperCase() + result.kind.slice(1);
