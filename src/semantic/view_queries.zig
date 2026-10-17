@@ -18,6 +18,8 @@ const Item = struct { root: views.Root, node: u64, path: []const views.Edge };
 
 /// Breadth-first search. Each described node enters the queue at most once;
 /// retained paths are witnesses, including explicit owned versus plain edges.
+/// The first discovery fixes the ordered BFS witness. Check every root before
+/// expanding edges so a later root still wins over an earlier root's child.
 pub fn retention(b: *source.Builder) Error!source.ast.Module {
     const e = try Author.init(b);
     const input_schema = try projection.schema(RetentionInput, b);
@@ -29,13 +31,16 @@ pub fn retention(b: *source.Builder) Error!source.ast.Module {
     const queue = try @import("table.zig").define(b, item_schema);
     const visited = try @import("map.zig").define(b, e.boolean);
     const pair = try b.schema(.{ .product = &.{ queue.table, visited.tree } });
-    const seed = try b.declare(&.{ view_schema, e.integer, pair }, pair, &.{}, &.{});
-    const expand = try b.declare(&.{ view_schema, item_schema, e.integer, pair }, pair, &.{}, &.{});
+    const progress = try b.schema(.{ .sum = &.{ pair, item_schema } });
+    const seed = try b.declare(&.{ input_schema, e.integer, pair }, progress, &.{}, &.{});
+    const expand = try b.declare(&.{ input_schema, item_schema, e.integer, pair }, progress, &.{}, &.{});
+    const finish = try b.declare(&.{ view_schema, item_schema }, result_schema, &.{}, &.{});
     const search = try b.declare(&.{ input_schema, pair, e.integer }, result_schema, &.{}, &.{});
     const entry = try b.declare(&.{input_schema}, result_schema, &.{}, &.{});
     const empty_path = try b.primitive(path_schema, .sequence, &.{}, 0);
     {
-        const view = try e.param(seed, 0);
+        const input = try e.param(seed, 0);
+        const view = try e.field(input, 0);
         const index = try e.param(seed, 1);
         const state = try e.param(seed, 2);
         const roots = try e.field(view, 3);
@@ -46,14 +51,17 @@ pub fn retention(b: *source.Builder) Error!source.ast.Module {
         const changed_queue = try b.variable(queue.table);
         const changed_seen = try b.variable(visited.tree);
         const next = try e.binary(.integer_add, index, e.one);
-        const keep = try e.call(seed, &.{ view, next, state });
+        const keep = try e.call(seed, &.{ input, next, state });
         const changed = try e.tuple(pair, &.{ try b.reference(changed_queue), try b.reference(changed_seen) });
-        const append = try b.bind(changed_queue, try e.call(queue.append, &.{ try e.field(state, 0), item }), try b.bind(changed_seen, try e.call(visited.set, &.{ try e.field(state, 1), node, try b.constant(bool, true) }), try e.call(seed, &.{ view, next, changed })));
+        const append = try b.bind(changed_queue, try e.call(queue.append, &.{ try e.field(state, 0), item }), try b.bind(changed_seen, try e.call(visited.set, &.{ try e.field(state, 1), node, try b.constant(bool, true) }), try e.call(seed, &.{ input, next, changed })));
         const step = try b.bind(found, try e.call(visited.get, &.{ try e.field(state, 1), node }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(found)}, 0), e.one), keep, append));
-        try b.define(seed, try e.when(try e.binary(.less, index, try b.primitive(e.integer, .sequence_length, &.{roots}, 0)), step, try b.pure(state)));
+        const found_root = try b.pure(try e.variant(progress, 1, item));
+        const checked = try e.when(try e.binary(.equal, node, try e.field(input, 1)), found_root, step);
+        try b.define(seed, try e.when(try e.binary(.less, index, try b.primitive(e.integer, .sequence_length, &.{roots}, 0)), checked, try b.pure(try e.variant(progress, 0, state))));
     }
     {
-        const view = try e.param(expand, 0);
+        const input = try e.param(expand, 0);
+        const view = try e.field(input, 0);
         const item = try e.param(expand, 1);
         const index = try e.param(expand, 2);
         const state = try e.param(expand, 3);
@@ -61,17 +69,23 @@ pub fn retention(b: *source.Builder) Error!source.ast.Module {
         const edge = try e.required(edges, index);
         const node = try e.field(edge, 1);
         const next = try e.binary(.integer_add, index, e.one);
-        const keep = try e.call(expand, &.{ view, item, next, state });
+        const keep = try e.call(expand, &.{ input, item, next, state });
         const found = try b.variable(visited.optional);
         const changed_queue = try b.variable(queue.table);
         const changed_seen = try b.variable(visited.tree);
         const path = try b.primitive(path_schema, .sequence_concat, &.{ try e.field(item, 2), try b.primitive(path_schema, .sequence, &.{edge}, 0) }, 0);
         const appended = try e.tuple(item_schema, &.{ try e.field(item, 0), node, path });
         const changed = try e.tuple(pair, &.{ try b.reference(changed_queue), try b.reference(changed_seen) });
-        const append = try b.bind(changed_queue, try e.call(queue.append, &.{ try e.field(state, 0), appended }), try b.bind(changed_seen, try e.call(visited.set, &.{ try e.field(state, 1), node, try b.constant(bool, true) }), try e.call(expand, &.{ view, item, next, changed })));
-        const unseen = try b.bind(found, try e.call(visited.get, &.{ try e.field(state, 1), node }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(found)}, 0), e.one), keep, append));
+        const append = try b.bind(changed_queue, try e.call(queue.append, &.{ try e.field(state, 0), appended }), try b.bind(changed_seen, try e.call(visited.set, &.{ try e.field(state, 1), node, try b.constant(bool, true) }), try e.call(expand, &.{ input, item, next, changed })));
+        const discovered = try e.when(try e.binary(.equal, node, try e.field(input, 1)), try b.pure(try e.variant(progress, 1, appended)), append);
+        const unseen = try b.bind(found, try e.call(visited.get, &.{ try e.field(state, 1), node }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(found)}, 0), e.one), keep, discovered));
         const step = try e.when(try e.binary(.equal, try e.field(edge, 0), try e.field(item, 1)), unseen, keep);
-        try b.define(expand, try e.when(try e.binary(.less, index, try b.primitive(e.integer, .sequence_length, &.{edges}, 0)), step, try b.pure(state)));
+        try b.define(expand, try e.when(try e.binary(.less, index, try b.primitive(e.integer, .sequence_length, &.{edges}, 0)), step, try b.pure(try e.variant(progress, 0, state))));
+    }
+    {
+        const view = try e.param(finish, 0);
+        const item = try e.param(finish, 1);
+        try b.define(finish, try b.pure(try e.tuple(result_schema, &.{ try e.field(view, 0), try e.literal(@FieldType(RetentionResult, "conclusion"), .reachable), try e.variant(optional_root, 1, try e.field(item, 0)), try e.field(item, 2) })));
     }
     {
         const input = try e.param(search, 0);
@@ -80,18 +94,20 @@ pub fn retention(b: *source.Builder) Error!source.ast.Module {
         const index = try e.param(search, 2);
         const found = try b.variable(queue.optional);
         const item = try e.payload(try b.reference(found), 1);
-        const expanded = try b.variable(pair);
-        const success = try b.pure(try e.tuple(result_schema, &.{ try e.field(view, 0), try e.literal(@FieldType(RetentionResult, "conclusion"), .reachable), try e.variant(optional_root, 1, try e.field(item, 0)), try e.field(item, 2) }));
-        const again = try b.bind(expanded, try e.call(expand, &.{ view, item, e.zero, state }), try e.call(search, &.{ input, try b.reference(expanded), try e.binary(.integer_add, index, e.one) }));
-        const step = try b.bind(found, try e.call(queue.get, &.{ try e.field(state, 0), index }), try e.when(try e.binary(.equal, try e.field(item, 1), try e.field(input, 1)), success, again));
+        const expanded = try b.variable(progress);
+        const again = try e.call(search, &.{ input, try e.payload(try b.reference(expanded), 0), try e.binary(.integer_add, index, e.one) });
+        const success = try e.call(finish, &.{ view, try e.payload(try b.reference(expanded), 1) });
+        const step = try b.bind(found, try e.call(queue.get, &.{ try e.field(state, 0), index }), try b.bind(expanded, try e.call(expand, &.{ input, item, e.zero, state }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(expanded)}, 0), e.one), success, again)));
         const absent = try b.pure(try e.tuple(result_schema, &.{ try e.field(view, 0), try e.literal(@FieldType(RetentionResult, "conclusion"), .absent_complete), try e.variant(optional_root, 0, e.unit_value), empty_path }));
         const partial = try b.pure(try e.tuple(result_schema, &.{ try e.field(view, 0), try e.literal(@FieldType(RetentionResult, "conclusion"), .unknown_partial), try e.variant(optional_root, 0, e.unit_value), empty_path }));
         try b.define(search, try e.when(try e.binary(.less, index, try e.field(try e.field(state, 0), 0)), step, try e.when(try e.field(view, 1), absent, partial)));
     }
     const input = try e.param(entry, 0);
-    const seeded = try b.variable(pair);
+    const seeded = try b.variable(progress);
     const initial = try e.tuple(pair, &.{ try queue.empty(b), try visited.empty(e) });
-    try b.define(entry, try b.bind(seeded, try e.call(seed, &.{ try e.field(input, 0), e.zero, initial }), try e.call(search, &.{ input, try b.reference(seeded), e.zero })));
+    const success = try e.call(finish, &.{ try e.field(input, 0), try e.payload(try b.reference(seeded), 1) });
+    const search_seeded = try e.call(search, &.{ input, try e.payload(try b.reference(seeded), 0), e.zero });
+    try b.define(entry, try b.bind(seeded, try e.call(seed, &.{ input, e.zero, initial }), try e.when(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(seeded)}, 0), e.one), success, search_seeded)));
     return b.module(entry, e.unit);
 }
 

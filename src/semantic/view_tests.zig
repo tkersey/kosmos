@@ -9,6 +9,70 @@ const a = std.testing.allocator;
 const support = @import("test_support.zig");
 const binding: views.Binding = .{ .guest = @splat(1), .core = @splat(2), .realization = @splat(3), .checkpoint = @splat(4), .execution = @splat(5), .guest_revision = 6, .realization_revision = 7, .disclosure = @splat(8) };
 
+test "guest view retention preserves ordered roots and first shortest path" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const image = try support.encode(try queries.retention(&b));
+    defer a.free(image);
+    const roots = [_]views.Root{
+        .{ .node = 0, .owned = false, .field = "first" },
+        .{ .node = 4, .owned = true, .field = "later" },
+        .{ .node = 4, .owned = false, .field = "duplicate" },
+    };
+    const edges = [_]views.Edge{
+        .{ .from = 0, .to = 4, .owned = false, .field = "root-child" },
+        .{ .from = 0, .to = 1, .owned = true, .field = "first-child" },
+        .{ .from = 0, .to = 2, .owned = false, .field = "second-child" },
+        .{ .from = 4, .to = 1, .owned = false, .field = "later-root-child" },
+        .{ .from = 2, .to = 3, .owned = false, .field = "earlier-edge" },
+        .{ .from = 1, .to = 3, .owned = true, .field = "first-path" },
+        .{ .from = 1, .to = 3, .owned = false, .field = "duplicate-edge" },
+    };
+    for ([_]u64{ 4, 1, 3 }) |target| {
+        const input = try projection.encode(queries.RetentionInput, a, .{ .view = .{ .binding = binding, .complete_graph = true, .nodes = &.{}, .roots = &roots, .edges = &edges }, .target = target });
+        defer a.free(input);
+        var session = try base.Session.initImage(a, image, input, .{});
+        defer session.deinit();
+        const result = try session.run(null);
+        try std.testing.expect(result == .completed);
+        var decoded = try projection.decode(queries.RetentionResult, a, try session.bytes(&result.completed));
+        defer decoded.deinit();
+        try std.testing.expectEqual(.reachable, decoded.value.conclusion);
+        try std.testing.expectEqualDeep(binding, decoded.value.binding);
+        try std.testing.expectEqualDeep(roots[if (target == 4) @as(usize, 1) else 0], decoded.value.root.?);
+        const expected: []const views.Edge = switch (target) {
+            4 => &.{},
+            1 => &.{edges[1]},
+            3 => &.{ edges[1], edges[5] },
+            else => unreachable,
+        };
+        try std.testing.expectEqualDeep(expected, decoded.value.path);
+    }
+}
+
+test "guest view retention stops after the decisive edge" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const image = try support.encode(try queries.retention(&b));
+    defer a.free(image);
+    var edges: [424]views.Edge = undefined;
+    for (&edges, 0..) |*edge, i| edge.* = .{ .from = 0, .to = i + 1, .owned = true, .field = "child" };
+    var first_transitions: ?usize = null;
+    for ([_]usize{ 1, edges.len }) |count| {
+        const root: views.Root = .{ .node = 0, .owned = false, .field = "current" };
+        const input = try projection.encode(queries.RetentionInput, a, .{ .view = .{ .binding = binding, .complete_graph = true, .nodes = &.{}, .roots = &.{root}, .edges = edges[0..count] }, .target = 1 });
+        defer a.free(input);
+        var session = try base.Session.initImage(a, image, input, .{});
+        defer session.deinit();
+        const result = try session.run(null);
+        try std.testing.expect(result == .completed);
+        var decoded = try projection.decode(queries.RetentionResult, a, try session.bytes(&result.completed));
+        defer decoded.deinit();
+        try std.testing.expectEqualDeep(@as(queries.RetentionResult, .{ .binding = binding, .conclusion = .reachable, .root = root, .path = edges[0..1] }), decoded.value);
+        if (first_transitions) |steps| try std.testing.expectEqual(steps, session.transitions) else first_transitions = session.transitions;
+    }
+}
+
 test "guest view retention query traverses cycles and distinguishes incomplete absence" {
     var b = source.Builder.init(a);
     defer b.deinit();
