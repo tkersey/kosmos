@@ -75,7 +75,7 @@ wrong instance, malformed controls and reentry reject without advancing State.
 
 ## Capacity and publication
 
-Initial input/working/output budgets are 64 KiB / 1 MiB / 64 KiB. The initial
+Initial input/working/output budgets are 64 KiB / 128 MiB / 64 KiB. The initial
 working backing is 1 MiB. A coalescing allocator reuses freed storage and grows
 within the module's declared maximum. Live-byte budgets are separate from reserved
 linear memory and allocator metadata; fixed emergency capacity/diagnostic buffers
