@@ -8,6 +8,7 @@ const references = @import("references.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const g = data.graph;
 const Binding = struct { id: u64, replacement: g.NodeRef };
 const Input = struct {
@@ -39,16 +40,7 @@ fn prepare() !base.Prepared {
     const ctx = try e.tuple(clone.context, &.{ try b.reference(machine), try b.reference(mapping), try b.reference(originals), try set.map.empty(e), try set.map.empty(e), try lists.empty(e), try lists.empty(e), try b.reference(queued) });
     const check = try e.when(try e.field(input, 5), try e.call(validation.context, &.{ ctx, try e.field(input, 3) }), try e.call(validation.rebase, &.{ try b.reference(machine), try b.reference(mapping), try b.reference(originals), try e.field(input, 3) }));
     try b.define(entry, try b.bind(machine, try e.call(m.hydrate, &.{ try e.param(entry, 0), try e.field(input, 0) }), try b.bind(mapping, try e.call(refs.map.from_sequence, &.{try e.field(input, 1)}), try b.bind(originals, try e.call(refs.refs.from_sequence, &.{try e.field(input, 2)}), try b.bind(queued, try e.call(tasks.from_sequence, &.{try e.field(input, 4)}), check)))));
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(entry, e.unit), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("clone validation lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(bytes);
-    _ = try compiled.encode(a, bytes);
-    return base.Prepared.init(a, bytes);
+    return support.prepare(b.module(entry, e.unit));
 }
 
 test "clone phase validation checks submitted mapping records cursors and work lists" {

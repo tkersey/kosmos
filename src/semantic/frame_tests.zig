@@ -6,6 +6,7 @@ const frames = @import("frames.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const Activation = data.process_state.Activation;
 const Input = struct {
     frame: Activation,
@@ -47,15 +48,8 @@ test "portable frames preserve sparse bindings and lexical owner order" {
     body = try b.bind(moved, try e.call(d.scope, &.{ try b.reference(saved), try e.field(input, 1), try e.field(input, 2) }), body);
     body = try b.bind(saved, try e.call(d.from_public, &.{try e.field(input, 0)}), try b.term(.{ .yield_then = body }));
     try b.define(entry, body);
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(entry, e.unit), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("frame lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(b.module(entry, e.unit));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try base.Prepared.init(a, image);
     defer prepared.deinit();
     const scalar: data.graph.Value = .{ .schema = 1, .body = .{ .scalar = @splat(0) } };
@@ -127,11 +121,8 @@ test "portable scalar frames reconstruct retained bits and reject overlapping re
     body = try b.bind(pruned, try e.call(d.prune, &.{ try b.reference(written), try e.literal([]const u64, &.{ 1, 5 }) }), try b.term(.{ .yield_then = body }));
     body = try b.bind(written, try e.call(d.write_raw, &.{ try b.reference(original), slot, scalar_value }), body);
     try b.define(entry, try b.bind(original, try e.call(d.from_public, &.{try e.param(entry, 0)}), body));
-    var compiled = try source.lower(a, b.module(entry, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(b.module(entry, e.unit));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try base.Prepared.init(a, image);
     defer prepared.deinit();
     const initial: Activation = .{

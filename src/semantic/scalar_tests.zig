@@ -5,21 +5,13 @@ const scalar = @import("scalar.zig");
 const projection = @import("projection.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 
 fn prepare(comptime unary: bool) !base.Prepared {
     var b = source.Builder.init(a);
     defer b.deinit();
     const d = try scalar.define(&b);
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(if (unary) d.unary else d.binary, try b.scalar(void)), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("scalar lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(image);
-    _ = try compiled.encode(a, image);
-    return base.Prepared.init(a, image);
+    return support.prepare(b.module(if (unary) d.unary else d.binary, try b.scalar(void)));
 }
 
 fn evaluate(prepared: *const base.Prepared, input: anytype) !data.scalar.Result {

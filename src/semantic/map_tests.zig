@@ -6,21 +6,13 @@ const maps = @import("map.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const Entry = struct { key: u64, value: u64 };
 const Input = struct { entries: []const Entry, key: u64, value: u64, remove: u64 };
 const Result = struct { prior: ?u64, updated: ?u64, original: ?u64, entries: []const Entry, valid: bool };
 
 fn prepare(b: *source.Builder, entry: data.program.Id) !base.Prepared {
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(entry, try b.scalar(void)), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("map lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(image);
-    _ = try compiled.encode(a, image);
-    return base.Prepared.init(a, image);
+    return support.prepare(b.module(entry, try b.scalar(void)));
 }
 
 test "portable sparse map updates preserve all numeric key bits and old versions" {

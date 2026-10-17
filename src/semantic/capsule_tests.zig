@@ -7,6 +7,7 @@ const projection = @import("projection.zig");
 const driver = @import("driver.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 
 const Custody = struct {
     expected: capsule.Reference,
@@ -27,11 +28,8 @@ test "outer capsule retains clone microprogress and requires exact consumed cust
     defer selected.deinit();
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try source.examples.cloned(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try source.examples.cloned(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try base.Prepared.init(a, image);
     defer prepared.deinit();
     var original = try driver.Driver.start(a, &prepared, &selected, .{ .arguments = &.{} });

@@ -6,16 +6,14 @@ const queries = @import("view_queries.zig");
 const projection = @import("projection.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const binding: views.Binding = .{ .guest = @splat(1), .core = @splat(2), .realization = @splat(3), .checkpoint = @splat(4), .execution = @splat(5), .guest_revision = 6, .realization_revision = 7, .disclosure = @splat(8) };
 
 test "guest view retention query traverses cycles and distinguishes incomplete absence" {
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try queries.retention(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try queries.retention(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     const edges = [_]views.Edge{
         .{ .from = 0, .to = 1, .owned = false, .field = "parent" },
         .{ .from = 1, .to = 0, .owned = false, .field = "cycle" },
@@ -52,14 +50,11 @@ test "guest view retention query traverses cycles and distinguishes incomplete a
 test "guest view capture derives reference paths from an admitted immutable cut" {
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try source.examples.cloned(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try source.examples.cloned(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
-    var oracle = try @import("../../test_oracle.zig").Session.initImage(a, image, &.{});
+    var oracle = try @import("../../test/oracle/stable_session.zig").Session.initImage(a, image, &.{});
     defer oracle.deinit();
     _ = try oracle.run(6);
     const checkpoint = try oracle.checkpoint(a);
@@ -74,11 +69,8 @@ test "guest view capture derives reference paths from an admitted immutable cut"
     {
         var query_builder = source.Builder.init(a);
         defer query_builder.deinit();
-        var query = try source.lower(a, try queries.retention(&query_builder));
-        defer query.deinit();
-        const query_image = try a.alloc(u8, try data.program_image.encodedLength(query.program));
+        const query_image = try support.encode(try queries.retention(&query_builder));
         defer a.free(query_image);
-        _ = try query.encode(a, query_image);
         const input = try projection.encode(queries.RetentionInput, a, .{ .view = whole.value, .target = whole.value.nodes[whole.value.nodes.len - 1].id });
         defer a.free(input);
         var session = try base.Session.initImage(a, query_image, input, .{});
@@ -114,11 +106,8 @@ test "guest view capture derives reference paths from an admitted immutable cut"
 test "guest view divergence query reports only aligned finite observation evidence" {
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try queries.divergence(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try queries.divergence(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     const left = [_]queries.Observation{
         .{ .revision = 6, .control = @splat(0), .bytes = "yielded" },
         .{ .revision = 7, .control = @splat(1), .bytes = "completed:42" },

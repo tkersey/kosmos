@@ -5,8 +5,9 @@ const projection = @import("projection.zig");
 const machines = @import("machine.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
-const native = @import("../../test_oracle.zig");
+const native = @import("../../test/oracle/stable_session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const Command = union(enum) { initialize: []const u8, step, resume_yield, answer: []const u8, cancel: data.invocation.Reason };
 
 fn prepare() !base.Prepared {
@@ -41,12 +42,7 @@ fn prepare() !base.Prepared {
         cases[i] = .{ .variable = parameter, .body = call };
     }
     try b.define(entry, try b.term(.{ .match_sum = .{ .value = try e.param(entry, 2), .cases = &cases } }));
-    var compiled = try source.lower(a, b.module(entry, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(image);
-    _ = try compiled.encode(a, image);
-    return base.Prepared.init(a, image);
+    return support.prepare(b.module(entry, e.unit));
 }
 
 fn compare(core: *base.Prepared, guest: *native.Session, admitted: *const data.program_image.Admitted, command: Command) !void {
@@ -93,11 +89,8 @@ test "authored lifecycle initializes responds resumes and cancels nested cleanup
     defer core.deinit();
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try source.examples.yieldingCleanup(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try source.examples.yieldingCleanup(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
     // Before entry, while yielded in cleanup, and while a cleanup request is

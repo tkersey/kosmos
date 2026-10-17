@@ -7,6 +7,7 @@ const codecs = @import("codec.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const NaturalOutput = struct { read: codecs.Read, bytes: []const u8, fixed: u64, fixed_bytes: [8]u8 };
 const SkipInput = struct { program: projection.Program, schema: u64, bytes: []const u8, offset: u64 };
 
@@ -27,16 +28,7 @@ fn prepare(comptime natural: bool) !base.Prepared {
         const fixed = try b.variable(e.integer);
         try b.define(entry, try b.bind(encoded, try e.call(codec.natural, &.{argument}), try b.bind(decoded, try e.call(codec.read, &.{ try b.reference(encoded), e.zero }), try b.bind(fixed_bytes, try e.call(codec.fixed_bytes, &.{argument}), try b.bind(fixed, try e.call(codec.fixed, &.{try b.reference(fixed_bytes)}), try b.pure(try e.tuple(output, &.{ try b.reference(decoded), try b.reference(encoded), try b.reference(fixed), try b.reference(fixed_bytes) })))))));
     } else try b.define(entry, try e.call(codec.skip, &.{ try e.field(argument, 0), try e.field(argument, 1), try e.field(argument, 2), try e.field(argument, 3) }));
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(entry, e.unit), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("codec lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(image);
-    _ = try compiled.encode(a, image);
-    return base.Prepared.init(a, image);
+    return support.prepare(b.module(entry, e.unit));
 }
 
 test "authored canonical naturals and fixed integers include u64 maximum" {

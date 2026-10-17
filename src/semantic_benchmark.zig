@@ -5,7 +5,7 @@ const std = @import("std");
 const horos = @import("horos");
 const data = @import("horos_data");
 const kosmos = @import("root.zig");
-const native = @import("../test_oracle.zig");
+const native = @import("../test/oracle/stable_session.zig");
 const service = @import("semantic/service.zig");
 const projection = @import("semantic/projection.zig");
 const artifact = @import("semantic/artifact.zig");
@@ -383,7 +383,7 @@ pub fn main(init: std.process.Init) !void {
     start = now(init.io);
     try kosmos.RuntimeCompiler.validate(a, &instrumented);
     try emit(&output.interface, .{ .phase = "instrumented-construction", .construction_ns = instrumented_compile_ns, .admission_ns = instrumented_admission_ns, .independent_validation_ns = elapsed(init.io, start), .construction_peak_bytes = instrumented_meter.peak, .artifact_bytes = instrumented_bytes.len, .artifact = std.fmt.bytesToHex(instrumented.identity, .lower) });
-    inline for (std.meta.tags(Workload)) |kind| {
+    for (std.meta.tags(Workload)) |kind| {
         if (filter == null or std.mem.eql(u8, filter.?, @tagName(kind))) {
             const bytes = try image(a, kind);
             defer a.free(bytes);

@@ -3,8 +3,8 @@ const data = @import("horos_data");
 const source = @import("horos").source;
 const projection = @import("projection.zig");
 const Author = @import("author.zig").Author;
-const steps = @import("step_tests.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 
 fn image(comptime zero_width: bool) ![]u8 {
     var b = source.Builder.init(a);
@@ -34,16 +34,11 @@ fn image(comptime zero_width: bool) ![]u8 {
         const take = try b.primitive(sequence, .sequence_take, &.{ set, index }, 0);
         try b.define(entry, try b.pure(try e.tuple(output, &.{ length, get, append, concat, set, take, pop, pop_last })));
     }
-    var compiled = try source.lower(a, b.module(entry, e.unit));
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    errdefer a.free(bytes);
-    _ = try compiled.encode(a, bytes);
-    return bytes;
+    return support.encode(b.module(entry, e.unit));
 }
 
 test "authored collection operations match native cuts for empty present and missing elements" {
-    var core = try steps.prepareCore();
+    var core = try support.prepareCore();
     defer core.deinit();
     const guest = try image(false);
     defer a.free(guest);
@@ -52,13 +47,13 @@ test "authored collection operations match native cuts for empty present and mis
         for ([_]u64{ 0, 1, std.math.maxInt(u64) }) |index| {
             const input = try projection.encode(Input, a, .{ .values = values, .index = index });
             defer a.free(input);
-            try steps.expectNativeCuts(&core, guest, input, 40);
+            try support.expectNativeCuts(&core, guest, input, 40);
         }
     }
 }
 
 test "authored collection operations retain maximum logical zero width cardinality" {
-    var core = try steps.prepareCore();
+    var core = try support.prepareCore();
     defer core.deinit();
     const guest = try image(true);
     defer a.free(guest);
@@ -67,6 +62,6 @@ test "authored collection operations retain maximum logical zero width cardinali
         var writer: data.wire.Writer = .{ .output = &input };
         try writer.natural(std.math.maxInt(u64));
         try writer.fixed(u64, index);
-        try steps.expectNativeCuts(&core, guest, input[0..writer.position], 30);
+        try support.expectNativeCuts(&core, guest, input[0..writer.position], 30);
     }
 }

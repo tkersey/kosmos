@@ -4,9 +4,10 @@ const source = @import("horos").source;
 const artifact = @import("semantic/artifact.zig");
 const projection = @import("semantic/projection.zig");
 const driver = @import("semantic/driver.zig");
-const native = @import("../test_oracle.zig");
+const native = @import("../test/oracle/stable_session.zig");
 const packaged = @import("packaged_runtime");
 const a = std.testing.allocator;
+const support = @import("semantic/test_support.zig");
 test {
     _ = @import("semantic/capsule_tests.zig");
 }
@@ -67,7 +68,7 @@ test "approved source instrumentation preserves cuts and blocks publication with
     var selected = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer selected.deinit();
     try compiler.validate(a, &selected);
-    const image = try @import("semantic/step_tests.zig").guestImage();
+    const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     try switchRealizations(image, &selected);
     var prepared = try facade.Prepared.initWithRuntime(a, image, &selected);
@@ -99,11 +100,8 @@ test "approved source instrumentation preserves cuts and blocks publication with
     {
         var builder = source.Builder.init(a);
         defer builder.deinit();
-        var lowered = try source.lower(a, try source.examples.resourceScalar(&builder));
-        defer lowered.deinit();
-        const effect_image = try a.alloc(u8, try data.program_image.encodedLength(lowered.program));
+        const effect_image = try support.encode(try source.examples.resourceScalar(&builder));
         defer a.free(effect_image);
-        _ = try lowered.encode(a, effect_image);
         var effect_prepared = try facade.Prepared.initWithRuntime(a, effect_image, &selected);
         defer effect_prepared.deinit();
         var effect_session = try facade.Session.start(a, &effect_prepared, &.{});
@@ -141,7 +139,7 @@ test "approved source instrumentation preserves cuts and blocks publication with
 }
 
 test "packaged specialized realization carries independently checked recovery and exact guest binding" {
-    const image = try @import("semantic/step_tests.zig").guestImage();
+    const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     var prepared = try @import("base/session.zig").Prepared.init(a, image);
     defer prepared.deinit();
@@ -275,11 +273,8 @@ test "portable public session preserves observations checkpoint bytes and rollba
     const facade = @import("semantic/session.zig");
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try source.examples.cloned(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try source.examples.cloned(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try facade.Prepared.init(a, image);
     defer prepared.deinit();
     var portable = try facade.Session.start(a, &prepared, &.{});
@@ -329,11 +324,8 @@ test "host pump binds guest ERS3 while retaining private operation microprogress
     defer selected.deinit();
     var b = source.Builder.init(a);
     defer b.deinit();
-    var compiled = try source.lower(a, try source.examples.resourceScalar(&b));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(try source.examples.resourceScalar(&b));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try @import("base/session.zig").Prepared.init(a, image);
     defer prepared.deinit();
     var expected = try native.Session.initImage(a, image, &.{});
@@ -344,7 +336,7 @@ test "host pump binds guest ERS3 while retaining private operation microprogress
     prepared.deinit(); // both executions hold independent strong leases
     var initialized = try complete(&pump);
     initialized.deinit();
-    var statistics: native.Statistics = .{};
+    var statistics: @import("interpreter_v2/runtime_types.zig").Statistics = .{};
     pump.outer.statistics = &statistics;
     try std.testing.expectError(error.InvalidBridge, pump.outer.replyBridge(@splat(0), 0, &.{}));
     try std.testing.expectError(error.InvalidBridge, pump.outer.replyBridge(pump.core_identity, 1, &.{}));

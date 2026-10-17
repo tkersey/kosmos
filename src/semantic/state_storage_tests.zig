@@ -3,23 +3,14 @@
 const std = @import("std");
 const data = @import("horos_data");
 const source = @import("horos").source;
-const kosmos = @import("../../test_oracle.zig");
+const kosmos = @import("../../test/oracle/stable_session.zig");
 const projection = @import("projection.zig");
 const machine = @import("machine.zig");
 const Base = @import("../base/session.zig").Session;
 const Author = @import("author.zig").Author;
 const profile = @import("../base/profile.zig");
 const a = std.testing.allocator;
-
-fn image(b: *source.Builder, module: source.Module) ![]u8 {
-    _ = b;
-    var compiled = try source.lower(a, module);
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    errdefer a.free(bytes);
-    _ = try compiled.encode(a, bytes);
-    return bytes;
-}
+const support = @import("test_support.zig");
 
 fn storageImage() ![]u8 {
     var b = source.Builder.init(a);
@@ -30,7 +21,7 @@ fn storageImage() ![]u8 {
     const stored = try b.variable(d.schema);
     const finish = try e.call(d.project, &.{try b.reference(stored)});
     try b.define(entry, try b.bind(stored, try e.call(d.hydrate, &.{ try e.param(entry, 0), try e.param(entry, 1) }), try b.term(.{ .yield_then = finish })));
-    return image(&b, b.module(entry, e.unit));
+    return support.encode(b.module(entry, e.unit));
 }
 
 test "first-order storage retains actual cyclic multi-shot and cleanup guest states" {
@@ -42,7 +33,7 @@ test "first-order storage retains actual cyclic multi-shot and cleanup guest sta
     inline for (.{ source.examples.cloned, source.examples.yieldingCleanup }) |example| {
         var b = source.Builder.init(a);
         defer b.deinit();
-        const guest_image = try image(&b, try example(&b));
+        const guest_image = try support.encode(try example(&b));
         defer a.free(guest_image);
         const admitted = try data.program_image.Admitted.decode(a, guest_image);
         defer admitted.deinit();

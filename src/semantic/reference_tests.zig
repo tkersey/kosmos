@@ -6,6 +6,7 @@ const references = @import("references.zig");
 const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 const g = data.graph;
 const Binding = struct { id: u64, replacement: g.NodeRef };
 const Input = struct { node: g.Node, mapping: []const Binding };
@@ -23,16 +24,7 @@ fn prepare() !base.Prepared {
     const refs = try b.variable(graph.refs.table);
     const listed = try b.variable(graph.refs.sequence);
     try b.define(entry, try b.bind(map, try e.call(graph.map.from_sequence, &.{try e.field(input, 1)}), try b.bind(changed, try e.call(graph.rebase, &.{ try e.field(input, 0), try b.reference(map) }), try b.bind(refs, try e.call(graph.references, &.{try b.reference(changed)}), try b.bind(listed, try e.call(graph.refs.to_sequence, &.{try b.reference(refs)}), try b.pure(try e.tuple(try projection.schema(Output, &b), &.{ try b.reference(changed), try b.reference(listed) })))))));
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, b.module(entry, e.unit), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("reference traversal lowering: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(bytes);
-    _ = try compiled.encode(a, bytes);
-    return base.Prepared.init(a, bytes);
+    return support.prepare(b.module(entry, e.unit));
 }
 
 test "authored reference traversal preserves aliases and separates blob identity" {

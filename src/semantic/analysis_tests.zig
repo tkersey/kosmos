@@ -5,19 +5,17 @@ const analysis = @import("analysis.zig");
 const projection = @import("projection.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 
 test "hypothetical reply interpretation runs ordinary source without consuming a live request" {
     var guest_builder = source.Builder.init(a);
     defer guest_builder.deinit();
-    var compiled_guest = try source.lower(a, try analysis.exampleGuest(&guest_builder));
-    defer compiled_guest.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled_guest.program));
+    const image = try support.encode(try analysis.exampleGuest(&guest_builder));
     defer a.free(image);
-    _ = try compiled_guest.encode(a, image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
     const arguments = [_]u8{ 10, 0, 0, 0, 0, 0, 0, 0 };
-    var live = try @import("../../test_oracle.zig").Session.initImage(a, image, &arguments);
+    var live = try @import("../../test/oracle/stable_session.zig").Session.initImage(a, image, &arguments);
     defer live.deinit();
     try std.testing.expect(try live.run(null) == .requested);
     const before = try live.checkpoint(a);
@@ -26,14 +24,15 @@ test "hypothetical reply interpretation runs ordinary source without consuming a
     defer pending.deinit();
     var builder = source.Builder.init(a);
     defer builder.deinit();
-    var compiled = try source.lower(a, try analysis.hypotheticalReply(&builder, guest));
+    // Exercise the public example entry point used by downstream construction.
+    // Its embedded guest must still match the separately admitted guest above.
+    var compiled = try source.lower(a, try analysis.example(&builder));
     defer compiled.deinit();
     // The simulated effect is data in the embedded program projection. The
     // analysis executable itself has no environmental effect declarations.
     try std.testing.expectEqual(@as(usize, 0), compiled.program.effects.len);
-    const code = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const code = try support.encodeCompiled(&compiled);
     defer a.free(code);
-    _ = try compiled.encode(a, code);
     for ([_]u8{ 5, 99 }) |assumed| {
         const reply = [_]u8{ assumed, 0, 0, 0, 0, 0, 0, 0 };
         const input = try projection.encode(analysis.Input, a, .{ .arguments = &arguments, .assumed_reply = &reply, .guest_quantum = 100 });

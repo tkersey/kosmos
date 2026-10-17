@@ -22,6 +22,13 @@ The native roots preserve the evaluator and language contracts:
 The aggregate `check` includes the entire `check-native` root, including
 `check-publication`.
 
+The semantic suites share setup in `src/semantic/test_support.zig`, which has
+no test declarations. Each suite retains its own cases and expected results.
+`test_oracle.zig` owns the frozen evaluator’s qualification cases. Semantic
+comparisons import the evaluator itself without importing that test root. The
+table witnesses build one image for both evaluators and retain both execution
+paths, all boundary inputs and restore assertions.
+
 These roots use Zig’s authenticated package cache and the ordinary `tar`
 utility. An explicit Horos source override must produce the selected package
 hash; modules and emitters then consume that captured package, so later edits to

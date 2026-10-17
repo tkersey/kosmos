@@ -6,21 +6,14 @@ const machines = @import("semantic/machine.zig");
 const steps = @import("semantic/step.zig");
 const Author = @import("semantic/author.zig").Author;
 const base = @import("base/session.zig");
-const native = @import("../test_oracle.zig");
+const native = @import("../test/oracle/stable_session.zig");
 const service = @import("semantic/service.zig");
-const exchange = @import("semantic/service_tests.zig");
+const support = @import("semantic/test_support.zig");
 const a = std.testing.allocator;
 
-fn prepare(module: source.ast.Module) !base.Prepared {
-    var compiled = try source.lower(a, module);
-    defer compiled.deinit();
-    return prepareCompiled(&compiled);
-}
-
 fn prepareCompiled(compiled: *const source.Compiled) !base.Prepared {
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encodeCompiled(compiled);
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     return base.Prepared.init(a, image);
 }
 
@@ -34,12 +27,7 @@ fn loopImage() ![]u8 {
     const acc = try e.param(loop, 1);
     try b.define(loop, try e.when(try e.binary(.equal, count, e.zero), try b.pure(acc), try e.call(loop, &.{ try e.binary(.integer_sub, count, e.one), try e.binary(.integer_bit_xor, acc, count) })));
     try b.define(entry, try e.call(loop, &.{ try e.param(entry, 0), try e.param(entry, 1) }));
-    var compiled = try source.lower(a, b.module(entry, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    errdefer a.free(image);
-    _ = try compiled.encode(a, image);
-    return image;
+    return support.encode(b.module(entry, e.unit));
 }
 
 fn context(guest: [32]u8) source.specialize.Context {
@@ -55,7 +43,7 @@ fn context(guest: [32]u8) source.specialize.Context {
 }
 
 test "an authored scalar rule change reaches generic and regenerated specialized execution" {
-    const image = try @import("semantic/step_tests.zig").guestImage();
+    const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
@@ -101,7 +89,7 @@ test "an authored scalar rule change reaches generic and regenerated specialized
                 try source.specialize.validate(a, module, request, output);
                 keys[@intFromBool(changed)] = output.key;
             }
-            var prepared = try prepare(if (specialized) |*output| output.module() else module);
+            var prepared = try support.prepare(if (specialized) |*output| output.module() else module);
             defer prepared.deinit();
             const owner = try prepared.acquire();
             defer owner.release();
@@ -112,15 +100,15 @@ test "an authored scalar rule change reaches generic and regenerated specialized
                 defer a.free(arguments);
                 var session = try base.Session.start(a, &prepared, arguments, .{ .effects = owner.admitted().program().effects });
                 defer session.deinit();
-                var first = try exchange.event(&session);
+                var first = try support.event(&session);
                 defer first.deinit();
                 try std.testing.expect(first.value == .cut);
-                try exchange.send(&session, .{ .advance = .{ .control = .none, .quantum = 100 } });
-                var cut = try exchange.event(&session);
+                try support.send(&session, .{ .advance = .{ .control = .none, .quantum = 100 } });
+                var cut = try support.event(&session);
                 defer cut.deinit();
                 try std.testing.expect(cut.value == .cut and cut.value.cut.status == .completed);
-                try exchange.send(&session, .observe);
-                var observed = try exchange.event(&session);
+                try support.send(&session, .observe);
+                var observed = try support.event(&session);
                 defer observed.deinit();
                 try std.testing.expect(observed.value == .observation and observed.value.observation == .completed);
                 const expected = if (changed) input else (input + 7) ^ 7;
@@ -133,7 +121,7 @@ test "an authored scalar rule change reaches generic and regenerated specialized
 }
 
 test "specialized scalar sequence retains raw slots without intermediate byte packing" {
-    const image = try @import("semantic/step_tests.zig").guestImage();
+    const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
@@ -178,9 +166,9 @@ test "specialized scalar sequence retains raw slots without intermediate byte pa
             defer a.free(arguments);
             var session = try base.Session.start(a, &prepared, arguments, .{ .effects = owner.admitted().program().effects });
             defer session.deinit();
-            var first = try exchange.event(&session);
+            var first = try support.event(&session);
             defer first.deinit();
-            try exchange.send(&session, .{ .advance = .{ .control = .none, .quantum = 3 } });
+            try support.send(&session, .{ .advance = .{ .control = .none, .quantum = 3 } });
             // This interval covers constant -> add -> xor with a live scalar
             // dependency. Projection is deliberately outside the measurement.
             while (session.status == .active and session.terminal == null) {
@@ -193,7 +181,7 @@ test "specialized scalar sequence retains raw slots without intermediate byte pa
                 try session.step();
                 base_steps[index] += 1;
             }
-            var cut = try exchange.event(&session);
+            var cut = try support.event(&session);
             defer cut.deinit();
             try std.testing.expect(cut.value == .cut and cut.value.cut.guest_work == 3);
             const outer = try session.checkpoint(a);
@@ -201,8 +189,8 @@ test "specialized scalar sequence retains raw slots without intermediate byte pa
             const restored = try base.Session.restore(a, &prepared, outer, .{ .effects = owner.admitted().program().effects });
             session.deinit();
             session = restored;
-            try exchange.send(&session, .project);
-            var projected = try exchange.event(&session);
+            try support.send(&session, .project);
+            var projected = try support.event(&session);
             defer projected.deinit();
             var canonical = try data.state_image.canonicalize(a, projected.value.projection);
             defer canonical.deinit();
@@ -260,13 +248,13 @@ test "source command predecessor remains available at every base cut through clo
     defer a.free(arguments);
     var session = try base.Session.start(a, &prepared, arguments, .{ .effects = owner.admitted().program().effects });
     defer session.deinit();
-    var first = try exchange.event(&session);
+    var first = try support.event(&session);
     defer first.deinit();
     var control: service.Control = .none;
     var outer_steps: usize = 0;
     var completed = false;
     for (0..400) |_| {
-        try exchange.send(&session, .{ .advance = .{ .control = control, .quantum = 1 } });
+        try support.send(&session, .{ .advance = .{ .control = control, .quantum = 1 } });
         while (session.status == .active and session.terminal == null) {
             var found = false;
             var frames = session.frames.entries.iterator();
@@ -283,7 +271,7 @@ test "source command predecessor remains available at every base cut through clo
             try session.step();
             outer_steps += 1;
         }
-        var cut = try exchange.event(&session);
+        var cut = try support.event(&session);
         defer cut.deinit();
         try std.testing.expect(cut.value == .cut);
         if (cut.value.cut.status == .completed) {
@@ -324,7 +312,7 @@ test "specialized portable dispatch persists across dynamic service commands" {
     var prepared = try prepareCompiled(&compiled);
     defer prepared.deinit();
     const reifier = try @import("semantic/recovery.zig").define(&b, m);
-    var projector = try prepare(b.module(reifier, try b.scalar(void)));
+    var projector = try support.prepare(b.module(reifier, try b.scalar(void)));
     defer projector.deinit();
     const owner = try prepared.acquire();
     defer owner.release();
@@ -334,13 +322,13 @@ test "specialized portable dispatch persists across dynamic service commands" {
     defer session.deinit();
     var guest = try native.Session.initImage(a, image, &std.mem.toBytes([2]u64{ 4, 91 }));
     defer guest.deinit();
-    var first = try exchange.event(&session);
+    var first = try support.event(&session);
     defer first.deinit();
     try std.testing.expect(first.value == .cut);
     var finished = false;
     var restored = false;
     for (0..100) |_| {
-        try exchange.send(&session, .{ .advance = .{ .control = .none, .quantum = 3 } });
+        try support.send(&session, .{ .advance = .{ .control = .none, .quantum = 3 } });
         if (!restored) {
             try std.testing.expect(try session.run(127) == .progressed);
             const outer = try session.checkpoint(a);
@@ -350,7 +338,7 @@ test "specialized portable dispatch persists across dynamic service commands" {
             session = replacement;
             restored = true;
         }
-        var cut = try exchange.event(&session);
+        var cut = try support.event(&session);
         defer cut.deinit();
         try std.testing.expect(cut.value == .cut);
         const observation = try guest.run(3);
@@ -361,8 +349,8 @@ test "specialized portable dispatch persists across dynamic service commands" {
         const outer_after = try session.checkpoint(a);
         defer a.free(outer_after);
         try std.testing.expectEqualSlices(u8, outer_before, outer_after);
-        try exchange.send(&session, .project);
-        var projected = try exchange.event(&session);
+        try support.send(&session, .project);
+        var projected = try support.event(&session);
         defer projected.deinit();
         try std.testing.expect(projected.value == .projection);
         var canonical = try data.state_image.canonicalize(a, projected.value.projection);
@@ -375,7 +363,7 @@ test "specialized portable dispatch persists across dynamic service commands" {
         try std.testing.expectEqualSlices(u8, expected, actual);
         try std.testing.expectEqualSlices(u8, expected, recovered);
         if (observation == .completed) {
-            try exchange.send(&session, .finish);
+            try support.send(&session, .finish);
             try std.testing.expect(try session.run(null) == .completed);
             finished = true;
             break;
@@ -483,7 +471,7 @@ fn expectSpecializedCuts(image: []const u8, inputs: []const []const u8, max_cuts
         try std.testing.expectEqual(@as(usize, 1), specialized.builder.functions.items[@intCast(f.after)].parameters.len);
     };
     try std.testing.expect(static_instructions >= 3);
-    var core = try prepare(specialized.module());
+    var core = try support.prepare(specialized.module());
     defer core.deinit();
     for (inputs) |input| {
         var guest = try native.Session.initImage(a, image, input);

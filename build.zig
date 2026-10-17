@@ -44,7 +44,10 @@ pub fn build(b: *std.Build) void {
     admission.expectStdOutEqual(package.dependencies.horos.hash ++ "\n");
     admission.has_side_effects = true;
     const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
-    snapshot.removeEnvironmentVariable("TAR_OPTIONS");
+    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
+    // PATH still selects tar's decompressor; ambient archive options stay absent.
+    snapshot.clearEnvironment();
+    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
     snapshot.addFileArg2(b.graph.path(.global_cache, "p/" ++ package.dependencies.horos.hash ++ ".tar.gz"), .{ .make_absolute = true });
     snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
     const source = snapshot.addOutputDirectoryArg2("horos", .{});

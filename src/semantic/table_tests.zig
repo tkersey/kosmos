@@ -1,12 +1,13 @@
 const std = @import("std");
 const data = @import("horos_data");
 const source = @import("horos").source;
-const kosmos = @import("../../test_oracle.zig");
+const kosmos = @import("../../test/oracle/stable_session.zig");
 const Author = @import("author.zig").Author;
 const table = @import("table.zig");
 const projection = @import("projection.zig");
 const profile = @import("../base/profile.zig");
 const a = std.testing.allocator;
+const support = @import("test_support.zig");
 
 const Input = struct { values: []const u64, index: u64, replacement: u64 };
 const Result = struct { count: u64, original: ?u64, updated: ?u64, unchanged: ?u64 };
@@ -25,11 +26,8 @@ test "authored table mapping preserves chronological order across forest boundar
     const main = try b.declare(&.{d.sequence}, try projection.schema([]const Pair, &b), &.{}, &.{});
     const saved = try b.variable(d.table);
     try b.define(main, try b.bind(saved, try e.call(d.from_sequence, &.{try e.param(main, 0)}), try e.call(mapped, &.{try b.reference(saved)})));
-    var compiled = try source.lower(a, b.module(main, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(b.module(main, e.unit));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var inputs: [65]u64 = undefined;
     for (&inputs, 0..) |*item, i| item.* = i * 17 + 9;
     for ([_]usize{ 0, 1, 2, 3, 7, 8, 9, 31, 32, 33, 64, 65 }) |count| {
@@ -95,22 +93,19 @@ fn fixture(b: *source.Builder) !source.Module {
 }
 
 test "authored table validator rejects well-typed forged sizes and forest order" {
-    try forged(kosmos.Session);
-    try forged(Base);
-}
-fn forged(comptime Engine: type) !void {
     var b = source.Builder.init(a);
     defer b.deinit();
     const e = try Author.init(&b);
     const d = try table.define(&b, e.integer);
-    var compiled = try source.lower(a, b.module(d.valid, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(b.module(d.valid, e.unit));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
     _ = try profile.check(admitted, .{});
+    try forged(kosmos.Session, image);
+    try forged(Base, image);
+}
+fn forged(comptime Engine: type, image: []const u8) !void {
     const Leaf = union(enum) { leaf: u64 };
     const Tree = union(enum) { leaf: u64, branch: struct { left: Leaf, right: Leaf, size: u64 } };
     const Nil = union(enum) { nil: void };
@@ -147,26 +142,19 @@ fn forged(comptime Engine: type) !void {
 }
 
 test "authored persistent table preserves numeric IDs and old roots through restore" {
-    try persistence(kosmos.Session);
-    try persistence(Base);
-}
-fn persistence(comptime Engine: type) !void {
     var b = source.Builder.init(a);
     defer b.deinit();
-    var diagnostic: source.Diagnostic = .{};
-    var compiled = source.lowerObserved(a, try fixture(&b), .{ .diagnostic = &diagnostic }) catch |err| {
-        std.debug.print("table compilation: {any}\n", .{diagnostic});
-        return err;
-    };
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer a.free(bytes);
-    const image = try compiled.encode(a, bytes);
+    const image = try support.encode(try fixture(&b));
+    defer a.free(image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
     const report = try profile.check(admitted, .{});
     try std.testing.expect(report.opcodes.contains(.variant));
     try std.testing.expect(report.terminators.contains(.call));
+    try persistence(kosmos.Session, image);
+    try persistence(Base, image);
+}
+fn persistence(comptime Engine: type, image: []const u8) !void {
     var values: [65]u64 = undefined;
     for (&values, 0..) |*value, index| value.* = index * 17 + 9;
     // Every index in two nontrivial forests, including both sides of every
@@ -218,11 +206,8 @@ test "base table update copies a logarithmic path without encoding the table" {
     const main = try b.declare(&.{d.sequence}, d.table, &.{}, &.{});
     const saved = try b.variable(d.table);
     try b.define(main, try b.bind(saved, try e.call(d.from_sequence, &.{try e.param(main, 0)}), try b.term(.{ .yield_then = try e.call(d.set, &.{ try b.reference(saved), e.zero, try b.constant(u64, 12345) }) })));
-    var compiled = try source.lower(a, b.module(main, e.unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    const image = try support.encode(b.module(main, e.unit));
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var inputs: [1024]u64 = undefined;
     for (&inputs, 0..) |*value, i| value.* = i;
     for ([_]usize{ 64, 256, 1024 }) |count| {
