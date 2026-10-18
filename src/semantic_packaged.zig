@@ -3,9 +3,9 @@
 //! These fingerprints select that checked content; they are not derivation proof.
 const std = @import("std");
 pub const bytes = @embedFile("semantic-core.kar");
-pub const horos_package = "horos-6.0.0-flclaAXSQAD9argqy5ySN6anKQTKtjk1TPqkF61O1Adh";
+pub const horos_package = "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb";
 pub const source_sha256 = "1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc";
-pub const artifact_sha256 = "cb4af30f5c58aee7159f56aa4a08a5fb41a6748061260066edc24f7dadf74714";
+pub const artifact_sha256 = "a56f43b35c83e8271aa8bd09dd293d27f45ad9e1c72a4081a574c7dd6de0512a";
 
 pub fn check(selected_horos: []const u8) !void {
     if (!std.mem.eql(u8, selected_horos, horos_package) or
