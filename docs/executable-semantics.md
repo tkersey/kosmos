@@ -12,8 +12,12 @@ initialization, advance, observation, projection and finish. Its result is
 `suspended`, an owned service `event`, or `closed`; callers release it with
 `deinit`. Observation and projection preserve the guest revision. Resident reply
 admission retains the actual published request identity and effect contract
-under its exclusive mutation gate, including bounded submission. Low-level
-Session replies independently reconstruct the current binding.
+under its exclusive mutation gate, including bounded submission. The driver
+derives and retains the current binding from the actual request, checks every
+supplied binding against it, clears it after successful advance submission, and
+restores it on transaction rollback. Low-level Session replies use this same
+owner. An unfinished operation rejects new controls before reading cut data,
+including restoration before the first initialization cut.
 
 ## Execution boundaries
 

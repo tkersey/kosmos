@@ -21,8 +21,8 @@ pub const Pump = union(enum) {
     }
 };
 
-/// Derived only from the real published request and retained by its exclusive
-/// Resident owner. No state bytes or borrowed output backing are retained.
+/// Request metadata supplied by a caller is checked against the driver's
+/// current request. No state bytes or borrowed output backing are retained.
 pub const ExpectedReply = struct {
     identity: [32]u8,
     effect: data.program.Id,
@@ -45,6 +45,7 @@ pub const Driver = struct {
     /// Needed only while initialization can still be resumed or rolled back.
     initial: []u8,
     last_cut: ?service.Cut = null,
+    expected_reply: ?ExpectedReply = null,
     revision: u64 = 0,
     guest_revision: u64 = 0,
     closed: bool = false,
@@ -56,6 +57,7 @@ pub const Driver = struct {
         operation: ?Operation,
         command: []u8,
         last_cut: ?service.Cut,
+        expected_reply: ?ExpectedReply,
         revision: u64,
         guest_revision: u64,
         closed: bool,
@@ -73,6 +75,7 @@ pub const Driver = struct {
             owner.command = self.command;
             owner.operation = self.operation;
             owner.last_cut = self.last_cut;
+            owner.expected_reply = self.expected_reply;
             owner.revision = self.revision;
             owner.guest_revision = self.guest_revision;
             owner.closed = self.closed;
@@ -89,7 +92,7 @@ pub const Driver = struct {
         errdefer self.allocator.free(command);
         const outer = try self.outer.begin();
         self.transaction_active = true;
-        return .{ .outer = outer, .operation = self.operation, .command = command, .last_cut = self.last_cut, .revision = self.revision, .guest_revision = self.guest_revision, .closed = self.closed };
+        return .{ .outer = outer, .operation = self.operation, .command = command, .last_cut = self.last_cut, .expected_reply = self.expected_reply, .revision = self.revision, .guest_revision = self.guest_revision, .closed = self.closed };
     }
 
     pub fn start(a: std.mem.Allocator, guest: *const preparation.Prepared, selected: *const artifact.Admitted, initial: service.Initial) !Driver {
@@ -151,6 +154,9 @@ pub const Driver = struct {
             .project => .project,
             .finish => .finish,
         };
+        // Only advance can change the guest request. Invalidate after the
+        // fallible submission succeeds; publication rollback restores the fact.
+        if (command == .advance) self.expected_reply = null;
         self.revision = revision;
     }
 
@@ -272,16 +278,23 @@ pub const Driver = struct {
             .resume_schema = resume_schema,
             .payload = payload,
         });
+        self.expected_reply = ExpectedReply.fromRequest(request);
         return .{ .allocator = a, .state = state, .request = request };
+    }
+
+    fn currentExpected(self: *Driver) !ExpectedReply {
+        if (self.closed or self.last_cut == null or self.last_cut.?.status != .parked) return error.InvalidState;
+        if (self.expected_reply) |expected| return expected;
+        var pending = try self.pendingBinding(self.allocator, false);
+        defer pending.deinit();
+        return ExpectedReply.fromRequest(pending.request);
     }
 
     /// ERS3 is checked against the real guest request and result schema before
     /// the value enters the private source service. The bridge has no grant.
     pub fn reply(self: *Driver, bytes: []const u8, quantum: u64) !void {
         if (self.operation != null) return error.OperationInProgress;
-        var pending = try self.pendingBinding(self.allocator, false);
-        defer pending.deinit();
-        try self.replyExpected(bytes, ExpectedReply.fromRequest(pending.request), quantum);
+        try self.replyExpected(bytes, try self.currentExpected(), quantum);
     }
 
     pub fn replyExpected(self: *Driver, bytes: []const u8, expected: ExpectedReply, quantum: u64) !void {
@@ -289,8 +302,9 @@ pub const Driver = struct {
         var response = try protocol.decode(protocol.Result, self.allocator, bytes);
         defer response.deinit();
         if (self.statistics) |statistics| statistics.expected_binding_checks +|= 1;
+        const actual = try self.currentExpected();
+        if (!std.meta.eql(actual, expected)) return error.InvalidResult;
         if (!std.mem.eql(u8, &response.value.request_identity, &expected.identity)) return error.InvalidResult;
-        if (self.closed or self.last_cut == null or self.last_cut.?.status != .parked) return error.InvalidState;
         const admitted = self.guest.admitted();
         const program = admitted.program();
         if (expected.effect >= program.effects.len) return error.InvalidResult;

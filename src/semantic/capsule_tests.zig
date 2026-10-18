@@ -202,6 +202,25 @@ test "public resident resumes every admitted outer operation and owns its output
         const final_revision = original.guest_revision;
         original.deinit();
         original_live = false;
+        if (operation == .initialize) {
+            var session_custody: Custody = .{ .expected = capsule.reference(bytes), .execution = provenance.execution };
+            var session = facade.Session.fromDriver(try capsule.restore(a, &prepared.guest, &prepared.runtime, bytes, session_custody.verifier()));
+            defer session.deinit();
+            try std.testing.expect(session.driver.last_cut == null);
+            try std.testing.expectError(error.OperationInProgress, session.submitAdvance(.resume_yield, 1, null));
+            try std.testing.expectError(error.OperationInProgress, session.submitAdvance(.none, 1, null));
+            try std.testing.expectError(error.OperationInProgress, session.submitAdvance(.{ .cancel = .{ .text = "stop" } }, 1, null));
+            try std.testing.expectError(error.OperationInProgress, session.submitAdvance(.{ .reply = &.{} }, 1, null));
+            while (true) {
+                var progress = try session.pump(64);
+                defer progress.deinit();
+                if (progress == .suspended) continue;
+                try std.testing.expectEqualDeep(expected.event.value, progress.event.value);
+                break;
+            }
+            try std.testing.expectError(error.InvalidState, session.submitAdvance(.resume_yield, 1, null));
+            try std.testing.expect(try session.run(null) == .completed);
+        }
         var custody: Custody = .{ .expected = capsule.reference(bytes), .execution = provenance.execution };
         var failing = std.testing.FailingAllocator.init(a, .{});
         var restored = try facade.Resident.restoreCapsule(failing.allocator(), &prepared, bytes, custody.verifier());

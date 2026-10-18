@@ -265,6 +265,7 @@ pub const Session = struct {
     /// Select once, then use pump to make bounded outer progress.
     pub fn submitAdvance(self: *Session, command: data.invocation.Control, quantum: u64, expected: ?ExpectedReply) Error!void {
         if (self.isTerminal()) return error.InvalidState;
+        if (self.driver.operation != null) return error.OperationInProgress;
         if (command == .reply) {
             if (expected) |binding| try self.driver.replyExpected(command.reply, binding, quantum) else try self.driver.reply(command.reply, quantum);
         } else {

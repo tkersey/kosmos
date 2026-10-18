@@ -10,6 +10,7 @@ const expect = std.testing.expect;
 const eq = std.testing.expectEqual;
 const bytesEq = std.testing.expectEqualSlices;
 const Statistics = std.meta.Child(std.meta.Child(@FieldType(runtime.Session, "statistics")));
+const ExpectedReply = @typeInfo(@TypeOf(runtime.Session.answerExpected)).@"fn".param_types[2].?;
 
 fn makeImage(cleanup: bool) ![]u8 {
     var b = horos.source.Builder.init(a);
@@ -48,6 +49,71 @@ fn encodeReply(request: []const u8, value: []const u8) ![]u8 {
 fn rejected(session: *runtime.Session, reply: []const u8) anyerror {
     session.answer(reply) catch |err| return err;
     return error.UnexpectedSuccess;
+}
+
+test "public expected replies remain bound to the current request through advance restore and rollback" {
+    var b = horos.source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{ .identity = "binding/sequential", .payload = unit, .result = unit });
+    const entry = try b.declare(&.{}, unit, &.{effect}, &.{});
+    const first_op = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } });
+    const second_op = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } });
+    try b.define(entry, try b.bind(try b.variable(unit), first_op, second_op));
+    var compiled = try horos.program.compile(a, b.module(entry, unit));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    var prepared = try runtime.Prepared.init(a, image);
+    defer prepared.deinit();
+    var session = try runtime.Session.start(a, &prepared, &.{});
+    defer session.deinit();
+    try expect(try session.run(null) == .requested);
+    var first = try session.pendingBinding(a, false);
+    defer first.deinit();
+    const binding_a: ExpectedReply = .{ .identity = first.request.request_identity, .effect = first.request.binding.effect };
+    const reply_a = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = first.request.request_identity, .value = &.{} });
+    defer a.free(reply_a);
+    var transaction = try session.begin();
+    var transaction_live = true;
+    defer if (transaction_live) transaction.rollback(&session);
+    try session.answerExpected(reply_a, binding_a);
+    try expect(try session.run(null) == .requested);
+    var second = try session.pendingBinding(a, false);
+    defer second.deinit();
+    const binding_b: ExpectedReply = .{ .identity = second.request.request_identity, .effect = second.request.binding.effect };
+    const reply_b = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = second.request.request_identity, .value = &.{} });
+    defer a.free(reply_b);
+    try expect(!std.mem.eql(u8, &binding_a.identity, &binding_b.identity));
+    transaction.rollback(&session);
+    transaction_live = false;
+    try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_b, binding_b));
+    try session.answerExpected(reply_a, binding_a);
+    try expect(try session.run(null) == .requested);
+    // No explicit pendingBinding call at B: the first rejection must rebuild
+    // the authoritative fact, then retain it for every other entry point.
+    try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_a, binding_a));
+    try std.testing.expectError(error.InvalidResult, session.submitAdvance(.{ .reply = reply_a }, 0, binding_a));
+    try std.testing.expectError(error.InvalidResult, session.answer(reply_a));
+    var wrong_effect = binding_b;
+    wrong_effect.effect += 1;
+    try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_b, wrong_effect));
+    const state = try session.checkpoint(a);
+    defer a.free(state);
+    var restored = try runtime.Session.restore(a, &prepared, state);
+    defer restored.deinit();
+    try std.testing.expectError(error.InvalidResult, restored.answerExpected(reply_a, binding_a));
+    try restored.answerExpected(reply_b, binding_b);
+    try expect(try restored.run(null) == .completed);
+    try session.submitAdvance(.{ .reply = reply_b }, 100, binding_b);
+    while (true) {
+        var progress = try session.pump(64);
+        defer progress.deinit();
+        if (progress == .suspended) continue;
+        try expect(progress == .event and progress.event.value.cut.status == .completed);
+        break;
+    }
 }
 
 test "resident reuses exact binding across independent invalid replies inspection and restore" {
