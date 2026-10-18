@@ -127,12 +127,16 @@ for each identical immutable command. It awaits both before the next observation
 retaining every restore, transfer checkpoint, byte comparison and source assertion.
 
 CI runs session behavior, session ownership/failure, source regression, native
-semantic, source-agreement and portable groups independently; their union is
+semantic, specialization/publication, two source-agreement and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
 82 named cases (52 behavior, 14 ownership/failure, 16 source regressions) and
 the anonymous import sentinel. Standalone test executables show each case and
 require the complete selected count; the ordinary `check-sessions` target still
-runs all 83 cases together. It does not invoke `check-native` and then the
+runs all 83 cases together. Source-agreement partitions select disjoint fixture
+sets while retaining every mode, instruction frontier, cancellation and comparison;
+together they execute all 47 fixtures and 9,570 observations. The native semantic
+group rebuilds the source artifact, while specialization and publication use the
+same authenticated packaged artifact. It does not invoke `check-native` and then the
 overlapping `check`. Native test run steps always execute, even when compilation
 is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional

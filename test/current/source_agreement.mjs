@@ -16,7 +16,14 @@ async function readFile(file, ...options) {
   return read(file, ...options);
 }
 
-const [kernelPath, nativePath, fixtures, oraclePath] = process.argv.slice(2);
+const [kernelPath, nativePath, fixtures, oraclePath, group = "all"] = process.argv.slice(2);
+assert(["all", "first", "second"].includes(group));
+const selected = name => {
+  const index = requiredExamples.indexOf(name);
+  assert(index >= 0, `unaccounted source fixture: ${name}`);
+  return group === "all" || index % 2 === (group === "first" ? 0 : 1);
+};
+const selectedExamples = requiredExamples.filter(selected);
 const { execute } = await import(pathToFileURL(oraclePath).href);
 const { containsServiceTrace } = await import(new URL("./service_interactions.mjs", pathToFileURL(oraclePath)));
 const kernel = new Uint8Array(await readFile(kernelPath));
@@ -86,6 +93,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     const word = value => Array.from({ length: 8 }, (_, i) => Number((BigInt(value) >> BigInt(8 * i)) & 255n));
     const command = (id, delta) => [0, ...word(id), ...word(delta)];
     for (const name of ["stateful-service", "swapped-service-replies", "paired-services"]) {
+      if (!selected(name)) continue;
       const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
       const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
       const analysis = name === "paired-services" ? null : JSON.parse(await read(join(fixtures, `source-${name}.analysis.json`), "utf8"));
@@ -134,6 +142,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
   for (const { name, expected } of cleanup.entries) {
+    if (!selected(name)) continue;
     const source = await readFile(join(fixtures, `source-${name}.json`));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     assert.deepEqual(execute(JSON.parse(source), []), expected);
@@ -179,7 +188,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
       }
     }
   }
-  {
+  if (selected("borrow-operands")) {
     const source = JSON.parse(await readFile(join(fixtures, "source-borrow-operands.json"), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, "source-borrow-operands.bpi3")));
     for (let index = 0; index < 53; index++) {
@@ -223,7 +232,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
       }
     }
   }
-  {
+  if (selected("scalar-contracts")) {
     const source = JSON.parse(await readFile(join(fixtures, "source-scalar-contracts.json"), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, "source-scalar-contracts.bpi3")));
     for (let index = 0; index < 19; index++) {
@@ -237,6 +246,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
   for (const [name, initial] of [["lexical", [40, 0, 0, 0, 0, 0, 0, 0]], ["deep", []], ["recursive", [16, 39, 0, 0, 0, 0, 0, 0]], ["choices-all", []], ["choices-first", []], ["state-local", []], ["state-shared", []], ["answers", []], ["writer-raise", []], ["cell-order", []], ["nested", []], ["shallow", [0]], ["shallow", [1]], ["injection", [0]], ["injection", [1]], ["abort-custody", [1]], ["bounded-values", []], ["shallow-resumptions", []], ["shallow-injection", [0]], ["shallow-injection", [1]], ["handle-operand-order", []], ["protect-operand-order", []], ["product-projection", [0]], ["product-projection", [1]]]) {
+    if (!selected(name)) continue;
     const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     const oracle = execute(source, initial);
@@ -251,6 +261,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
   for (const name of ["generator", "scheduler", "reentrant", "cloned", "ownership", "successor-state", "clause-payload"]) {
+    if (!selected(name)) continue;
     const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     const oracle = execute(source, [], name === "generator" ? [[]] : []);
@@ -272,6 +283,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
   for (const name of ["resource-scalar", "resource-pair", "scoped-reader", "indexed", "abort-custody", "clause-abort"]) {
+    if (!selected(name)) continue;
     const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     const responses = name === "scoped-reader" ? [[], [], []] : name === "indexed" ? [[37, 0, 0, 0, 0, 0, 0, 0], [1]] : name === "abort-custody" || name === "clause-abort" ? [[]] : [[41, 0, 0, 0, 0, 0, 0, 0], [], []];
@@ -295,6 +307,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
   for (const name of ["queens-dfs", "queens-bfs"]) {
+    if (!selected(name)) continue;
     const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     const responses = [[201, 0, 0, 0, 0, 0, 0, 0], [], [], [202, 0, 0, 0, 0, 0, 0, 0], [], []];
@@ -321,6 +334,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     assert.deepEqual(trace, oracle.trace);
   }
   for (const name of ["resource-scalar", "resource-pair"]) for (const duringCleanup of [false, true]) {
+    if (!selected(name)) continue;
     const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
     const controls = duringCleanup ? [{ at: 2, reason: "stop" }, { at: 2, reason: "later" }] : [{ at: 1, reason: "stop" }, { at: 2, reason: "later" }];
@@ -359,6 +373,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     assert.deepEqual(trace, oracle.trace);
   }
   for (const primary of [0, 1]) for (const cancel of [false, true]) {
+    if (!selected("unwind")) continue;
     const source = JSON.parse(await readFile(join(fixtures, "source-unwind.json"), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, "source-unwind.bpi3")));
     const oracle = execute(source, [primary], [[], []], cancel ? [{ at: 0, reason: "stop" }, { at: 0, reason: "later" }] : []);
@@ -384,6 +399,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     assert.deepEqual(trace, oracle.trace);
   }
   for (const primary of [0, 1]) for (const cancel of [false, true]) {
+    if (!selected("yielding-cleanup")) continue;
     const source = JSON.parse(await readFile(join(fixtures, "source-yielding-cleanup.json"), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, "source-yielding-cleanup.bpi3")));
     const oracle = execute(source, [primary], [[], []], cancel ? [{ at: 0, reason: "stop" }, { at: 2, reason: "later" }] : []);
@@ -417,6 +433,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     }
   }
 for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-multi-shot", 32, [15, 17]]]) {
+  if (!selected(name)) continue;
   const source = JSON.parse(await readFile(join(fixtures, `source-${name}.json`), "utf8"));
   const image = new Uint8Array(await readFile(join(fixtures, `source-${name}.bpi3`)));
   const scalar = n => [n, 0, 0, 0, 0, 0, 0, 0];
@@ -451,8 +468,8 @@ for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-
     }
   }
 }
-assert.deepEqual([...visitedSources].sort(), requiredExamples.toSorted());
-assert.deepEqual([...visitedImages].sort(), requiredExamples.toSorted());
+assert.deepEqual([...visitedSources].sort(), selectedExamples.toSorted());
+assert.deepEqual([...visitedImages].sort(), selectedExamples.toSorted());
 if (prepared) host.releasePrepared(prepared);
 await peer.close();
-console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", fixtures: requiredExamples.length, observations }));
+console.log(JSON.stringify({ check: "current source oracle/native/WASM agreement", group, fixtures: selectedExamples.length, observations }));

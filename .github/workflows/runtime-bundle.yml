@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, source, portable, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, specialization, source, source-second, portable, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -58,8 +58,13 @@ jobs:
         if: matrix.lane == 'native'
         run: >-
           zig build check-storage check-semantic-driver check-semantics
-          check-semantic-specialization check-publication check-zig17
+          check-zig17
           -Doptimize=safe --summary all
+      - name: Check specialization and public receipt owners
+        if: matrix.lane == 'specialization'
+        run: >-
+          zig build check-semantic-specialization check-publication
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check every selected current session fixture
         if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
         run: |
@@ -94,7 +99,7 @@ jobs:
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
           zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'portable' || matrix.lane == 'source'
+        if: matrix.lane == 'portable' || matrix.lane == 'source' || matrix.lane == 'source-second'
         with:
           node-version: '26.9.0'
       - name: Install only the browser boundary's tools
@@ -111,8 +116,12 @@ jobs:
           check-capacity check-browser check-codecs check-package build-runtime
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Qualify every source example and instruction frontier
-        if: matrix.lane == 'source'
-        run: zig build check-source -Doptimize=safe -Dpackaged-runtime=true --summary all
+        if: matrix.lane == 'source' || matrix.lane == 'source-second'
+        run: |
+          group=first
+          if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
+          zig build check-source -Dsource-group="$group" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'
         working-directory: zig-out/runtime

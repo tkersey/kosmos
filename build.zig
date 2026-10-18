@@ -367,6 +367,8 @@ pub fn build(b: *std.Build) void {
     source_agreement.addFileArg2(fixture.getEmittedBin(), .{ .make_absolute = true });
     source_agreement.addDirectoryArg2(b.graph.path(.install_prefix, "source"), .{ .make_absolute = true });
     source_agreement.addFileArg2(source.path(b, "test/v2/source_oracle.mjs"), .{ .make_absolute = true });
+    if (b.option(enum { first, second }, "source-group", "Select an exhaustive half of the source fixtures (default: all)")) |group|
+        source_agreement.addArg(@tagName(group));
     source_agreement.step.dependOn(&source_examples.step);
     source_agreement.step.dependOn(&current_fixtures.step);
     source_agreement.has_side_effects = true;
