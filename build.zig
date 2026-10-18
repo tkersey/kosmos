@@ -170,6 +170,7 @@ pub fn build(b: *std.Build) void {
     baseline_fetch.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
     baseline_fetch.addArgs(&.{ "fetch", "https://github.com/tkersey/kosmos/archive/62279bce8e916e7fe613fe4575b3bc12e530596f.tar.gz" });
     baseline_fetch.expectStdOutEqual(baseline_hash ++ "\n");
+    baseline_fetch.has_side_effects = true;
     const baseline_unpack = b.addSystemCommand(&.{ "tar", "-xzf" });
     baseline_unpack.clearEnvironment();
     if (b.graph.environ_map.get("PATH")) |path| baseline_unpack.setEnvironmentVariable("PATH", path);

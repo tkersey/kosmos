@@ -84,7 +84,9 @@ checks still export at every cut. The intentionally growing non-tail control
 exports only at those restoration points; its other exported bytes were unused.
 
 These roots use Zig’s authenticated package cache and the ordinary `tar`
-utility. An explicit Horos source override must produce the selected package
+utility. The immutable baseline fetch rechecks the global package cache even
+when a local build cache survives, so an evicted archive is restored before use.
+An explicit Horos source override must produce the selected package
 hash; modules and emitters then consume that captured package, so later edits to
 the supplied directory cannot change the compiled input. They do not need Node, Python, a WASM bundle or a package producer.
 
