@@ -91,8 +91,6 @@ test "public expected replies remain bound to the current request through advanc
     try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_b, binding_b));
     try session.answerExpected(reply_a, binding_a);
     try expect(try session.run(null) == .requested);
-    // No explicit pendingBinding call at B: the first rejection must rebuild
-    // the authoritative fact, then retain it for every other entry point.
     try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_a, binding_a));
     try std.testing.expectError(error.InvalidResult, session.submitAdvance(.{ .reply = reply_a }, 0, binding_a));
     try std.testing.expectError(error.InvalidResult, session.answer(reply_a));

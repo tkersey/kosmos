@@ -21,8 +21,6 @@ pub const Pump = union(enum) {
     }
 };
 
-/// Request metadata supplied by a caller is checked against the driver's
-/// current request. No state bytes or borrowed output backing are retained.
 pub const ExpectedReply = struct {
     identity: [32]u8,
     effect: data.program.Id,
@@ -154,8 +152,6 @@ pub const Driver = struct {
             .project => .project,
             .finish => .finish,
         };
-        // Only advance can change the guest request. Invalidate after the
-        // fallible submission succeeds; publication rollback restores the fact.
         if (command == .advance) self.expected_reply = null;
         self.revision = revision;
     }
