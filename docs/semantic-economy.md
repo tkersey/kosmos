@@ -1,6 +1,6 @@
 # Semantic economy measurements
 
-Measured 2026-10-17 on Apple M2 Pro, macOS 27.2 (26B5112a), Zig 0.17.0, safe optimization. Runtime sources: Kosmos host facade `200e06c42d9d9975f3736c18bc2e953686271191`, semantic source `1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc`, Horos `592eb0839326f2d8a423b59ce2746ab18ef5136a`. The Kosmos source identity binds the authored implementation and compiler before this report is generated. This measurement used a separate benchmark invocation; other review work was active on the host. These are local samples, not tail-latency or platform-independent claims.
+Measured 2026-10-17 on Apple M2 Pro, macOS 27.2 (26B5112a), Zig 0.17.0, safe optimization. Runtime sources: Kosmos host facade `1df63be7e42b015a763a2dba122a98494f3b8f1f`, semantic source `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7`, Horos `592eb0839326f2d8a423b59ce2746ab18ef5136a`. The Kosmos source identity binds the authored implementation and compiler before this report is generated. This measurement used a separate benchmark invocation after complete qualification; no other session-owned qualification or review process was active. These are local samples, not tail-latency or platform-independent claims.
 
 Reproduce with `zig build bench-semantics -Doptimize=safe`. Select one workload with `-Deconomy-workload=scalar_chain`. Every measured realization is checked against the independent direct-native trace, canonical checkpoints and outcomes for the same inputs and controls. The direct-native and bootstrap evaluators are verification dependencies only, fetched from immutable Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f` with package identity `kosmos-8.0.0-vcJNB7_PDwCsxCmIN8VIVZsi9fW8qHX7Y5xesXeS6Kn5`. They retain that historical implementation and storage; no copied current engine supplies the reference. The reference shares the selected Horos admission dependency, so this comparison is independent execution evidence, not independent admission evidence.
 
@@ -12,55 +12,55 @@ Median milliseconds. This interval includes guest execution and its service even
 
 | Workload | Direct native | Generic bootstrap | Generic base | Specialized base | Instrumented base |
 | --- | --- | --- | --- | --- | --- |
-| scalar | 0.004 | 2.349 | 1.005 | 1.018 | 1.001 |
-| scalar_chain | 0.017 | 88.638 | 20.355 | 20.489 | 20.360 |
-| scalar_chain_large | 0.059 | 772.254 | 85.806 | 90.050 | 87.074 |
-| dynamic_loop | 0.033 | 150.976 | 49.205 | 44.159 | 49.055 |
-| structured | 0.009 | 4.633 | 1.816 | 1.711 | 1.834 |
-| repeated_calls | 0.054 | 356.821 | 82.142 | 76.269 | 82.426 |
-| higher_order | 0.007 | 4.320 | 1.547 | 1.518 | 1.550 |
-| handlers | 0.048 | 201.383 | 37.144 | 37.628 | 37.121 |
-| multi_shot | 0.041 | 58.689 | 15.298 | 17.093 | 15.421 |
-| long_cleanup | 0.435 | 1167.723 | 202.676 | 393.457 | 206.532 |
-| retained_bytes | 0.018 | 14.070 | 3.580 | 3.679 | 3.590 |
+| scalar | 0.004 | 2.228 | 0.938 | 0.949 | 0.946 |
+| scalar_chain | 0.016 | 84.207 | 19.130 | 19.024 | 19.050 |
+| scalar_chain_large | 0.053 | 729.954 | 80.948 | 84.598 | 80.391 |
+| dynamic_loop | 0.031 | 147.409 | 47.717 | 42.761 | 47.765 |
+| structured | 0.006 | 4.424 | 1.716 | 1.588 | 1.719 |
+| repeated_calls | 0.054 | 339.982 | 77.213 | 70.574 | 77.458 |
+| higher_order | 0.006 | 4.060 | 1.451 | 1.416 | 1.453 |
+| handlers | 0.045 | 197.931 | 36.634 | 36.902 | 36.627 |
+| multi_shot | 0.037 | 57.600 | 14.959 | 16.627 | 15.072 |
+| long_cleanup | 0.410 | 1157.127 | 199.364 | 387.991 | 200.300 |
+| retained_bytes | 0.021 | 13.426 | 3.472 | 3.490 | 3.472 |
 
-Specialization removes repeated descriptor interpretation and scalar packing, as independently exercised by `semantic_specialization_tests.zig`. The specialized execution median was lower in these samples for `dynamic_loop`, `structured`, `repeated_calls`, `higher_order`. These timing differences describe these inputs and this execution profile; they do not establish universal speedup.
+Specialization removes repeated descriptor interpretation and scalar packing, as independently exercised by `semantic_specialization_tests.zig`. The specialized execution median was lower in these samples for `scalar_chain`, `dynamic_loop`, `structured`, `repeated_calls`, `higher_order`. These timing differences describe these inputs and this execution profile; they do not establish universal speedup.
 
 ## Construction and artifacts
 
 Construction and independent source/translation validation are separate. Peak bytes below are requested allocator bytes from construction, excluding allocator metadata and RSS. Construction, preparation, execution and restore have distinct allocation domains; their peaks must not be summed.
 
-The generic artifact is 231,839 bytes, SHA-256 `a56f43b35c83e8271aa8bd09dd293d27f45ad9e1c72a4081a574c7dd6de0512a`, source identity `1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc`. Admission took 12.189 ms, with 6,042,188 live and 6,872,208 peak requested bytes. Generic construction took 243.995 ms and independent validation 177.400 ms, with 578,892,563 peak requested bytes. The instrumented artifact is 232,116 bytes; construction took 241.822 ms, admission 11.343 ms, validation 176.945 ms and construction peak was 574,541,722 requested bytes.
+The generic artifact is 231,838 bytes, SHA-256 `c3be797414210c55c2ea639a8c5cf8494c5b118a82ffc7b5836832eeb86e940b`, source identity `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7`. Admission took 33.485 ms, with 6,042,232 live and 6,872,252 peak requested bytes. Generic construction took 241.465 ms and independent validation 163.306 ms, with 579,135,502 peak requested bytes. The instrumented artifact is 232,115 bytes; construction took 221.904 ms, admission 10.644 ms, validation 162.324 ms and construction peak was 574,794,105 requested bytes.
 
 | Workload | Specialize ms | Validate ms | Admit ms | Construction peak bytes | Artifact bytes | Executable bytes | Proof bytes | Recovery anchors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| scalar | 4120.652 | 2368.273 | 167.554 | 9648018820 | 13640310 | 2531684 | 11019213 | 24 |
-| scalar_chain | 4203.119 | 2450.874 | 182.999 | 9885442820 | 18650654 | 2652638 | 15908587 | 24 |
-| scalar_chain_large | 4134.132 | 2354.506 | 190.554 | 9677524157 | 30467241 | 2649420 | 27728392 | 24 |
-| dynamic_loop | 4133.768 | 2383.932 | 169.860 | 9713332977 | 14215435 | 2549291 | 11576731 | 24 |
-| structured | 4257.516 | 2468.013 | 177.921 | 9701304520 | 13887936 | 2545094 | 11253429 | 24 |
-| repeated_calls | 4171.780 | 2351.267 | 172.933 | 9712740769 | 14209543 | 2549272 | 11570858 | 24 |
-| higher_order | 3935.077 | 2356.465 | 167.535 | 9701849801 | 13886121 | 2537526 | 11259182 | 24 |
-| handlers | 4486.235 | 2561.657 | 189.612 | 10119802416 | 20594392 | 2693168 | 17811795 | 24 |
-| multi_shot | 3892.763 | 2310.272 | 170.288 | 5820833468 | 14463830 | 2480462 | 11893955 | 24 |
-| long_cleanup | 4029.561 | 2378.394 | 172.791 | 9711250586 | 14707972 | 2563173 | 12055386 | 24 |
-| retained_bytes | 4008.683 | 2363.963 | 173.544 | 9718728510 | 14463816 | 2551972 | 11822431 | 24 |
+| scalar | 3923.666 | 2295.379 | 165.536 | 9647885982 | 13640322 | 2531671 | 11019238 | 24 |
+| scalar_chain | 4076.280 | 2371.945 | 178.925 | 9885308482 | 18650666 | 2652625 | 15908612 | 24 |
+| scalar_chain_large | 3938.987 | 2260.725 | 188.557 | 9677383909 | 30467253 | 2649407 | 27728417 | 24 |
+| dynamic_loop | 3852.369 | 2267.852 | 167.271 | 9713172505 | 14215447 | 2549278 | 11576756 | 24 |
+| structured | 3948.171 | 2315.949 | 166.298 | 9701151636 | 13887948 | 2545081 | 11253454 | 24 |
+| repeated_calls | 3897.149 | 2265.429 | 171.129 | 9712581875 | 14209555 | 2549259 | 11570883 | 24 |
+| higher_order | 3859.511 | 2245.548 | 166.347 | 9701698693 | 13886133 | 2537513 | 11259207 | 24 |
+| handlers | 4244.538 | 2469.737 | 185.189 | 10119661918 | 20594404 | 2693155 | 17811820 | 24 |
+| multi_shot | 3720.276 | 2220.288 | 163.157 | 5817889672 | 14463842 | 2480449 | 11893980 | 24 |
+| long_cleanup | 3867.253 | 2281.756 | 168.199 | 9711099940 | 14707984 | 2563160 | 12055411 | 24 |
+| retained_bytes | 3823.906 | 2251.533 | 167.594 | 9718564884 | 14463828 | 2551959 | 11822456 | 24 |
 
 Preparation of reusable guest/runtime owners, measured separately in milliseconds:
 
 | Workload | Prepare generic | Prepare specialized | Prepare instrumented |
 | --- | --- | --- | --- |
-| scalar | 0.061 | 0.004 | 0.003 |
-| scalar_chain | 0.057 | 0.035 | 0.033 |
-| scalar_chain_large | 0.137 | 0.102 | 0.096 |
-| dynamic_loop | 0.039 | 0.017 | 0.009 |
-| structured | 0.029 | 0.004 | 0.004 |
-| repeated_calls | 0.036 | 0.011 | 0.009 |
-| higher_order | 0.033 | 0.006 | 0.008 |
-| handlers | 0.141 | 0.097 | 0.083 |
-| multi_shot | 0.085 | 0.048 | 0.034 |
-| long_cleanup | 0.055 | 0.019 | 0.015 |
-| retained_bytes | 0.092 | 0.028 | 0.030 |
+| scalar | 0.049 | 0.003 | 0.003 |
+| scalar_chain | 0.056 | 0.030 | 0.027 |
+| scalar_chain_large | 0.135 | 0.096 | 0.095 |
+| dynamic_loop | 0.040 | 0.012 | 0.008 |
+| structured | 0.029 | 0.004 | 0.003 |
+| repeated_calls | 0.038 | 0.011 | 0.008 |
+| higher_order | 0.031 | 0.006 | 0.008 |
+| handlers | 0.136 | 0.095 | 0.080 |
+| multi_shot | 0.079 | 0.037 | 0.031 |
+| long_cleanup | 0.052 | 0.021 | 0.014 |
+| retained_bytes | 0.066 | 0.026 | 0.026 |
 
 ## Publication, restoration and switching
 
@@ -68,17 +68,17 @@ Median milliseconds; `G/S` means generic/specialized on the restricted base. Gue
 
 | Workload | Start G/S | Guest projection G/S | Guest restore G/S | Outer checkpoint G/S | Outer restore G/S | Switch G→S / S→G |
 | --- | --- | --- | --- | --- | --- | --- |
-| scalar | 0.163 / 0.538 | 0.699 / 0.702 | 0.058 / 0.402 | 1.365 / 3.628 | 2.017 / 4.833 | 6.790 / 6.411 |
-| scalar_chain | 0.217 / 0.718 | 0.804 / 0.805 | 0.090 / 0.534 | 1.580 / 4.235 | 2.342 / 5.643 | 7.527 / 6.985 |
-| scalar_chain_large | 0.332 / 0.820 | 1.986 / 1.986 | 0.168 / 0.510 | 2.062 / 4.879 | 3.312 / 6.741 | 9.244 / 8.878 |
-| dynamic_loop | 0.262 / 0.703 | 0.744 / 0.746 | 0.069 / 0.450 | 1.408 / 3.744 | 2.115 / 4.956 | 7.241 / 6.640 |
-| structured | 0.177 / 0.546 | 0.743 / 0.736 | 0.067 / 0.429 | 1.393 / 3.768 | 2.087 / 4.953 | 6.832 / 6.490 |
-| repeated_calls | 0.256 / 0.760 | 5.232 / 5.686 | 0.130 / 0.566 | 5.111 / 11.570 | 9.261 / 16.624 | 9.037 / 8.792 |
-| higher_order | 0.174 / 0.554 | 0.720 / 0.718 | 0.061 / 0.410 | 1.371 / 3.732 | 2.051 / 4.885 | 6.852 / 6.519 |
-| handlers | 0.139 / 0.509 | 0.828 / 0.834 | 0.128 / 0.533 | 1.721 / 4.295 | 2.511 / 5.748 | 7.992 / 7.598 |
-| multi_shot | 0.121 / 0.457 | 6.723 / 6.699 | 0.099 / 0.434 | 1.577 / 4.032 | 2.321 / 5.319 | 7.532 / 7.122 |
-| long_cleanup | 0.177 / 0.617 | 53.846 / 53.855 | 1.393 / 1.742 | 10.449 / 21.550 | 15.572 / 27.087 | 45.672 / 45.165 |
-| retained_bytes | 0.200 / 0.576 | 0.733 / 0.737 | 0.070 / 0.402 | 1.423 / 3.763 | 2.116 / 4.990 | 6.970 / 6.638 |
+| scalar | 0.153 / 0.502 | 0.664 / 0.668 | 0.056 / 0.366 | 1.284 / 3.507 | 1.927 / 4.606 | 6.406 / 6.060 |
+| scalar_chain | 0.196 / 0.619 | 0.754 / 0.756 | 0.079 / 0.422 | 1.497 / 3.935 | 2.258 / 5.078 | 6.974 / 6.579 |
+| scalar_chain_large | 0.300 / 0.774 | 1.847 / 1.869 | 0.153 / 0.468 | 1.953 / 4.719 | 3.048 / 6.253 | 8.455 / 8.071 |
+| dynamic_loop | 0.242 / 0.671 | 0.726 / 0.719 | 0.066 / 0.434 | 1.376 / 3.692 | 2.056 / 4.731 | 6.668 / 6.428 |
+| structured | 0.161 / 0.502 | 0.704 / 0.696 | 0.064 / 0.378 | 1.348 / 3.608 | 1.998 / 4.733 | 6.589 / 6.241 |
+| repeated_calls | 0.242 / 0.688 | 4.931 / 5.360 | 0.121 / 0.502 | 4.870 / 11.270 | 8.688 / 15.679 | 8.421 / 7.967 |
+| higher_order | 0.157 / 0.509 | 0.677 / 0.681 | 0.057 / 0.369 | 1.313 / 3.561 | 1.956 / 4.641 | 6.492 / 6.120 |
+| handlers | 0.137 / 0.493 | 0.814 / 0.818 | 0.126 / 0.493 | 1.686 / 4.239 | 2.487 / 5.516 | 7.675 / 7.267 |
+| multi_shot | 0.115 / 0.437 | 6.596 / 6.559 | 0.095 / 0.406 | 1.536 / 3.879 | 2.263 / 5.096 | 7.309 / 6.916 |
+| long_cleanup | 0.183 / 0.614 | 53.377 / 53.319 | 1.370 / 1.724 | 10.380 / 21.334 | 15.353 / 26.584 | 45.242 / 44.770 |
+| retained_bytes | 0.193 / 0.546 | 0.702 / 0.713 | 0.068 / 0.385 | 1.364 / 3.657 | 2.048 / 4.817 | 6.668 / 6.321 |
 
 ## Physical state and work
 
@@ -104,17 +104,17 @@ The following estimate divides construction + independent validation + artifact 
 
 | Workload | Initial incremental cost ms | Mean start + execute G ms | Mean start + execute S ms | Saving ms | Estimated new-session runs |
 | --- | --- | --- | --- | --- | --- |
-| scalar | 6656.422 | 1.167 | 1.567 | -0.400 | No measured break-even |
-| scalar_chain | 6836.971 | 20.673 | 21.209 | -0.536 | No measured break-even |
-| scalar_chain_large | 6679.158 | 86.252 | 91.087 | -4.835 | No measured break-even |
-| dynamic_loop | 6687.537 | 49.618 | 44.692 | 4.926 | 1,358 |
-| structured | 6903.426 | 2.002 | 2.260 | -0.258 | No measured break-even |
-| repeated_calls | 6695.954 | 85.721 | 79.145 | 6.577 | 1,019 |
-| higher_order | 6459.050 | 1.749 | 2.077 | -0.328 | No measured break-even |
-| handlers | 7237.459 | 37.367 | 38.442 | -1.075 | No measured break-even |
-| multi_shot | 6373.286 | 15.461 | 17.627 | -2.166 | No measured break-even |
-| long_cleanup | 6580.710 | 225.525 | 416.841 | -191.315 | No measured break-even |
-| retained_bytes | 6546.125 | 3.805 | 4.307 | -0.502 | No measured break-even |
+| scalar | 6384.535 | 1.099 | 1.466 | -0.367 | No measured break-even |
+| scalar_chain | 6627.125 | 19.330 | 19.748 | -0.418 | No measured break-even |
+| scalar_chain_large | 6388.231 | 81.290 | 85.392 | -4.102 | No measured break-even |
+| dynamic_loop | 6287.463 | 48.108 | 43.208 | 4.900 | 1,284 |
+| structured | 6430.393 | 1.892 | 2.094 | -0.201 | No measured break-even |
+| repeated_calls | 6333.681 | 79.871 | 73.044 | 6.827 | 928 |
+| higher_order | 6271.380 | 1.618 | 1.937 | -0.319 | No measured break-even |
+| handlers | 6899.422 | 36.814 | 37.426 | -0.612 | No measured break-even |
+| multi_shot | 6103.679 | 15.082 | 17.081 | -1.999 | No measured break-even |
+| long_cleanup | 6317.177 | 221.459 | 411.209 | -189.750 | No measured break-even |
+| retained_bytes | 6242.993 | 3.696 | 4.060 | -0.364 | No measured break-even |
 
 These estimates exclude cache hits, storage, transfer, model-token cost and observation/publication costs, including outer restoration. Those costs can erase a saving. No timing result is an unconditional specialization policy.
 
@@ -122,7 +122,7 @@ The source builders preserve sharing at ordinary transitions; table tests measur
 
 Projection-cache counters unavailable in the immutable reference are emitted as `null`, not invented zeroes. Native process RSS, WASM timing, network transfer latency and live model token costs were not measured by this executable. Platform conformance and process mobility are separate qualification results. Deterministic model-action fixtures establish available choices, not autonomous model efficacy.
 
-Raw output: 421 JSONL records, SHA-256 `4c618d9c115dd231b3cd5de6e4f92c89ab4eb9bfeb31edadcd7acd7bd6208337` (`kosmos-200e06c-economy.stdout`). The earlier baseline identifiers remain in this document's Git history.
+Raw output: 421 JSONL records, SHA-256 `ad53983e6ec2c63d4f9eff103809e6e6529258a513cd6a422c303726c2e22f42` (`kosmos-1df63be-economy.stdout`). The earlier baseline identifiers remain in this document's Git history.
 
 ## Retention query discovery
 

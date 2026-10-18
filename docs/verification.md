@@ -150,6 +150,10 @@ retain full runtime artifact and guest-state admission.
 The workflow-dispatch `compiler-cache=false` input disables compiler restoration
 for a cold measurement. Every job has at most ten minutes, and the terminal gate
 also checks the elapsed time of the complete workflow against 600 seconds.
+The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
+acquisition times in the integrated Protean qualification. Upstream signature and
+archive-name verification remain active. An explicit mirror removes the action's
+randomized selection and automatic fallback; future availability is not guaranteed.
 
 Historical Python/Wasmtime transfer, timing, layout, replay, scalar/blob/history
 measurement and duplicate platform campaigns are retired with their exclusive
