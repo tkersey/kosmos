@@ -23,6 +23,75 @@ const Custody = struct {
     }
 };
 
+fn finishCapsules(selected: *artifact.Admitted, prepared: *base.Prepared, input: u64, cancelled: bool, terminal: data.process_state.Status) !void {
+    var owner = try driver.Driver.start(a, prepared, selected, .{ .arguments = &std.mem.toBytes(input) });
+    var live = true;
+    defer if (live) owner.deinit();
+    var initialized = try owner.pump(null);
+    initialized.deinit();
+    var advanced = try owner.exchange(.{ .advance = .{
+        .control = if (cancelled) .{ .cancel = .{ .text = "finish capsule" } } else .none,
+        .quantum = 1024,
+    } });
+    advanced.deinit();
+    try std.testing.expectEqual(terminal, owner.last_cut.?.status);
+    const guest_revision = owner.guest_revision;
+    const cut = owner.last_cut.?;
+    try owner.submit(.finish);
+    var cuts: usize = 0;
+    while (true) {
+        var result = try owner.pump(1);
+        defer result.deinit();
+        if (result == .closed) break;
+        try std.testing.expect(result == .suspended);
+        try std.testing.expectError(error.GuestCutUnavailable, owner.checkpoint(a));
+        const provenance: capsule.Provenance = .{ .execution = @splat(31), .custody = @splat(41), .publication = null };
+        const bytes = try capsule.publish(a, &owner, .outer_execution, provenance);
+        defer a.free(bytes);
+        const before = try owner.outer.checkpoint(a);
+        defer a.free(before);
+        var custody: Custody = .{ .expected = capsule.reference(bytes), .execution = provenance.execution };
+        owner.deinit();
+        live = false;
+        owner = try capsule.restore(a, prepared, selected, bytes, custody.verifier());
+        live = true;
+        try std.testing.expect(custody.consumed);
+        const after = try owner.outer.checkpoint(a);
+        defer a.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+        try std.testing.expectEqual(driver.Operation.finish, owner.operation.?);
+        try std.testing.expectEqual(guest_revision, owner.guest_revision);
+        try std.testing.expectEqualDeep(cut, owner.last_cut.?);
+        cuts += 1;
+    }
+    try std.testing.expect(cuts > 0);
+    try std.testing.expectEqual(guest_revision, owner.guest_revision);
+    try std.testing.expectError(error.InvalidState, capsule.publish(a, &owner, .outer_execution, .{ .execution = @splat(31), .custody = @splat(41), .publication = null }));
+}
+
+test "finish retains transferable recovery at every bounded terminal cut" {
+    var generic = try artifact.Admitted.init(a, @import("packaged_runtime").bytes, artifact.digest(@import("packaged_runtime").bytes));
+    defer generic.deinit();
+    const image = try support.guestImage();
+    defer a.free(image);
+    var prepared = try base.Prepared.init(a, image);
+    defer prepared.deinit();
+    const guest = try prepared.acquire();
+    defer guest.release();
+    const bytes = try @import("compiler.zig").compile(a, .{
+        .horos_package = generic.content.value.manifest.compiler.horos_package,
+        .guest = guest.admitted(),
+    });
+    defer a.free(bytes);
+    var specialized = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer specialized.deinit();
+    for ([_]*artifact.Admitted{ &generic, &specialized }) |selected| {
+        try finishCapsules(selected, &prepared, 1, false, .completed);
+        try finishCapsules(selected, &prepared, std.math.maxInt(u64), false, .failed);
+        try finishCapsules(selected, &prepared, 1, true, .cancelled);
+    }
+}
+
 test "outer capsule retains clone microprogress and requires exact consumed custody" {
     var selected = try artifact.Admitted.init(a, @import("packaged_runtime").bytes, artifact.digest(@import("packaged_runtime").bytes));
     defer selected.deinit();

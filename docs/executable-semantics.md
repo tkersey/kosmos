@@ -101,6 +101,13 @@ and canonical states and counts removed packing work on dynamic inputs.
 work. A suspended pump is not a guest outcome. Only the actual published service
 continuation exposes a guest cut. Recovery anchors retained during an unfinished
 operation are validated but are not reported as its completed guest result.
+The service returns its retained state when finishing a terminal guest. This keeps
+the recovery parameter live through its last ordinary base return, including
+bounded cuts after the terminal-status check. The driver reports `closed` only
+after that return; it does not serialize or expose the private return value.
+The capsule regression transfers every bounded finish cut for completed, failed
+and cancelled guests under both generic and specialized realizations, retiring
+the source owner before each exact-custody restore.
 
 `RuntimeCapsule.Kind.guest_cut` carries canonical guest state and permits checked
 hydration into an independently approved realization. `outer_execution` carries

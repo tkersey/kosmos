@@ -60,11 +60,11 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
     // The countdown is a retention policy, not a guest work/lifetime limit.
     const state = try b.schema(.{ .product = &.{ m.schema, e.integer } });
     const interval = try b.constant(u64, 64);
-    const loop = try b.declare(&.{ m.program, state, event_type, state }, e.unit, &.{effect}, &.{});
-    const dispatch = try b.declare(&.{ m.program, state, command_type }, e.unit, &.{effect}, &.{});
-    const receive = try b.declare(&.{ m.program, state, state, command_type }, e.unit, &.{effect}, &.{});
+    const loop = try b.declare(&.{ m.program, state, event_type, state }, state, &.{effect}, &.{});
+    const dispatch = try b.declare(&.{ m.program, state, command_type }, state, &.{effect}, &.{});
+    const receive = try b.declare(&.{ m.program, state, state, command_type }, state, &.{effect}, &.{});
     const advance = try b.declare(&.{ m.program, state, e.integer }, state, &.{}, &.{});
-    const publish = try b.declare(&.{ m.program, state, state, event_type }, e.unit, &.{effect}, &.{});
+    const publish = try b.declare(&.{ m.program, state, state, event_type }, state, &.{effect}, &.{});
     {
         const prior = try e.field(try e.param(publish, 1), 0);
         const next_state = try e.param(publish, 2);
@@ -174,7 +174,7 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
                 3 => {
                     const tag = try statusTag(e, m, input);
                     body = try e.fail();
-                    inline for (.{ data.process_state.Status.completed, data.process_state.Status.failed, data.process_state.Status.cancelled }) |s| body = try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(s))), try b.pure(e.unit_value), body);
+                    inline for (.{ data.process_state.Status.completed, data.process_state.Status.failed, data.process_state.Status.cancelled }) |s| body = try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(s))), try b.pure(saved), body);
                 },
                 else => unreachable,
             }
@@ -182,7 +182,7 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
         }
         try b.define(dispatch, try b.term(.{ .match_sum = .{ .value = command, .cases = &cases } }));
     }
-    const entry = try b.declare(&.{ m.program, try projection.schema(Initial, b) }, e.unit, &.{effect}, &.{});
+    const entry = try b.declare(&.{ m.program, try projection.schema(Initial, b) }, state, &.{effect}, &.{});
     {
         const initialized = try b.variable(m.schema);
         const args = try b.variable(try b.schema(.bytes));
