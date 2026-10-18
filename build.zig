@@ -21,6 +21,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = std.json.parseFromSliceLeaky(Profile, b.allocator, @embedFile("build-profile.json"), .{}) catch @panic("invalid runtime profile");
+    // Declare options before a cold lazy dependency fetch can return.
+    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse (b.dep_prefix.len != 0);
+    const session_group = b.option(enum { behavior, ownership, regressions }, "session-group", "Select independent session qualification cases (default: all)");
+    const source_group = b.option(enum { first, second }, "source-group", "Select an exhaustive half of the source fixtures (default: all)");
+    const economy_workload = b.option([]const u8, "economy-workload", "Select one semantic economy workload");
+    const input_capacity = b.option(usize, "input-capacity", "Initial current input budget") orelse profile.defaults.input;
+    const working_capacity = b.option(usize, "working-capacity", "Initial current working allocation budget") orelse profile.defaults.working;
+    const output_capacity = b.option(usize, "output-capacity", "Initial current output budget") orelse profile.defaults.output;
+    const maximum_memory = b.option(u64, "maximum-memory", "Current wasm32 memory maximum in whole pages") orelse profile.maximumMemoryBytes;
     const package = @import("build.zig.zon");
     const kernel_mode = std.meta.stringToEnum(std.lang.Optimize, profile.kernelMode) orelse @panic("invalid kernel mode");
     const supplied_source = b.option(std.Build.LazyPath, "horos-source", "Override the pinned Horos source") orelse pinned: {
@@ -98,7 +107,6 @@ pub fn build(b: *std.Build) void {
     // packaged bytes. A downstream consumer checks the shipped source/compiler/
     // content bindings instead of recompiling that host generator. Runtime
     // artifact and guest admission are identical in both cases.
-    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse (b.dep_prefix.len != 0);
     const artifact_emitter = b.addExecutable(.{ .name = "kosmos-semantic-artifact", .root_module = b.createModule(.{
         .root_source_file = b.path("src/semantic_artifact.zig"),
         .target = b.graph.host,
@@ -177,12 +185,11 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = packaged_runtime } },
     }) });
     const run_economy_bench = b.addRunArtifact(economy_bench);
-    if (b.option([]const u8, "economy-workload", "Select one semantic economy workload")) |name| run_economy_bench.addArg(name);
+    if (economy_workload) |name| run_economy_bench.addArg(name);
     run_economy_bench.has_side_effects = true;
     b.step("bench-semantics", "Measure matched native, bootstrap, generic and specialized realizations (JSONL)")
         .dependOn(&run_economy_bench.step);
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });
-    const session_group = b.option(enum { behavior, ownership, regressions }, "session-group", "Select independent session qualification cases (default: all)");
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/stable_source.zig"),
         .target = b.graph.host,
@@ -261,9 +268,9 @@ pub fn build(b: *std.Build) void {
     });
     current_runtime.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = wasm_target, .optimize = kernel_mode }));
     const current_options = b.addOptions();
-    current_options.addOption(usize, "input_capacity", b.option(usize, "input-capacity", "Initial current input budget") orelse profile.defaults.input);
-    current_options.addOption(usize, "working_capacity", b.option(usize, "working-capacity", "Initial current working allocation budget") orelse profile.defaults.working);
-    current_options.addOption(usize, "output_capacity", b.option(usize, "output-capacity", "Initial current output budget") orelse profile.defaults.output);
+    current_options.addOption(usize, "input_capacity", input_capacity);
+    current_options.addOption(usize, "working_capacity", working_capacity);
+    current_options.addOption(usize, "output_capacity", output_capacity);
     const current_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/main.zig"),
         .target = wasm_target,
@@ -289,7 +296,7 @@ pub fn build(b: *std.Build) void {
     };
     current_kernel.export_memory = true;
     current_kernel.stack_size = profile.stackBytes;
-    current_kernel.max_memory = b.option(u64, "maximum-memory", "Current wasm32 memory maximum in whole pages") orelse profile.maximumMemoryBytes;
+    current_kernel.max_memory = maximum_memory;
     var features: std.ArrayList([]const u8) = .empty;
     for (wasm_target.result.cpu.arch.allFeaturesList(), 0..) |feature, index| {
         if (wasm_target.result.cpu.features.isEnabled(@intCast(index)))
@@ -367,7 +374,7 @@ pub fn build(b: *std.Build) void {
     source_agreement.addFileArg2(fixture.getEmittedBin(), .{ .make_absolute = true });
     source_agreement.addDirectoryArg2(b.graph.path(.install_prefix, "source"), .{ .make_absolute = true });
     source_agreement.addFileArg2(source.path(b, "test/v2/source_oracle.mjs"), .{ .make_absolute = true });
-    if (b.option(enum { first, second }, "source-group", "Select an exhaustive half of the source fixtures (default: all)")) |group|
+    if (source_group) |group|
         source_agreement.addArg(@tagName(group));
     source_agreement.step.dependOn(&source_examples.step);
     source_agreement.step.dependOn(&current_fixtures.step);
