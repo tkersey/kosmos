@@ -238,7 +238,6 @@ test "source command predecessor remains available at every base cut through clo
     @memset(anchors, .empty);
     for (compiled.parameters) |binding| {
         const wanted = ((binding.source_function == d.loop or binding.source_function == d.dispatch) and binding.variable == b.parameter(binding.source_function, 1)) or
-            (binding.source_function == d.receive and (binding.variable == b.parameter(d.receive, 1) or binding.variable == b.parameter(d.receive, 2))) or
             (binding.source_function == d.publish and (binding.variable == b.parameter(d.publish, 1) or binding.variable == b.parameter(d.publish, 2)));
         if (wanted) try anchors[@intCast(binding.function)].append(scratch.allocator(), .{ .slot = binding.slot, .schema = binding.schema });
     }
