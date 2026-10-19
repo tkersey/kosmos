@@ -17,7 +17,7 @@ pub const Control = union(enum) { none, answer: []const u8, resume_yield, cancel
 pub const Command = union(enum) { advance: struct { control: Control, quantum: u64 }, observe, project, finish };
 pub const Cut = struct { status: data.process_state.Status, guest_work: u64, trace: ?instrumentation.Trace = null };
 pub const Event = union(enum) { cut: Cut, observation: @import("observe.zig").Observation, projection: data.process_state.State };
-pub const Definition = struct { entry: Id, effect: Id, state: Id, loop: Id, dispatch: Id, receive: Id, advance: Id, commit: Id, control_commit: Id, publish: Id, cut: Id, command: Id, event: Id };
+pub const Definition = struct { entry: Id, effect: Id, state: Id, loop: Id, dispatch: Id, advance: Id, commit: Id, control_commit: Id, publish: Id, cut: Id, command: Id, event: Id };
 
 fn statusTag(e: Author, m: machines.Definition, input: Id) Error!Id {
     return e.b.primitive(try e.b.scalar(u32), .enum_tag, &.{try edges.field(e, try m.field(e, input, .header), machines.Header, "status")}, 0);
@@ -60,9 +60,8 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
     // The countdown is a retention policy, not a guest work/lifetime limit.
     const state = try b.schema(.{ .product = &.{ m.schema, e.integer } });
     const interval = try b.constant(u64, 64);
-    const loop = try b.declare(&.{ m.program, state, event_type, state }, state, &.{effect}, &.{});
+    const loop = try b.declare(&.{ m.program, state, event_type }, state, &.{effect}, &.{});
     const dispatch = try b.declare(&.{ m.program, state, command_type }, state, &.{effect}, &.{});
-    const receive = try b.declare(&.{ m.program, state, state, command_type }, state, &.{effect}, &.{});
     const advance = try b.declare(&.{ m.program, state, e.integer }, state, &.{}, &.{});
     const publish = try b.declare(&.{ m.program, state, state, event_type }, state, &.{effect}, &.{});
     {
@@ -71,23 +70,14 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
         const next = try e.field(next_state, 0);
         const old_identity = try edges.field(e, try m.field(e, prior, .header), machines.Header, "program_identity");
         const new_identity = try edges.field(e, try m.field(e, next, .header), machines.Header, "program_identity");
-        var body = try e.call(loop, &.{ try e.param(publish, 0), next_state, try e.param(publish, 3), try e.param(publish, 1) });
+        var body = try e.call(loop, &.{ try e.param(publish, 0), next_state, try e.param(publish, 3) });
         for (0..32) |i| body = try e.when(try e.binary(.equal, try e.required(old_identity, try b.constant(u64, i)), try e.required(new_identity, try b.constant(u64, i))), body, try e.fail());
         try b.define(publish, body);
     }
     {
-        const prior = try e.field(try e.param(receive, 1), 0);
-        const current = try e.param(receive, 2);
-        const old_identity = try edges.field(e, try m.field(e, prior, .header), machines.Header, "program_identity");
-        const current_identity = try edges.field(e, try m.field(e, try e.field(current, 0), .header), machines.Header, "program_identity");
-        var body = try e.call(dispatch, &.{ try e.param(receive, 0), current, try e.param(receive, 3) });
-        for (0..32) |i| body = try e.when(try e.binary(.equal, try e.required(old_identity, try b.constant(u64, i)), try e.required(current_identity, try b.constant(u64, i))), body, try e.fail());
-        try b.define(receive, body);
         const command = try b.variable(command_type);
         const exchange = try b.term(.{ .perform = .{ .effect = effect, .payload = try e.param(loop, 2) } });
-        // The complete prior command input remains a real call argument until
-        // the event has been acknowledged by the enclosing bridge owner.
-        try b.define(loop, try b.bind(command, exchange, try e.call(receive, &.{ try e.param(loop, 0), try e.param(loop, 3), try e.param(loop, 1), try b.reference(command) })));
+        try b.define(loop, try b.bind(command, exchange, try e.call(dispatch, &.{ try e.param(loop, 0), try e.param(loop, 1), try b.reference(command) })));
     }
     const commit = try b.declare(&.{ m.schema, m.schema }, m.schema, &.{}, &.{});
     const control_commit = try b.declare(&.{ m.schema, m.schema }, m.schema, &.{}, &.{});
@@ -142,9 +132,6 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
                     const tag = try statusTag(e, m, advanced_machine);
                     const retain = try b.pure(advanced_state);
                     const collect = try b.bind(collected, try e.call(collector.run, &.{advanced_machine}), try b.pure(try e.tuple(state, &.{ try b.reference(collected), interval })));
-                    // A public suspension must not retain dead guest input until
-                    // another guest transition. Collection preserves the cut and
-                    // work count; the predecessor stays live until acknowledgment.
                     const settle = try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(data.process_state.Status.active))), retain, try e.when(try e.binary(.equal, tag, try b.constant(u32, @backingInt(data.process_state.Status.unwinding))), retain, collect));
                     const after = try e.field(try b.reference(settled), 0);
                     const cut = try b.variable(cut_type);
@@ -169,7 +156,7 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
                 },
                 1, 2 => {
                     const output = try b.variable(if (i == 1) try projection.schema(@import("observe.zig").Observation, b) else m.state);
-                    body = try b.bind(output, try e.call(if (i == 1) observe else m.project, &.{input}), try e.call(loop, &.{ program, saved, try e.variant(event_type, if (i == 1) 1 else 2, try b.reference(output)), saved }));
+                    body = try b.bind(output, try e.call(if (i == 1) observe else m.project, &.{input}), try e.call(loop, &.{ program, saved, try e.variant(event_type, if (i == 1) 1 else 2, try b.reference(output)) }));
                 },
                 3 => {
                     const tag = try statusTag(e, m, input);
@@ -194,7 +181,7 @@ pub fn defineWithHooks(b: *source.Builder, staged: bool, hooks: instrumentation.
         const machine = try b.reference(initialized);
         const cut = try b.variable(cut_type);
         const saved = try e.tuple(state, &.{ machine, interval });
-        try b.define(entry, try b.bind(initialized, start, try b.bind(cut, try e.call(cut_function, &.{machine}), try e.call(loop, &.{ try e.param(entry, 0), saved, try e.variant(event_type, 0, try b.reference(cut)), saved }))));
+        try b.define(entry, try b.bind(initialized, start, try b.bind(cut, try e.call(cut_function, &.{machine}), try e.call(loop, &.{ try e.param(entry, 0), saved, try e.variant(event_type, 0, try b.reference(cut)) }))));
     }
-    return cache.finish(b, .{ .entry = entry, .effect = effect, .state = state, .loop = loop, .dispatch = dispatch, .receive = receive, .advance = advance, .commit = commit, .control_commit = control_commit, .publish = publish, .cut = cut_function, .command = command_type, .event = event_type });
+    return cache.finish(b, .{ .entry = entry, .effect = effect, .state = state, .loop = loop, .dispatch = dispatch, .advance = advance, .commit = commit, .control_commit = control_commit, .publish = publish, .cut = cut_function, .command = command_type, .event = event_type });
 }

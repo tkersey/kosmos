@@ -69,7 +69,43 @@ fn finishCapsules(selected: *artifact.Admitted, prepared: *base.Prepared, input:
     try std.testing.expectError(error.InvalidState, capsule.publish(a, &owner, .outer_execution, .{ .execution = @splat(31), .custody = @splat(41), .publication = null }));
 }
 
-test "finish retains transferable recovery at every bounded terminal cut" {
+fn advanceRecovery(selected: *artifact.Admitted, prepared: *base.Prepared) !void {
+    var owner = try driver.Driver.start(a, prepared, selected, .{ .arguments = &std.mem.toBytes(@as(u64, 1)) });
+    defer owner.deinit();
+    var initialized = try owner.pump(null);
+    initialized.deinit();
+    try owner.submit(.{ .advance = .{ .control = .none, .quantum = 1 } });
+    var cuts: usize = 0;
+    while (true) {
+        var result = try owner.pump(1);
+        defer result.deinit();
+        if (result == .event) {
+            try std.testing.expect(result.event.value == .cut);
+            try std.testing.expectEqual(@as(u64, 1), result.event.value.cut.guest_work);
+            break;
+        }
+        try std.testing.expect(result == .suspended);
+        try std.testing.expectError(error.GuestCutUnavailable, owner.checkpoint(a));
+        const inspected = try @import("realization.zig").inspect(a, &owner.outer, owner.selected, owner.guest.admitted());
+        try std.testing.expect(inspected.committed != 0);
+        cuts += 1;
+    }
+    try std.testing.expect(cuts != 0);
+    try std.testing.expectEqual(@as(u64, 1), owner.guest_revision);
+    const checkpoint = try owner.checkpoint(a);
+    defer a.free(checkpoint);
+    var reference = try driver.Driver.start(a, prepared, selected, .{ .arguments = &std.mem.toBytes(@as(u64, 1)) });
+    defer reference.deinit();
+    var first = try reference.pump(null);
+    first.deinit();
+    var advanced = try reference.exchange(.{ .advance = .{ .control = .none, .quantum = 1 } });
+    advanced.deinit();
+    const expected = try reference.checkpoint(a);
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, checkpoint);
+}
+
+test "advance and finish retain recovery at every bounded cut" {
     var generic = try artifact.Admitted.init(a, @import("packaged_runtime").bytes, artifact.digest(@import("packaged_runtime").bytes));
     defer generic.deinit();
     const image = try support.guestImage();
@@ -86,6 +122,7 @@ test "finish retains transferable recovery at every bounded terminal cut" {
     var specialized = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer specialized.deinit();
     for ([_]*artifact.Admitted{ &generic, &specialized }) |selected| {
+        try advanceRecovery(selected, &prepared);
         try finishCapsules(selected, &prepared, 1, false, .completed);
         try finishCapsules(selected, &prepared, std.math.maxInt(u64), false, .failed);
         try finishCapsules(selected, &prepared, 1, true, .cancelled);

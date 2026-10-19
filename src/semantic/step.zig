@@ -49,6 +49,7 @@ pub fn define(b: *source.Builder, machine: machines.Definition) Error!Definition
     const live = try e.param(d.instruction_at, 5);
     const copy_facts = try e.param(d.instruction_at, 6);
     const virtualize = try e.param(d.instruction_at, 7);
+    const opcode = try e.field(instruction, machines.index(data.activation.Instruction, "opcode"));
     const destination = try e.field(instruction, machines.index(data.activation.Instruction, "destination"));
     const evaluated = try b.variable(evaluate.result);
     const computed = try b.reference(evaluated);
@@ -66,12 +67,15 @@ pub fn define(b: *source.Builder, machine: machines.Definition) Error!Definition
     const updated_node = try e.replace(node, 1, try e.variant(optional_frame, 1, updated_frame));
     var advanced = try e.replace(changed_machine, @backingInt(machines.Field.nodes), try b.reference(nodes));
     advanced = try e.replace(advanced, @backingInt(machines.Field.work), try e.binary(.integer_add, try machine.field(e, input, .work), e.one));
-    var success = try b.bind(nodes, try e.call(machine.nodes.set, &.{ try machine.field(e, changed_machine, .nodes), current_id, updated_node }), try b.pure(try e.variant(result, 0, advanced)));
+    const retained = try b.variable(machine.schema);
+    const blob_retention = try emitBlobRetention(e, machine);
+    const operand = try e.required(try e.field(instruction, machines.index(data.activation.Instruction, "operands")), e.zero);
+    const finish = try e.when(try instructions.is(e, opcode, .blob_length), try e.call(blob_retention, &.{ input, frame, try b.reference(pruned), operand, advanced }), try b.pure(advanced));
+    var success = try b.bind(nodes, try e.call(machine.nodes.set, &.{ try machine.field(e, changed_machine, .nodes), current_id, updated_node }), try b.bind(retained, finish, try b.pure(try e.variant(result, 0, try b.reference(retained)))));
     success = try b.bind(pruned, try e.call(machine.frames.prune, &.{ try b.reference(written), live }), success);
     var raw_success = try b.bind(written, try e.call(machine.frames.write_raw, &.{ try b.reference(cleared), destination, try b.reference(raw) }), success);
     success = try b.bind(written, try e.call(machine.frames.write, &.{ try b.reference(cleared), destination, try b.reference(value) }), success);
     const consume = try emitConsume(e, machine);
-    const opcode = try e.field(instruction, machines.index(data.activation.Instruction, "opcode"));
     var consume_term = try e.call(consume, &.{ frame, try e.field(instruction, machines.index(data.activation.Instruction, "operands")), layout, copy_facts });
     inline for (.{ data.program.Opcode.variant_tag, .sequence_length, .sequence_get }) |borrowed|
         consume_term = try e.when(try instructions.is(e, opcode, borrowed), try b.pure(frame), consume_term);
@@ -146,6 +150,48 @@ pub fn define(b: *source.Builder, machine: machines.Definition) Error!Definition
         try b.define(d.active, try e.when(try e.binary(.equal, try b.primitive(try b.scalar(u32), .enum_tag, &.{status}, 0), try b.constant(u32, @backingInt(data.process_state.Status.unwinding))), unwind, active));
     }
     return cache.finish(b, d);
+}
+
+fn emitBlobRetention(e: Author, machine: machines.Definition) Error!Id {
+    const b = e.b;
+    const slots = machine.frames.slots;
+    const aliases = try b.declare(&.{ slots.tree, e.integer }, e.boolean, &.{}, &.{});
+    {
+        const input = try e.param(aliases, 0);
+        const wanted = try e.param(aliases, 1);
+        const nil = try b.variable(e.unit);
+        const leaf = try b.variable(slots.entry);
+        const fork = try b.variable(slots.branch);
+        const slot = try e.field(try b.reference(leaf), 1);
+        const body = try e.field(try e.payload(slot, 0), 1);
+        const absent = try b.pure(try b.constant(bool, false));
+        const is_value = try @import("unwind.zig").is(e, slot, 0);
+        const is_blob = try @import("unwind.zig").is(e, body, @backingInt(data.graph.ValueTag.blob));
+        const same = try b.pure(try e.binary(.equal, try e.field(try e.payload(body, @backingInt(data.graph.ValueTag.blob)), 0), wanted));
+        const left = try b.variable(e.boolean);
+        const branch = try b.reference(fork);
+        const search = try b.bind(left, try e.call(aliases, &.{ try e.field(branch, 1), wanted }), try e.when(try b.reference(left), try b.pure(try b.reference(left)), try e.call(aliases, &.{ try e.field(branch, 2), wanted })));
+        try b.define(aliases, try b.term(.{ .match_sum = .{ .value = input, .cases = &.{
+            .{ .variable = nil, .body = absent },
+            .{ .variable = leaf, .body = try e.when(is_value, try e.when(is_blob, same, absent), absent) },
+            .{ .variable = fork, .body = search },
+        } } }));
+    }
+    const entry = try b.declare(&.{ machine.schema, machine.frames.schema, machine.frames.schema, e.integer, machine.schema }, machine.schema, &.{}, &.{});
+    const before = try e.param(entry, 0);
+    const next = try e.param(entry, 4);
+    const value = try b.variable(try projection.schema(data.graph.Value, b));
+    const blob_id = try e.field(try e.payload(try e.field(try b.reference(value), 1), @backingInt(data.graph.ValueTag.blob)), 0);
+    const blob = try b.variable(machine.blobs.optional);
+    const bytes = try e.field(try e.payload(try b.reference(blob), 1), machines.index(data.graph.Blob, "bytes"));
+    const length = try b.primitive(e.integer, .blob_length, &.{bytes}, 0);
+    const live = try b.variable(e.boolean);
+    const collector = try @import("collect.zig").define(b, machine);
+    const retain = try b.pure(next);
+    const collect = try b.bind(live, try e.call(aliases, &.{ try e.field(try e.param(entry, 2), @backingInt(@import("frames.zig").Field.bindings)), blob_id }), try e.when(try b.reference(live), retain, try e.call(collector.run, &.{next})));
+    const choose = try e.when(try e.binary(.less, length, try b.constant(u64, 64 << 10)), retain, collect);
+    try b.define(entry, try b.bind(value, try e.call(machine.frames.read, &.{ try e.param(entry, 1), try e.param(entry, 3) }), try b.bind(blob, try e.call(machine.blobs.get, &.{ try machine.field(e, before, .blobs), blob_id }), choose)));
+    return entry;
 }
 
 fn emitConsume(e: Author, machine: machines.Definition) Error!Id {

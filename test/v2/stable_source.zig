@@ -50,7 +50,7 @@ test "ownership: encoded cursors export canonical immutable checkpoints and rest
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     for ([_]bool{ false, true }) |checkpoint_mode|
-        try residentFailureSweep(&prepared, initial, .none, checkpoint_mode);
+        try residentFailureSweep(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
     try testing.expect(try drive(&session, null) == .yielded);
     const state = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(state);
@@ -468,18 +468,37 @@ test "ownership: live owned unwind preserves physical ownership and retry at eve
     }
 }
 
-fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, checkpoint: []const u8, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+const ResidentFixture = struct {
+    checkpoint: []const u8,
+    prefix_steps: u64 = 0,
+
+    fn restore(self: ResidentFixture, allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !Resident {
+        var resident = try Resident.restore(allocator, prepared, self.checkpoint);
+        errdefer releaseResident(&resident);
+        if (self.prefix_steps != 0) {
+            var prefix = try resident.drive(allocator, .none, .{ .quantum = self.prefix_steps });
+            defer prefix.deinit();
+            try testing.expect(prefix.record == .progressed);
+        }
+        return resident;
+    }
+};
+
+fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
     // Exhaust the native allocation sites of one selected guest transition and
     // its publication. Whole-program behavior is checked separately.
-    var reference = try Resident.restore(testing.allocator, prepared, checkpoint);
+    var reference = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&reference);
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    defer if (reconstructed) |bytes| testing.allocator.free(bytes);
+    const checkpoint = reconstructed orelse fixture.checkpoint;
     var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
     defer expected.deinit();
     var failures: usize = 0;
     var failed_after_mutation = false;
     while (true) : (failures += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var resident = try Resident.restore(failing.allocator(), prepared, checkpoint);
+        var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
         var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
         try resident.setStatistics(&statistics);
@@ -509,12 +528,15 @@ fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, checkpoint:
     }
 }
 
-fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, checkpoint: []const u8, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
-    var reference = try Resident.restore(testing.allocator, prepared, checkpoint);
+fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+    var reference = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&reference);
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    defer if (reconstructed) |bytes| testing.allocator.free(bytes);
+    const checkpoint = reconstructed orelse fixture.checkpoint;
     var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
     defer expected.deinit();
-    var resident = try Resident.restore(testing.allocator, prepared, checkpoint);
+    var resident = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&resident);
     var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
     try resident.setStatistics(&statistics);
@@ -565,7 +587,7 @@ test "ownership: resident rollback preserves acquired replies, cleanup custody, 
                 if (position < block.instructions.len and block.instructions[@intCast(position)].opcode == .clone_resumption) {
                     const before_clone = try session.checkpoint(testing.allocator);
                     defer testing.allocator.free(before_clone);
-                    for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, before_clone, .none, with_checkpoint);
+                    for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = before_clone }, .none, with_checkpoint);
                     found = true;
                     break;
                 }
@@ -578,19 +600,19 @@ test "ownership: resident rollback preserves acquired replies, cleanup custody, 
         defer testing.allocator.free(checkpoint);
         if (index >= 2) {
             try testing.expect(observation == .yielded);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .resume_yield, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .resume_yield, with_checkpoint);
         } else {
             try testing.expect(observation == .requested);
             var pending = try session.pendingRequest(testing.allocator);
             defer pending.deinit();
             const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = pending.request.request_identity, .value = &.{} });
             defer testing.allocator.free(reply);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .{ .reply = reply }, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, with_checkpoint);
             // Exhaust the public reply/transaction/publication owner once.
             // Guest cleanup, reentry and clone algorithms are ordinary data
             // programs over the same native transaction and storage owners.
-            if (index == 0) try residentFailureSweep(&prepared, checkpoint, .{ .reply = reply }, true);
-            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, checkpoint, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
+            if (index == 0) try residentFailureSweep(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, true);
+            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
         }
     }
 }
@@ -679,7 +701,7 @@ test "ownership: shallow resumption preserves every resident boundary after fail
                 if (signature.mode != .shallow) continue;
                 // Fail publication after token consumption at its exact resume.
                 for ([_]bool{ false, true }) |checkpoint_mode|
-                    try residentPublicationFailure(&prepared, before, .none, checkpoint_mode);
+                    try residentPublicationFailure(&prepared, .{ .checkpoint = before }, .none, checkpoint_mode);
                 swept = true;
                 break;
             }
@@ -2722,6 +2744,110 @@ test "ownership: prepared contracts retain encoded bytes without canonicalizatio
     try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{ image, &prepared.runtime });
 }
 
+const blobRetentionCaptured: horos.data.activation.Program = .{
+    .roots = .{ .entry = 0, .result = 1, .failure = 2 },
+    .schemas = &.{ .bytes, .u64, .unit, .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 1, .capture_bound = &.{0}, .use = .reusable } } } },
+    .constants = &.{},
+    .effects = &.{},
+    .functions = &.{
+        .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1, 3, 1 } }, .result = 1 },
+        .{ .entry = 2, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1 } }, .result = 1 },
+    },
+    .blocks = &.{
+        .{ .function = 0, .instructions = &.{
+            .{ .destination = 2, .opcode = .computation, .immediate = 0, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+        }, .terminator = .{ .apply = .{ .computation = 2, .arguments = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
+        .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .blob_length, .operands = &.{0} }}, .terminator = .{ .return_value = 1 } },
+    },
+    .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
+    .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
+};
+
+fn blobRetentionProgram(comptime alias: bool) horos.data.activation.Program {
+    return .{
+        .roots = .{ .entry = 0, .result = 1, .failure = 2 },
+        .schemas = &.{ .bytes, .u64, .unit },
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{.{ .entry = 0, .inputs = if (alias) &.{ 0, 2 } else &.{0}, .layout = .{ .slots = &.{ 0, 1, 0 } }, .result = 1 }},
+        .blocks = if (alias) &.{.{ .function = 0, .instructions = &.{
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{2} },
+        }, .terminator = .{ .return_value = 1 } }} else &.{.{ .function = 0, .instructions = &.{
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .integer_bit_xor, .operands = &.{ 1, 1 } },
+        }, .terminator = .{ .return_value = 1 } }},
+    };
+}
+
+test "behavior: bounded active cuts reclaim dead large blobs and preserve direct and captured aliases" {
+    inline for (0..3) |kind| {
+        const original = comptime if (kind == 2) blobRetentionCaptured else blobRetentionProgram(kind == 1);
+        const image = try programBytes(original);
+        defer testing.allocator.free(image);
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+        defer prepared.deinit();
+        const payload = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(payload);
+        @memset(payload, 'x');
+        const arguments = try testing.allocator.alloc(u8, 2 * (payload.len + 10));
+        defer testing.allocator.free(arguments);
+        var writer: horos.data.wire.Writer = .{ .output = arguments };
+        try writer.bytes(payload);
+        if (kind == 1) try writer.bytes(payload);
+        for ([_]bool{ false, true }) |checkpoint_mode| {
+            var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
+            var resident = try Resident.start(budget.allocator(), &prepared, arguments[0..writer.position]);
+            defer releaseResident(&resident);
+            const before = budget.live;
+            var parked = try resident.drive(testing.allocator, .none, .{ .quantum = if (kind == 2) 2 else 1, .checkpoint = checkpoint_mode });
+            defer parked.deinit();
+            try testing.expect(parked.record == .progressed);
+            const after = budget.live;
+            std.debug.print("bounded blob retention: kind={d}, before={d}, after={d}, checkpoint={}\n", .{ kind, before, after, checkpoint_mode });
+            if (kind == 0) {
+                try testing.expect(after < payload.len / 4);
+                try testing.expect(before - after > payload.len - payload.len / 4);
+            } else try testing.expect(after >= payload.len);
+            const checkpoint = try resident.checkpoint(testing.allocator);
+            defer testing.allocator.free(checkpoint);
+            var restored = try Resident.restore(testing.allocator, &prepared, checkpoint);
+            defer releaseResident(&restored);
+            for ([_]*Resident{ &resident, &restored }) |subject| {
+                var result = try subject.drive(testing.allocator, .none, .{});
+                defer result.deinit();
+                try testing.expect(result.record == .completed);
+                try testing.expectEqual(@as(u64, if (kind == 0) 0 else payload.len), std.mem.readInt(u64, result.record.completed[0..8], .little));
+            }
+        }
+    }
+}
+
+test "ownership: active-cut large blob reclamation rolls back every allocation and final publication failure" {
+    const image = try programBytes(blobRetentionProgram(false));
+    defer testing.allocator.free(image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    const payload = try testing.allocator.alloc(u8, 64 << 10);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'y');
+    const arguments = try testing.allocator.alloc(u8, payload.len + 10);
+    defer testing.allocator.free(arguments);
+    var writer: horos.data.wire.Writer = .{ .output = arguments };
+    try writer.bytes(payload);
+    var session = try Session.start(testing.allocator, &prepared, arguments[0..writer.position]);
+    defer session.deinit();
+    const initial = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(initial);
+    try testing.expect(initial.len >= writer.position);
+    for ([_]bool{ false, true }) |checkpoint_mode| {
+        try residentFailureSweep(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
+        try residentPublicationFailure(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
+    }
+}
+
 fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundary: bool) !source.Module {
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);
@@ -2813,10 +2939,6 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    // The sequence is one encoded backing with one live prefix. Sweep native
-    // ownership with eight elements; retain the original 8192-element input at
-    // the final commit fence. The separate 131072-element fixture checks the
-    // resource bound, alias preservation, restore and continuation.
     for ([_]usize{ 8, 8192 }) |count| {
         var input: [65540]u8 = undefined;
         var writer: horos.data.wire.Writer = .{ .output = &input };
@@ -2824,6 +2946,10 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
         for (0..count) |i| try writer.fixed(u64, i + 1);
         var session = try Session.start(testing.allocator, &prepared, input[0..writer.position]);
         defer session.deinit();
+        const initial = try session.checkpoint(testing.allocator);
+        defer testing.allocator.free(initial);
+        try testing.expect(initial.len >= writer.position);
+        var steps: u64 = 0;
         var found = false;
         for (0..128) |_| {
             var snapshot = try guestState(&session);
@@ -2835,13 +2961,25 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
                 break;
             }
             try session.step();
+            steps += 1;
         }
         try testing.expect(found);
-        const before = try session.checkpoint(testing.allocator);
-        defer testing.allocator.free(before);
+        const fixture: ResidentFixture = .{ .checkpoint = initial, .prefix_steps = steps };
+        var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
+        var retained = try fixture.restore(budget.allocator(), &prepared);
+        defer releaseResident(&retained);
+        try testing.expect(budget.live >= writer.position);
+        const compact = try retained.checkpoint(testing.allocator);
+        defer testing.allocator.free(compact);
+        try testing.expect(compact.len < initial.len);
+        const before = budget.live;
+        var reclaimed = try retained.drive(testing.allocator, .none, .{ .quantum = 1 });
+        defer reclaimed.deinit();
+        try testing.expect(reclaimed.record == .requested);
+        if (count == 8192) try testing.expect(before - budget.live >= writer.position / 2);
         for ([_]bool{ false, true }) |with_checkpoint| {
-            if (count == 8) try residentFailureSweep(&prepared, before, .none, with_checkpoint);
-            try residentPublicationFailure(&prepared, before, .none, with_checkpoint);
+            if (count == 8) try residentFailureSweep(&prepared, fixture, .none, with_checkpoint);
+            try residentPublicationFailure(&prepared, fixture, .none, with_checkpoint);
         }
     }
 }

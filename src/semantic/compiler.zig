@@ -131,10 +131,7 @@ fn anchorMap(a: std.mem.Allocator, b: *const source.Builder, s: service.Definiti
     var anchors: std.ArrayList(artifact.Anchor) = .empty;
     const selectors = [_]Selector{
         .{ .function = s.loop, .role = .published_service, .ordinals = &.{1} },
-        .{ .function = s.loop, .role = .committed_service, .ordinals = &.{3} },
         .{ .function = s.dispatch, .role = .committed_service, .ordinals = &.{1} },
-        .{ .function = s.receive, .role = .committed_service, .ordinals = &.{1} },
-        .{ .function = s.receive, .role = .committed_service, .ordinals = &.{2} },
         .{ .function = s.publish, .role = .committed_service, .ordinals = &.{1} },
         .{ .function = s.publish, .role = .committed_service, .ordinals = &.{2} },
         .{ .function = s.commit, .role = .committed_machine, .ordinals = &.{0} },

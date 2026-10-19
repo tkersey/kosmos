@@ -57,6 +57,12 @@ instead of eagerly serializing the entire tree. Exported bytes are materialized
 only when demanded. Stable guest IDs and canonical PST3 projection remain the
 public observation.
 
+After `blob_length` retires a backing of at least 64 KiB from the current frame,
+the authored transition runs ordinary reachability collection. A surviving direct
+alias avoids that trace; captured and indirect aliases remain tracing roots.
+This releases dead large input at bounded active cuts as well as public suspensions.
+Canonical checkpoint size is measured separately from physical retained storage.
+
 Reconstruction traverses the table forest in chronological order. Node conversion
 is fused with that traversal, and storage validation walks one ordered sequence;
 neither repeatedly looks up and rebuilds every numeric ID. Table shape, frame and
@@ -101,6 +107,10 @@ and canonical states and counts removed packing work on dynamic inputs.
 work. A suspended pump is not a guest outcome. Only the actual published service
 continuation exposes a guest cut. Recovery anchors retained during an unfinished
 operation are validated but are not reported as its completed guest result.
+The published service continuation carries one committed state. The preceding
+command input remains available during the transition and publication handoff,
+then retires when the new state becomes the service continuation. Native
+publication transactions retain their own rollback custody until commit.
 The service returns its retained state when finishing a terminal guest. This keeps
 the recovery parameter live through its last ordinary base return, including
 bounded cuts after the terminal-status check. The driver reports `closed` only
