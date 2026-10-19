@@ -13,6 +13,8 @@ try {
   const declared = JSON.parse(await readFile(join(runtime, "package.json"), "utf8")).files;
   assert.deepEqual(packed.files.map(file => file.path).sort(), [...declared].sort());
   assert.ok(packed.files.some(file => file.path === "docs/verification.md"));
+  for (const path of ["docs/executable-semantics.md", "docs/semantic-economy.md"])
+    assert.ok(packed.files.some(file => file.path === path));
   const retired = ["process_v2", "kernel-v2", "runtime-prepare.mjs", "runtime-delivery.mjs", "toolchain.mjs"];
   assert.ok(packed.files.every(file => retired.every(name => !file.path.includes(name))));
   const directory = join(scratch, "extracted");

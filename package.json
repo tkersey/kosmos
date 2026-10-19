@@ -22,6 +22,8 @@
     "docs/kernel-abi.md",
     "docs/runtime-bundles.md",
     "docs/verification.md",
+    "docs/executable-semantics.md",
+    "docs/semantic-economy.md",
     "src/embedding/index.mjs",
     "src/embedding/kernel.mjs",
     "src/embedding/codec.mjs",

@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const profile = std.json.parseFromSliceLeaky(Profile, b.allocator, @embedFile("build-profile.json"), .{}) catch @panic("invalid runtime profile");
     // Declare options before a cold lazy dependency fetch can return.
-    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse (b.dep_prefix.len != 0);
+    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse true;
     const session_group = b.option(enum { behavior, ownership, regressions }, "session-group", "Select independent session qualification cases (default: all)");
     const source_group = b.option(enum { first, second }, "source-group", "Select an exhaustive half of the source fixtures (default: all)");
     const economy_workload = b.option([]const u8, "economy-workload", "Select one semantic economy workload");

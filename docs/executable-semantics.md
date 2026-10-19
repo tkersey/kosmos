@@ -171,8 +171,8 @@ downstream consumers. `src/semantic_packaged.zig` checks its exact source,
 compiler-package, Zig-version and content bindings before emitting those bytes.
 This avoids recompiling the unchanged host generator for each consumer. The
 fingerprints select previously checked content; they are not translation proof.
-Kosmos's ordinary build still constructs the core from source, and
-`check-semantic-driver` compares the retained bytes with that freshly compiled,
+Ordinary runtime builds use the retained core by default.
+`check-semantic-driver` compares the retained bytes with a freshly compiled,
 admitted and independently validated result.
 
 After changing the semantic source, run `zig build semantic-artifact
