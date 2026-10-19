@@ -9,7 +9,37 @@ pub fn main(init: std.process.Init) !void {
     const mode = arguments.next() orelse return error.MissingMode;
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
-    if (std.mem.eql(u8, mode, "invoke")) {
+    if (std.mem.eql(u8, mode, "prepared-invoke-stream")) {
+        try preparedStream(init.gpa, init.io, &output.interface);
+    } else if (std.mem.eql(u8, mode, "specialized-invoke")) {
+        const data = horos.data;
+        var buffer: [4096]u8 = undefined;
+        var input = std.Io.File.stdin().reader(init.io, &buffer);
+        const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);
+        defer init.gpa.free(bytes);
+        var command = try data.invocation.decode(data.invocation.Input, init.gpa, bytes);
+        defer command.deinit();
+        const guest = try data.program_image.Admitted.decode(init.gpa, command.value.image);
+        defer guest.deinit();
+        const artifact = try runtime.RuntimeCompiler.compile(init.gpa, .{ .guest = guest, .horos_package = "qualified-kernel-fixture" });
+        defer init.gpa.free(artifact);
+        var selected = try runtime.RuntimeArtifact.init(init.gpa, artifact, runtime.RuntimeCapsule.reference(artifact).digest);
+        defer selected.deinit();
+        try runtime.RuntimeCompiler.validate(init.gpa, &selected);
+        var prepared = try runtime.Prepared.initWithRuntime(init.gpa, command.value.image, &selected);
+        defer prepared.deinit();
+        var session = switch (command.value.instance) {
+            .initial_args => |args| try runtime.Session.start(init.gpa, &prepared, args),
+            .state => |state| try runtime.Session.restore(init.gpa, &prepared, state),
+        };
+        defer session.deinit();
+        _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);
+        var outcome = try runtime.invocation.finish(init.gpa, &session, true);
+        defer outcome.deinit();
+        const result = try data.invocation.encodeOwned(data.invocation.Outcome, init.gpa, outcome.record);
+        defer init.gpa.free(result);
+        try output.interface.writeAll(result);
+    } else if (std.mem.eql(u8, mode, "invoke")) {
         var buffer: [4096]u8 = undefined;
         var input = std.Io.File.stdin().reader(init.io, &buffer);
         const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);
@@ -67,6 +97,77 @@ pub fn main(init: std.process.Init) !void {
         try output.interface.writeAll(bytes);
     } else return error.InvalidMode;
     try output.interface.flush();
+}
+
+// Source agreement restores a fresh session at every cut. Share only admitted
+// immutable code across those cuts; every command and PST3 still crosses its
+// real public admission boundary. The ordinary `invoke` mode qualifies the
+// combined fresh entry point independently in kernel.mjs.
+const PreparedPeer = struct {
+    allocator: std.mem.Allocator,
+    image: []u8 = &.{},
+    prepared: ?runtime.Prepared = null,
+
+    fn deinit(self: *PreparedPeer) void {
+        if (self.prepared) |*prepared| prepared.deinit();
+        self.allocator.free(self.image);
+    }
+
+    fn invoke(self: *PreparedPeer, bytes: []const u8) ![]u8 {
+        const data = horos.data;
+        const a = self.allocator;
+        var command = try data.invocation.decode(data.invocation.Input, a, bytes);
+        defer command.deinit();
+        try data.invocation.validate(data.invocation.Input, a, command.value);
+        if (self.prepared == null or !std.mem.eql(u8, self.image, command.value.image)) {
+            var prepared = try runtime.Prepared.init(a, command.value.image);
+            errdefer prepared.deinit();
+            const image = try a.dupe(u8, command.value.image);
+            if (self.prepared) |*previous| previous.deinit();
+            a.free(self.image);
+            self.image = image;
+            self.prepared = prepared;
+        }
+        var session = switch (command.value.instance) {
+            .initial_args => |args| try runtime.Session.start(a, &self.prepared.?, args),
+            .state => |state| try runtime.Session.restore(a, &self.prepared.?, state),
+        };
+        defer session.deinit();
+        _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);
+        var result = try runtime.invocation.finish(a, &session, true);
+        defer result.deinit();
+        return data.invocation.encodeOwned(data.invocation.Outcome, a, result.record);
+    }
+};
+
+fn preparedStream(a: std.mem.Allocator, io: std.Io, output: *std.Io.Writer) !void {
+    var peer: PreparedPeer = .{ .allocator = a };
+    defer peer.deinit();
+    var buffer: [4096]u8 = undefined;
+    var input = std.Io.File.stdin().reader(io, &buffer);
+    while (true) {
+        const length = input.interface.takeInt(u32, .little) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        if (length > 64 << 20) return error.OversizedTestCommand;
+        const command = try a.alloc(u8, length);
+        defer a.free(command);
+        try input.interface.readSliceAll(command);
+        const result = peer.invoke(command) catch |err| {
+            const message = @errorName(err);
+            try output.writeInt(u32, @intCast(message.len + 1), .little);
+            try output.writeByte(1);
+            try output.writeAll(message);
+            try output.flush();
+            continue;
+        };
+        defer a.free(result);
+        try output.writeInt(u32, @intCast(result.len + 1), .little);
+        try output.writeByte(0);
+        try output.writeAll(result);
+        try output.flush();
+    }
 }
 
 fn largeRequest(b: *horos.source.Builder) !horos.source.Module {

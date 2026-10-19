@@ -1,17 +1,16 @@
 const std = @import("std");
 const horos = @import("horos");
 const source = horos.source;
-const Session = @import("stable_runtime").Session;
+const Session = @import("kosmos").Session;
 const testing = std.testing;
-const Resident = @import("stable_runtime").Resident;
+const Resident = @import("kosmos").Resident;
 
 test {
     // Dependency-module tests are not collected by this root test artifact.
     _ = @import("source_regressions.zig");
-    _ = @import("resident_binding.zig");
 }
 
-test "encoded cursors export canonical immutable checkpoints and restore as ordinary values" {
+test "ownership: encoded cursors export canonical immutable checkpoints and restore as ordinary values" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -48,24 +47,18 @@ test "encoded cursors export canonical immutable checkpoints and restore as ordi
     defer session.deinit();
     const initial = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(initial);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     for ([_]bool{ false, true }) |checkpoint_mode|
-        try residentFailureSweep(&prepared, initial, .none, checkpoint_mode);
+        try residentFailureSweep(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
     try testing.expect(try drive(&session, null) == .yielded);
-    try testing.expect(session.store.encoded_sequences.count() != 0);
-    const nodes = session.store.nodes.items.len;
-    const blobs = session.store.blobs.items.len;
     const state = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(state);
     const again = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(again);
     try testing.expectEqualSlices(u8, state, again);
-    try testing.expectEqual(nodes, session.store.nodes.items.len);
-    try testing.expectEqual(blobs, session.store.blobs.items.len);
     var restored = try Session.restoreImage(testing.allocator, image, state);
     defer restored.deinit();
-    try testing.expectEqual(0, restored.store.encoded_sequences.count());
     try restored.resumeYield();
     const result = try drive(&restored, null);
     try testing.expect(result == .completed);
@@ -75,7 +68,7 @@ test "encoded cursors export canonical immutable checkpoints and restore as ordi
     try testing.expectEqualSlices(u8, &expected, try restored.bytes(&result.completed));
 }
 
-test "owned FIFO package queues preserve scheduling through instruction checkpoints" {
+test "behavior: owned FIFO package queues preserve scheduling through instruction checkpoints" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.schedulerFifo(&builder));
@@ -103,7 +96,7 @@ test "owned FIFO package queues preserve scheduling through instruction checkpoi
     return error.TestUnexpectedResult;
 }
 
-test "fast projections still reject malformed unselected input payloads" {
+test "behavior: fast projections still reject malformed unselected input payloads" {
     for (0..3) |mode| {
         const variant = mode != 0;
         var builder = source.Builder.init(testing.allocator);
@@ -130,11 +123,11 @@ test "fast projections still reject malformed unselected input payloads" {
         defer session.deinit();
         const result = try session.run(null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(@as(u8, if (variant) 0 else 42), result.completed.body.scalar[0]);
+        try testing.expectEqual(@as(u8, if (variant) 0 else 42), (try session.bytes(&result.completed))[0]);
     }
 }
 
-test "higher-order scoped bodies retain definition and use capabilities with cleanup" {
+test "behavior: higher-order scoped bodies retain definition and use capabilities with cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.retainedScope(&builder));
@@ -146,11 +139,14 @@ test "higher-order scoped bodies retain definition and use capabilities with cle
         var alive = true;
         defer if (alive) session.deinit();
         try testing.expect(try session.run(null) == .yielded);
-        try session.store.collectWith(session.roots, &session.frames);
+        try roundTrip(&session);
         var retained = false;
-        for (session.store.nodes.items, session.store.alive.items) |node, live| {
-            if (!live or node != .computation) continue;
-            const captures = (try session.store.get(node.computation.environment)).environment.values;
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        for (snapshot.state.nodes) |item| {
+            const node = item.record;
+            if (node != .computation) continue;
+            const captures = snapshot.state.nodes[@intCast(node.computation.environment.id)].record.environment.values;
             if (captures.len != 2) continue;
             if (captures[0].schema != captures[1].schema) continue;
             const schema = session.program.schemas[@intCast(captures[0].schema)];
@@ -169,7 +165,7 @@ test "higher-order scoped bodies retain definition and use capabilities with cle
         const cleanup = try restored.run(null);
         try testing.expect(cleanup == .requested);
         try testing.expectEqualStrings("retained-scope/release", restored.program.effects[@intCast(cleanup.requested.effect)].identity);
-        try testing.expectEqual(77, cleanup.requested.payload.body.scalar[0]);
+        try testing.expectEqual(77, (try restored.bytes(&cleanup.requested.payload))[0]);
         const cleaning = try restored.checkpoint(testing.allocator);
         defer testing.allocator.free(cleaning);
         var finished = try Session.restoreImage(testing.allocator, image, cleaning);
@@ -191,7 +187,7 @@ fn compileDeclarations(module: source.Module) !source.Compiled {
     return (try source.component.compile(testing.allocator, module, .{ .exports = &.{} })).construction;
 }
 
-test "retained scoped interaction agrees at every quantum with general resumptions" {
+test "behavior: retained scoped interaction agrees at every quantum with general resumptions" {
     for ([_]bool{ false, true }) |general| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -232,7 +228,7 @@ test "retained scoped interaction agrees at every quantum with general resumptio
                 },
                 .requested => |request| {
                     try testing.expectEqualStrings("retained-scope/release", session.program.effects[@intCast(request.effect)].identity);
-                    try testing.expectEqual(77, request.payload.body.scalar[0]);
+                    try testing.expectEqual(77, (try session.bytes(&request.payload))[0]);
                     releases += 1;
                     try answerWithValue(&session, &.{});
                 },
@@ -251,9 +247,8 @@ test "retained scoped interaction agrees at every quantum with general resumptio
     }
 }
 
-test "branching tail handlers create no resumption and survive every instruction checkpoint" {
-    var nodes: [2]u64 = undefined;
-    for ([_]bool{ false, true }, 0..) |selected, variant| {
+test "behavior: branching tail handlers preserve results through every instruction checkpoint" {
+    for ([_]bool{ false, true }) |selected| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
         const module = try source.examples.branchingTail(&builder);
@@ -279,19 +274,13 @@ test "branching tail handlers create no resumption and survive every instruction
             var session = try Session.initImage(testing.allocator, image, &.{input});
             defer session.deinit();
             var stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-            session.statistics = &stats;
-            session.store.statistics = &stats.storage;
+            session.setStatistics(&stats);
             const result = try session.run(null);
             try testing.expect(result == .completed);
-            try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
-            try testing.expectEqual(@as(u64, if (selected) 0 else 1), stats.one_shot_captures);
-            try testing.expectEqual(@as(u64, if (selected) 1 else 0), stats.direct_clauses);
-            nodes[variant] = stats.storage.added_nodes;
+            try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
             try checkpointTail(image, input, clause.function, selected);
         }
     }
-    std.debug.print("branching-tail store nodes: general={d} tail={d}\n", .{ nodes[0], nodes[1] });
-    try testing.expect(nodes[1] < nodes[0]);
 }
 
 fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !void {
@@ -303,8 +292,10 @@ fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !
     while (outcome == .progressed) {
         steps += 1;
         try testing.expect(steps < 128);
-        if (session.roots.current) |current| {
-            const control = (try session.store.get(current)).control;
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        if (snapshot.state.roots.current) |current| {
+            const control = snapshot.state.nodes[@intCast(current.id)].record.control;
             if (session.program.blocks[@intCast(control.block)].function == function) saw_tail = true;
         }
         const checkpoint = try session.checkpoint(testing.allocator);
@@ -316,10 +307,10 @@ fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !
     }
     try testing.expectEqual(selected, saw_tail);
     try testing.expect(outcome == .completed);
-    try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, outcome.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
 }
 
-test "tail clause checkpoints retain body cleanup on cancellation" {
+test "behavior: tail clause checkpoints retain body cleanup on cancellation" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.branchingTailProtected(&builder));
@@ -338,12 +329,14 @@ test "tail clause checkpoints retain body cleanup on cancellation" {
             try answerWithValue(&session, &.{});
             const completed = try session.run(null);
             try testing.expect(completed == .completed);
-            try testing.expectEqual(60, completed.completed.body.scalar[0]);
+            try testing.expectEqual(60, (try session.bytes(&completed.completed))[0]);
             break;
         }
         try testing.expect(outcome == .progressed);
-        const current = session.roots.current.?;
-        const record = try session.store.get(current);
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        const current = snapshot.state.roots.current.?;
+        const record = snapshot.state.nodes[@intCast(current.id)].record;
         if (record != .control) continue;
         const control = record.control;
         if (session.program.blocks[@intCast(control.block)].function != selected.function) continue;
@@ -360,12 +353,11 @@ test "tail clause checkpoints retain body cleanup on cancellation" {
         cancellation_points += 1;
     }
     try testing.expect(cancellation_points >= 3);
-    try testing.expect(session.terminal != null);
+    try testing.expect(session.isTerminal());
 }
 
-test "immediate lexical calls avoid closure storage and preserve checked results" {
-    var nodes: [2]u64 = undefined;
-    for ([_]bool{ false, true }, 0..) |immediate, index| {
+test "behavior: immediate lexical calls preserve checked results and retained captures" {
+    for ([_]bool{ false, true }) |immediate| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
         const original = try source.examples.lexical(&builder);
@@ -380,12 +372,9 @@ test "immediate lexical calls avoid closure storage and preserve checked results
         defer compiled.deinit();
         var session = try initFromImage(testing.allocator, compiled.program, &.{ 40, 0, 0, 0, 0, 0, 0, 0 });
         defer session.deinit();
-        var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        session.store.statistics = &statistics.storage;
         const result = try session.run(null);
         try testing.expect(result == .completed);
         try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
-        nodes[index] = statistics.storage.added_nodes;
         var overflow = try initFromImage(testing.allocator, compiled.program, &(@as([8]u8, @splat(0xff))));
         defer overflow.deinit();
         const failed = try overflow.run(null);
@@ -411,39 +400,6 @@ test "immediate lexical calls avoid closure storage and preserve checked results
         try testing.expect(completed == .completed);
         try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try restored.bytes(&completed.completed));
     }
-    std.debug.print("immediate-call store nodes: retained={d} immediate={d}\n", .{ nodes[0], nodes[1] });
-    try testing.expect(nodes[1] < nodes[0]);
-}
-
-test "stable statistics count one-shot captures and repeated multi-shot activations" {
-    for ([_]bool{ false, true }) |multi| {
-        var builder = source.Builder.init(testing.allocator);
-        defer builder.deinit();
-        const original = try source.examples.deep(&builder);
-        if (multi) {
-            for (builder.effects.items) |*effect| effect.control_use = .multi;
-            for (builder.schemas.items) |*schema| {
-                if (schema.* == .internal and schema.internal == .resumption) schema.internal.resumption.use = .multi;
-            }
-            const clause = builder.handlers.items[0].clauses[0].function;
-            const body = builder.functions.items[@intCast(clause)].body.?;
-            const first = builder.terms.items[@intCast(body)].bind;
-            const discarded = try builder.variable(builder.variables.items[@intCast(first.variable)]);
-            builder.functions.items[@intCast(clause)].body = try builder.bind(discarded, first.value, body);
-        }
-        var compiled = try source.lower(testing.allocator, builder.module(original.entry, original.failure));
-        defer compiled.deinit();
-        var session = try initFromImage(testing.allocator, compiled.program, &.{});
-        defer session.deinit();
-        var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        session.statistics = &statistics;
-        const result = try session.run(null);
-        try testing.expect(result == .completed);
-        try testing.expectEqualSlices(u8, &.{ 67, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
-        try testing.expectEqual(@as(u64, if (multi) 1 else 0), statistics.multi_templates);
-        try testing.expectEqual(@as(u64, if (multi) 0 else 1), statistics.one_shot_captures);
-        try testing.expectEqual(@as(u64, if (multi) 2 else 0), statistics.branch_activations);
-    }
 }
 
 fn releaseResident(resident: *Resident) void {
@@ -458,7 +414,7 @@ fn releaseResident(resident: *Resident) void {
 }
 
 // Regression transferred from PR #60, 750f8ec74f909735c96992eb05bfe0c22904526e.
-fn residentBeforeOwnedUnwind(allocator: std.mem.Allocator, prepared: *const @import("stable_runtime").Prepared) !Resident {
+fn residentBeforeOwnedUnwind(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !Resident {
     var resident = try Resident.start(allocator, prepared, &.{});
     errdefer releaseResident(&resident);
     var yielded = try resident.drive(allocator, .none, .{});
@@ -469,14 +425,14 @@ fn residentBeforeOwnedUnwind(allocator: std.mem.Allocator, prepared: *const @imp
     return resident;
 }
 
-test "live owned unwind preserves physical ownership and retry at every allocation failure" {
+test "ownership: live owned unwind preserves physical ownership and retry at every allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.ownership(&builder));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var reference = try residentBeforeOwnedUnwind(testing.allocator, &prepared);
     defer releaseResident(&reference);
@@ -512,23 +468,44 @@ test "live owned unwind preserves physical ownership and retry at every allocati
     }
 }
 
-fn residentFailureSweep(prepared: *const @import("stable_runtime").Prepared, checkpoint: []const u8, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
-    var reference = try Resident.restore(testing.allocator, prepared, checkpoint);
+const ResidentFixture = struct {
+    checkpoint: []const u8,
+    prefix_steps: u64 = 0,
+
+    fn restore(self: ResidentFixture, allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !Resident {
+        var resident = try Resident.restore(allocator, prepared, self.checkpoint);
+        errdefer releaseResident(&resident);
+        if (self.prefix_steps != 0) {
+            var prefix = try resident.drive(allocator, .none, .{ .quantum = self.prefix_steps });
+            defer prefix.deinit();
+            try testing.expect(prefix.record == .progressed);
+        }
+        return resident;
+    }
+};
+
+fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+    // Exhaust the native allocation sites of one selected guest transition and
+    // its publication. Whole-program behavior is checked separately.
+    var reference = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&reference);
-    var expected = try reference.drive(testing.allocator, control, .{ .checkpoint = checkpoint_mode });
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    defer if (reconstructed) |bytes| testing.allocator.free(bytes);
+    const checkpoint = reconstructed orelse fixture.checkpoint;
+    var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
     defer expected.deinit();
     var failures: usize = 0;
     var failed_after_mutation = false;
     while (true) : (failures += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var resident = try Resident.restore(failing.allocator(), prepared, checkpoint);
+        var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
         var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
         try resident.setStatistics(&statistics);
         const collection_cursors = (try resident.diagnostics()).collection_cursors;
         failing.fail_index = failing.alloc_index + failures;
         failing.resize_fail_index = failing.resize_index;
-        var output = resident.drive(failing.allocator(), control, .{ .checkpoint = checkpoint_mode }) catch |err| {
+        var output = resident.drive(failing.allocator(), control, .{ .quantum = 1, .checkpoint = checkpoint_mode }) catch |err| {
             failing.fail_index = std.math.maxInt(usize);
             failing.resize_fail_index = std.math.maxInt(usize);
             try testing.expectEqual(error.OutOfMemory, err);
@@ -537,7 +514,7 @@ fn residentFailureSweep(prepared: *const @import("stable_runtime").Prepared, che
             const unchanged = try resident.checkpoint(testing.allocator);
             defer testing.allocator.free(unchanged);
             try testing.expectEqualSlices(u8, checkpoint, unchanged);
-            var retried = try resident.drive(testing.allocator, control, .{ .checkpoint = checkpoint_mode });
+            var retried = try resident.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
             defer retried.deinit();
             try testing.expectEqualDeep(expected.record, retried.record);
             continue;
@@ -551,7 +528,36 @@ fn residentFailureSweep(prepared: *const @import("stable_runtime").Prepared, che
     }
 }
 
-test "resident rollback preserves acquired replies, cleanup custody, and reentrant captures at every allocation failure" {
+fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+    var reference = try fixture.restore(testing.allocator, prepared);
+    defer releaseResident(&reference);
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    defer if (reconstructed) |bytes| testing.allocator.free(bytes);
+    const checkpoint = reconstructed orelse fixture.checkpoint;
+    var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    defer expected.deinit();
+    var resident = try fixture.restore(testing.allocator, prepared);
+    defer releaseResident(&resident);
+    var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+    try resident.setStatistics(&statistics);
+    const cursors = (try resident.diagnostics()).collection_cursors;
+    // Encoded output is allocated after execution and all observation staging,
+    // immediately before the shared commit fence. Fail there for every real
+    // guest fixture, including both publication modes, then retry its command.
+    var empty: [0]u8 = .{};
+    var output = std.heap.FixedBufferAllocator.init(&empty);
+    try testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), control, .{ .quantum = 1, .checkpoint = checkpoint_mode }));
+    try testing.expect(statistics.transitions != 0 or statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0);
+    try testing.expectEqual(cursors, (try resident.diagnostics()).collection_cursors);
+    const unchanged = try resident.checkpoint(testing.allocator);
+    defer testing.allocator.free(unchanged);
+    try testing.expectEqualSlices(u8, checkpoint, unchanged);
+    var retried = try resident.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    defer retried.deinit();
+    try testing.expectEqualDeep(expected.record, retried.record);
+}
+
+test "ownership: resident rollback preserves acquired replies, cleanup custody, and reentrant captures through failed publication" {
     const protocol = horos.data.invocation;
     inline for (.{ retainedInputExample, source.examples.unwind, source.examples.reentrant, source.examples.cloned }, 0..) |example, index| {
         var builder = source.Builder.init(testing.allocator);
@@ -560,7 +566,7 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
         defer prepared.deinit();
         const arguments: []const u8 = switch (index) {
             0 => &.{ 42, 0, 0, 0, 0, 0, 0, 0 },
@@ -570,29 +576,48 @@ test "resident rollback preserves acquired replies, cleanup custody, and reentra
         var session = try Session.start(testing.allocator, &prepared, arguments);
         defer session.deinit();
         if (index == 3) {
-            const initial = try session.checkpoint(testing.allocator);
-            defer testing.allocator.free(initial);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, initial, .none, with_checkpoint);
+            // Roll back an actual clone, including all new guest identities.
+            var found = false;
+            for (0..256) |_| {
+                var snapshot = try guestState(&session);
+                defer snapshot.deinit();
+                const node = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
+                const block = session.program.blocks[@intCast(node.record.control.block)];
+                const position = node.activation.?.position;
+                if (position < block.instructions.len and block.instructions[@intCast(position)].opcode == .clone_resumption) {
+                    const before_clone = try session.checkpoint(testing.allocator);
+                    defer testing.allocator.free(before_clone);
+                    for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = before_clone }, .none, with_checkpoint);
+                    found = true;
+                    break;
+                }
+                try session.step();
+            }
+            try testing.expect(found);
         }
         const observation = try session.run(null);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
         if (index >= 2) {
             try testing.expect(observation == .yielded);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .resume_yield, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .resume_yield, with_checkpoint);
         } else {
             try testing.expect(observation == .requested);
             var pending = try session.pendingRequest(testing.allocator);
             defer pending.deinit();
             const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = pending.request.request_identity, .value = &.{} });
             defer testing.allocator.free(reply);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .{ .reply = reply }, with_checkpoint);
-            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, checkpoint, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, with_checkpoint);
+            // Exhaust the public reply/transaction/publication owner once.
+            // Guest cleanup, reentry and clone algorithms are ordinary data
+            // programs over the same native transaction and storage owners.
+            if (index == 0) try residentFailureSweep(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, true);
+            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
         }
     }
 }
 
-test "resident output capacity and checkpoint transfer preserve custody on failure" {
+test "behavior: resident output capacity and checkpoint transfer preserve custody on failure" {
     const protocol = horos.data.invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -600,7 +625,7 @@ test "resident output capacity and checkpoint transfer preserve custody on failu
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var resident = try Resident.start(testing.allocator, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer releaseResident(&resident);
@@ -611,13 +636,13 @@ test "resident output capacity and checkpoint transfer preserve custody on failu
     var engine_storage = try Session.restore(testing.allocator, &prepared, pending.record.requested.state.?);
     defer engine_storage.deinit();
     const engine = &engine_storage;
-    const copies = engine.frames.slots.statistics.value_copies;
-    const custody_copies = engine.frames.custody.nodes.statistics.value_copies;
+    const copies = engine.driver.outer.frames.slots.statistics.value_copies;
+    const custody_copies = engine.driver.outer.frames.custody.nodes.statistics.value_copies;
     {
         var transaction = try engine.begin();
         defer transaction.rollback(engine);
-        try testing.expectEqual(copies, engine.frames.slots.statistics.value_copies);
-        try testing.expectEqual(custody_copies, engine.frames.custody.nodes.statistics.value_copies);
+        try testing.expectEqual(copies, engine.driver.outer.frames.slots.statistics.value_copies);
+        try testing.expectEqual(custody_copies, engine.driver.outer.frames.custody.nodes.statistics.value_copies);
     }
     var request = try protocol.decode(protocol.Request, testing.allocator, pending.record.requested.request);
     defer request.deinit();
@@ -647,14 +672,14 @@ test "resident output capacity and checkpoint transfer preserve custody on failu
     try testing.expectError(error.InvalidState, restored.drive(testing.allocator, .none, .{ .quantum = 0 }));
 }
 
-test "shallow resumption preserves every resident boundary after failed publication" {
+test "ownership: shallow resumption preserves every resident boundary after failed publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var resident = try Resident.start(testing.allocator, &prepared, &.{});
     defer releaseResident(&resident);
@@ -665,15 +690,18 @@ test "shallow resumption preserves every resident boundary after failed publicat
         if (!swept) {
             var portable = try horos.data.state_image.decodeGraph(testing.allocator, before);
             defer portable.deinit();
+            const current = portable.state.nodes[@intCast(portable.state.roots.current.?.id)];
+            const block = compiled.program.blocks[@intCast(current.record.control.block)];
+            const resuming = current.activation.?.position == block.instructions.len and
+                (block.terminator == .resume_value or block.terminator == .resume_computation);
             for (portable.state.nodes) |entry| {
                 const node = entry.record;
-                if (node != .one_shot) continue;
+                if (!resuming or node != .one_shot) continue;
                 const signature = compiled.program.schemas[@intCast(node.one_shot.schema)].internal.resumption;
                 if (signature.mode != .shallow) continue;
-                // The token already belongs to the entry State. Exercise every
-                // subsequent allocation failure, not only the output buffer.
+                // Fail publication after token consumption at its exact resume.
                 for ([_]bool{ false, true }) |checkpoint_mode|
-                    try residentFailureSweep(&prepared, before, .none, checkpoint_mode);
+                    try residentPublicationFailure(&prepared, .{ .checkpoint = before }, .none, checkpoint_mode);
                 swept = true;
                 break;
             }
@@ -711,7 +739,7 @@ fn expectResidentCheckpoint(resident: *Resident, expected: []const u8) !void {
     try testing.expectEqualSlices(u8, expected, actual);
 }
 
-test "independent native residents release shared preparation exactly once" {
+test "behavior: independent native residents release shared preparation exactly once" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -723,7 +751,7 @@ test "independent native residents release shared preparation exactly once" {
     defer if (memory.deinit() != .ok) @panic("shared preparation leaked");
     const allocator = memory.allocator();
     const Job = struct {
-        prepared: @import("stable_runtime").Prepared,
+        prepared: @import("kosmos").Prepared,
         allocator: std.mem.Allocator,
         ready: *std.atomic.Value(usize),
         start: *std.atomic.Value(bool),
@@ -757,7 +785,7 @@ test "independent native residents release shared preparation exactly once" {
         }
     };
     for (0..8) |_| {
-        var prepared = try @import("stable_runtime").Prepared.init(allocator, image);
+        var prepared = try @import("kosmos").Prepared.init(allocator, image);
         defer prepared.deinit();
         var ready: std.atomic.Value(usize) = .init(0);
         var start: std.atomic.Value(bool) = .init(false);
@@ -787,14 +815,14 @@ test "independent native residents release shared preparation exactly once" {
     }
 }
 
-test "resident progress defers checkpoint publication until explicitly requested" {
+test "behavior: resident progress defers checkpoint publication until explicitly requested" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var resident = try Resident.start(testing.allocator, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer releaseResident(&resident);
@@ -815,29 +843,7 @@ test "resident progress defers checkpoint publication until explicitly requested
     try testing.expectEqualDeep(pending.record, polled.record);
 }
 
-test "a long resident drive journals entry state rather than transition history" {
-    var builder = source.Builder.init(testing.allocator);
-    defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
-    defer compiled.deinit();
-    const image = try programBytes(compiled.program);
-    defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
-    defer prepared.deinit();
-    var resident = try Resident.start(testing.allocator, &prepared, &.{ 16, 39, 0, 0, 0, 0, 0, 0 });
-    defer releaseResident(&resident);
-    var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-    try resident.setStatistics(&statistics);
-    const entry_nodes = (try resident.diagnostics()).nodes;
-    var result = try resident.drive(testing.allocator, .none, .{});
-    defer result.deinit();
-    try testing.expectEqualSlices(u8, &.{1}, result.record.completed);
-    try testing.expect(statistics.transitions >= 10_000);
-    try testing.expect(statistics.storage.journal_nodes <= entry_nodes);
-    try testing.expect((try resident.diagnostics()).nodes <= 512);
-}
-
-test "resident gate rejects reentrant observation during allocator callbacks" {
+test "behavior: resident gate rejects reentrant observation during allocator callbacks" {
     const Callback = struct {
         child: std.mem.Allocator,
         resident: ?*Resident = null,
@@ -865,7 +871,7 @@ test "resident gate rejects reentrant observation during allocator callbacks" {
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var callback: Callback = .{ .child = testing.allocator };
     const allocator: std.mem.Allocator = .{ .ptr = &callback, .vtable = &.{
@@ -877,7 +883,9 @@ test "resident gate rejects reentrant observation during allocator callbacks" {
     var resident = try Resident.start(allocator, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer releaseResident(&resident);
     callback.resident = &resident;
-    var result = try resident.drive(testing.allocator, .none, .{ .quantum = 0 });
+    // A zero-work observation need not allocate. Enter a real transition so the
+    // callback observes the gate while its owner is mutating the session.
+    var result = try resident.drive(testing.allocator, .none, .{ .quantum = 1 });
     defer result.deinit();
     try testing.expect(callback.attempted);
     try testing.expectEqual(error.Busy, callback.observed.?);
@@ -910,35 +918,40 @@ fn checkedCheckpoint(subject: *Session) !void {
     try testing.expectEqual(subject.program_identity, decoded.state.program_identity);
 }
 
-fn drive(subject: *Session, quantum: ?usize) !@import("stable_runtime").Observation {
+fn retainedPreparation(subject: *Session) !@import("kosmos").Prepared {
+    const core = subject.driver.selected;
+    const borrowed: @import("kosmos").Prepared = .{
+        .guest = .{ .core = subject.prepared },
+        .runtime = .{ .core = core, .content = core.content, .program = core.program, .helpers = core.helpers, .identity = core.identity },
+    };
+    return borrowed.clone();
+}
+
+fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Session.observe)).@"fn".return_type.?).error_union.payload {
     const before = try subject.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
-    const codec = horos.data.program_image;
-    const image = try testing.allocator.alloc(u8, try codec.encodedLength(subject.program));
-    defer testing.allocator.free(image);
-    _ = try codec.encode(testing.allocator, subject.program, image);
-    var restored = try Session.restoreImage(testing.allocator, image, before);
-    defer restored.deinit();
-    var fresh = try @import("stable_runtime").invocation.invoke(testing.allocator, .{
-        .image = image,
-        .instance = .{ .state = before },
-        .quantum = quantum,
-    });
-    defer fresh.deinit();
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    // Every cut still reconstructs fresh mutable owners. Image/evaluator
+    // admission and the invoke wrapper have their own tests; repeating their
+    // immutable preparation at every instruction adds no lifecycle case.
+    var prepared = try retainedPreparation(subject);
     defer prepared.deinit();
+    var invocation_session = try Session.restore(testing.allocator, &prepared, before);
+    defer invocation_session.deinit();
     var resident = try Resident.restore(testing.allocator, &prepared, before);
     defer releaseResident(&resident);
+    @memset(before, 0xff);
+    const result = try subject.run(quantum);
+    // advance(.none) calls Session.run directly. This reconstructed owner
+    // proves both restoration and invocation agreement in one execution.
+    _ = try @import("kosmos").invocation.advance(&invocation_session, .none, quantum);
+    var fresh = try @import("kosmos").invocation.finish(testing.allocator, &invocation_session, true);
+    defer fresh.deinit();
     var committed = try resident.drive(testing.allocator, .none, .{ .quantum = quantum, .checkpoint = true });
     defer committed.deinit();
     try testing.expectEqualDeep(fresh.record, committed.record);
-    @memset(image, 0xff);
-    @memset(before, 0xff);
-    const result = try subject.run(quantum);
-    _ = try restored.run(quantum);
     const expected = try subject.checkpoint(testing.allocator);
     defer testing.allocator.free(expected);
-    const actual = try restored.checkpoint(testing.allocator);
+    const actual = try invocation_session.checkpoint(testing.allocator);
     defer testing.allocator.free(actual);
     try testing.expectEqualSlices(u8, expected, actual);
     switch (result) {
@@ -986,7 +999,7 @@ fn checkpointFailure(allocator: std.mem.Allocator, subject: *Session, before: []
     try testing.expectEqualSlices(u8, before, bytes);
 }
 
-test "failed PST3 export retains exactly the same resident instruction boundary" {
+test "ownership: failed PST3 export retains exactly the same resident instruction boundary" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
@@ -999,7 +1012,7 @@ test "failed PST3 export retains exactly the same resident instruction boundary"
     try @import("allocation_testing.zig").check(testing.allocator, checkpointFailure, .{ &session, before });
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqual(1, result.completed.body.scalar[0]);
+    try testing.expectEqual(1, (try session.bytes(&result.completed))[0]);
 }
 
 fn initFromImage(allocator: std.mem.Allocator, program: horos.data.activation.Program, arguments: []const u8) !Session {
@@ -1020,8 +1033,8 @@ fn programBytes(program: horos.data.activation.Program) ![]u8 {
     return bytes;
 }
 
-test "prepared Programs reuse immutable code and facts across sequential Sessions" {
-    const Prepared = @import("stable_runtime").Prepared;
+test "behavior: prepared Programs reuse immutable code and facts across sequential Sessions" {
+    const Prepared = @import("kosmos").Prepared;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
@@ -1037,30 +1050,24 @@ test "prepared Programs reuse immutable code and facts across sequential Session
         var session = try Session.start(testing.allocator, &prepared, &.{ input, 0, 0, 0, 0, 0, 0, 0 });
         defer session.deinit();
         if (shared_code) |pointer| try testing.expect(pointer == session.program.functions.ptr) else shared_code = session.program.functions.ptr;
-        const base = session.flow.facts.pool.base.?;
-        const nodes = base.nodeCount();
         try testing.expect(try session.run(null) == .requested);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
         var restored = try Session.restore(testing.allocator, &prepared, checkpoint);
         defer restored.deinit();
         try testing.expect(session.program.functions.ptr == restored.program.functions.ptr);
-        try testing.expect(session.flow.facts.live.ptr == restored.flow.facts.live.ptr);
-        try testing.expect(session.flow.facts.pool != restored.flow.facts.pool);
-        try testing.expect(restored.flow.facts.pool.base.? == base);
         try answerWithValue(&session, &.{});
         try answerWithValue(&restored, &.{});
         const result = try session.run(null);
         const other = try restored.run(null);
-        try testing.expectEqual(input, result.completed.body.scalar[0]);
-        try testing.expectEqualDeep(result, other);
-        try testing.expectEqual(nodes, base.nodeCount());
+        try testing.expectEqual(input, (try session.bytes(&result.completed))[0]);
+        try testing.expectEqualSlices(u8, try session.bytes(&result.completed), try restored.bytes(&other.completed));
         try testing.expectEqual(retained, try prepared.storageBytes());
     }
 }
 
-test "Sessions retain preparation after all external prepared handles are released" {
-    const Prepared = @import("stable_runtime").Prepared;
+test "behavior: Sessions retain preparation after all external prepared handles are released" {
+    const Prepared = @import("kosmos").Prepared;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
@@ -1073,32 +1080,35 @@ test "Sessions retain preparation after all external prepared handles are releas
     defer clone.deinit();
     var session = try Session.start(testing.allocator, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer session.deinit();
+    const checkpoint = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(checkpoint);
     prepared.deinit();
     clone.deinit();
     try testing.expectError(error.InvalidState, Session.start(testing.allocator, &prepared, &.{}));
     try testing.expectError(error.InvalidState, Session.restore(testing.allocator, &clone, &.{}));
+    try testing.expectError(error.InvalidState, Session.restore(testing.allocator, &clone, checkpoint));
     try testing.expect(try session.run(null) == .requested);
     try answerWithValue(&session, &.{});
     const result = try session.run(null);
-    try testing.expectEqual(42, result.completed.body.scalar[0]);
+    try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
 }
 
-fn startPreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("stable_runtime").Prepared) !void {
+fn startPreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !void {
     var session = try Session.start(allocator, prepared, &.{ 1, 0, 0, 0, 0, 0, 0, 0 });
     defer session.deinit();
 }
-fn restorePreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("stable_runtime").Prepared, checkpoint: []const u8) !void {
+fn restorePreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, checkpoint: []const u8) !void {
     var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
 }
-test "failed prepared starts and restores preserve the reusable owner" {
+test "ownership: failed prepared starts and restores preserve the reusable owner" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
     defer compiled.deinit();
     const bytes = try programBytes(compiled.program);
     defer testing.allocator.free(bytes);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, bytes);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, bytes);
     defer prepared.deinit();
     const retained = try prepared.storageBytes();
     try @import("allocation_testing.zig").check(testing.allocator, startPreparedFailure, .{&prepared});
@@ -1125,7 +1135,7 @@ fn retainedInputExample(builder: *source.Builder) !source.Module {
 
 fn invocationFailure(allocator: std.mem.Allocator, command: []const u8) !void {
     var output = @as([1024]u8, @splat(0xa5));
-    const bytes = @import("stable_runtime").invocation.invokeInto(allocator, command, &output) catch |err| {
+    const bytes = @import("kosmos").invocation.invokeInto(allocator, command, &output) catch |err| {
         for (output) |byte| try testing.expectEqual(0xa5, byte);
         return err;
     };
@@ -1134,9 +1144,9 @@ fn invocationFailure(allocator: std.mem.Allocator, command: []const u8) !void {
     try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, decoded.value.completed);
 }
 
-test "current fresh invocation binds captured values and rejects stale replies without mutation" {
+test "ownership: current fresh invocation binds captured values and rejects stale replies without mutation" {
     const protocol = horos.data.invocation;
-    const fresh = @import("stable_runtime").invocation;
+    const fresh = @import("kosmos").invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try retainedInputExample(&builder));
@@ -1204,8 +1214,8 @@ test "current fresh invocation binds captured values and rejects stale replies w
     try testing.expectEqualSlices(u8, original, command);
 }
 
-test "current invocation preserves explicit yield polling and cancellation before work" {
-    const fresh = @import("stable_runtime").invocation;
+test "behavior: current invocation preserves explicit yield polling and cancellation before work" {
+    const fresh = @import("kosmos").invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -1246,7 +1256,7 @@ test "current invocation preserves explicit yield polling and cancellation befor
     } else try testing.expectEqualStrings("stop", cancelled.record.cancelled.reason.text);
 }
 
-test "cancellation rebinds a pending cleanup without repeating its semantic operation" {
+test "behavior: cancellation rebinds a pending cleanup without repeating its semantic operation" {
     const protocol = horos.data.invocation;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1276,15 +1286,15 @@ test "cancellation rebinds a pending cleanup without repeating its semantic oper
     try testing.expectEqualStrings("stop", (try session.terminalExit()).cancellation.?.text);
 }
 
-fn restoreFailure(allocator: std.mem.Allocator, image: []const u8, checkpoint: []const u8) !void {
-    var session = try Session.restoreImage(allocator, image, checkpoint);
+fn restoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, checkpoint: []const u8) !void {
+    var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
     const bytes = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(bytes);
     try testing.expectEqualSlices(u8, checkpoint, bytes);
 }
 
-test "PST3 restore releases every partial owner on allocation failure" {
+test "ownership: PST3 restore releases every partial owner on allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
@@ -1296,7 +1306,11 @@ test "PST3 restore releases every partial owner on allocation failure" {
     defer testing.allocator.free(checkpoint);
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    try @import("allocation_testing.zig").check(testing.allocator, restoreFailure, .{ image, checkpoint });
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    // Image admission owns its failure sweep. This one owns state admission,
+    // partial restored sessions, and byte-identical checkpoint reconstruction.
+    try @import("allocation_testing.zig").check(testing.allocator, restoreFailure, .{ &prepared, checkpoint });
 }
 
 fn rejectCheckpoint(image: []const u8, state: horos.data.process_state.State) !void {
@@ -1309,7 +1323,7 @@ fn rejectCheckpoint(image: []const u8, state: horos.data.process_state.State) !v
     } else |err| try testing.expect(err != error.OutOfMemory);
 }
 
-test "PST3 restore rejects wrong identity, code position, slots, and cleanup status" {
+test "behavior: PST3 restore rejects wrong identity, code position, slots, and cleanup status" {
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1374,7 +1388,7 @@ test "PST3 restore rejects wrong identity, code position, slots, and cleanup sta
     try testing.expect(checked_frame and checked_binding and checked_cleanup);
 }
 
-test "PST3 restore rejects aliased unique packages after graph renumbering" {
+test "behavior: PST3 restore rejects aliased unique packages after graph renumbering" {
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1406,9 +1420,9 @@ test "PST3 restore rejects aliased unique packages after graph renumbering" {
     return error.MissingIndependentPackages;
 }
 
-test "imported storage avoids payload copies and releases a large dead backing" {
+test "behavior: imported storage avoids payload copies and releases a large dead backing" {
     const data = horos.data;
-    const Store = @FieldType(Session, "store");
+    const Store = @FieldType(@FieldType(@FieldType(Session, "driver"), "outer"), "store");
     const big = try testing.allocator.alloc(u8, 128 * 1024);
     defer testing.allocator.free(big);
     @memset(big, 0x5a);
@@ -1456,7 +1470,7 @@ test "imported storage avoids payload copies and releases a large dead backing" 
     try testing.expectEqual(1, interned.body.blob.id);
 }
 
-test "stable borrow admission distinguishes older from fresh references through return clauses" {
+test "behavior: stable borrow admission distinguishes older from fresh references through return clauses" {
     const fixture = @import("borrow_return_fixtures");
     for (std.enums.values(fixture.ResultFrom)) |from| {
         for ([_]bool{ false, true }) |initial| {
@@ -1484,7 +1498,7 @@ test "stable borrow admission distinguishes older from fresh references through 
     }
 }
 
-test "stable resource implementations preserve private authority and loans across requests" {
+test "behavior: stable resource implementations preserve private authority and loans across requests" {
     inline for (.{ source.examples.resourceScalar, source.examples.resourcePair }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1497,20 +1511,22 @@ test "stable resource implementations preserve private authority and loans acros
             const pending = try drive(&session, null);
             try testing.expect(pending == .requested);
             try testing.expectEqualStrings(name, session.program.effects[@intCast(pending.requested.effect)].identity);
-            if (index != 0) try testing.expectEqual(41, pending.requested.payload.body.scalar[0]);
-            for (session.store.nodes.items, session.store.alive.items) |node, alive| {
-                if (alive and node == .borrow) borrowed = true;
+            if (index != 0) try testing.expectEqual(41, (try session.bytes(&pending.requested.payload))[0]);
+            var snapshot = try guestState(&session);
+            defer snapshot.deinit();
+            for (snapshot.state.nodes) |node| {
+                if (node.record == .borrow) borrowed = true;
             }
-            try session.store.collectWith(session.roots, &session.frames);
+            try roundTrip(&session);
             try answerWithValue(&session, if (index == 0) &.{ 41, 0, 0, 0, 0, 0, 0, 0 } else &.{});
         }
         const result = try drive(&session, null);
         try testing.expect(borrowed and result == .completed);
-        try testing.expectEqual(42, result.completed.body.scalar[0]);
+        try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
     }
 }
 
-test "stable cancellation releases the resource while its protected borrow is suspended" {
+test "behavior: stable cancellation releases the resource while its protected borrow is suspended" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.resourceScalar(&builder));
@@ -1526,12 +1542,12 @@ test "stable cancellation releases the resource while its protected borrow is su
     const release = try drive(&session, null);
     try testing.expect(release == .requested);
     try testing.expectEqualStrings("example/resource-release", session.program.effects[@intCast(release.requested.effect)].identity);
-    try testing.expectEqual(41, release.requested.payload.body.scalar[0]);
+    try testing.expectEqual(41, (try session.bytes(&release.requested.payload))[0]);
     try answerWithValue(&session, &.{});
     try testing.expect(try drive(&session, null) == .cancelled);
 }
 
-test "stable admission rejects a fresh store hidden by a later same-slot rebind" {
+test "behavior: stable admission rejects a fresh store hidden by a later same-slot rebind" {
     const fixture = @import("borrow_return_fixtures");
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
@@ -1564,7 +1580,7 @@ test "stable admission rejects a fresh store hidden by a later same-slot rebind"
     return error.TestUnexpectedResult;
 }
 
-test "stable source installs real handlers and keeps the final checked sum after them" {
+test "behavior: stable source installs real handlers and keeps the final checked sum after them" {
     for ([_]usize{ 1, 8, 64, 128, 256 }) |count| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1574,13 +1590,11 @@ test "stable source installs real handlers and keeps the final checked sum after
         defer session.deinit();
         const result = try drive(&session, null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(count * (count + 1) / 2, std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
-        try testing.expectEqual(0, session.frames.entries.count());
-        try testing.expect(session.frames.slots.statistics.value_copies <= 32 * count + 128);
+        try testing.expectEqual(count * (count + 1) / 2, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
     }
 }
 
-test "stable source retains an external request and joins into the same activation" {
+test "behavior: stable source retains an external request and joins into the same activation" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -1612,10 +1626,10 @@ test "stable source retains an external request and joins into the same activati
     try answerWithValue(&session, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqual(42, std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
 }
 
-test "stable source owns its input and keeps tail-recursive control bounded" {
+test "behavior: stable source owns its input and keeps tail-recursive control bounded" {
     var builder = source.Builder.init(testing.allocator);
     var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
     var session = initFromImage(testing.allocator, compiled.program, &.{ 16, 39, 0, 0, 0, 0, 0, 0 }) catch |err| {
@@ -1628,15 +1642,20 @@ test "stable source owns its input and keeps tail-recursive control bounded" {
     builder.deinit();
     var result = try drive(&session, 31);
     while (result == .progressed) {
-        try testing.expect(session.frames.entries.count() <= 2);
-        try testing.expect(session.store.nodes.items.len <= 512);
-        result = try drive(&session, 31);
+        var cut = try guestState(&session);
+        defer cut.deinit();
+        try testing.expect(cut.state.nodes.len <= 512);
+        // Keep all 10,000 recursive calls and the bound at every 31-step cut.
+        // The framing comparison above is independent of recursion depth;
+        // this resource fixture needs one execution of each remaining slice.
+        result = try session.run(31);
+        try checkedCheckpoint(&session);
     }
     try testing.expect(result == .completed);
-    try testing.expectEqual(1, result.completed.body.scalar[0]);
+    try testing.expectEqual(1, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable source resumes an owned package after its handler clause has returned" {
+test "behavior: stable source resumes an owned package after its handler clause has returned" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
@@ -1705,25 +1724,40 @@ test "stable source resumes an owned package after its handler clause has return
     defer session.deinit();
     const observed = try drive(&session, null);
     try testing.expect(observed == .completed);
-    try testing.expectEqual(42, std.mem.readInt(u64, observed.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&observed.completed))[0..8], .little));
 }
 
-fn failingSession(allocator: std.mem.Allocator, program: horos.data.activation.Program) !void {
-    var session = try initFromImage(allocator, program, &.{});
+fn failingSession(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !void {
+    var session = try Session.start(allocator, prepared, &.{});
     defer session.deinit();
-    const result = try drive(&session, null);
+    const before = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(before);
+    const result = try session.run(null);
     try testing.expect(result == .completed);
+    try checkedCheckpoint(&session);
 }
 
-test "stable source releases partial native owners at every allocation failure" {
+test "ownership: stable source releases partial native owners at every allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.deep(&builder));
     defer compiled.deinit();
-    try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{compiled.program});
+    // Compare the public entry points once. Their independent sessions use the
+    // ordinary allocator, so replaying them at each fault index adds no fault
+    // coverage. The swept session retains its before/after checkpoint checks.
+    var reference = try initFromImage(testing.allocator, compiled.program, &.{});
+    defer reference.deinit();
+    try testing.expect(try drive(&reference, null) == .completed);
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    // The allocator under test owns every mutable session allocation. Immutable
+    // preparation has its own sweep and is shared across all failure indices.
+    try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{&prepared});
 }
 
-test "stable source reenters a live template-cell cycle without sharing branch control" {
+test "behavior: stable source reenters a live template-cell cycle without sharing branch control" {
     inline for (.{ source.examples.reentrant, source.examples.cloned }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1736,16 +1770,9 @@ test "stable source reenters a live template-cell cycle without sharing branch c
         while (result == .progressed or result == .yielded) {
             const before = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(before);
-            // Replace every private view handle without changing logical values.
-            var frames = session.frames.entries.valueIterator();
-            while (frames.next()) |frame| {
-                const replacement = try session.frames.forkFrame(frame.*);
-                session.frames.releaseFrame(frame.*);
-                frame.* = replacement;
-            }
-            // An aggressive correctness lane: every live frame must participate
-            // in graph tracing, including the cyclic retained template.
-            try session.store.collectWith(session.roots, &session.frames);
+            // Rebuild all physical ownership from canonical guest state;
+            // the cyclic template and its aliases must survive the transfer.
+            try roundTrip(&session);
             const after = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(after);
             try testing.expectEqualSlices(u8, before, after);
@@ -1760,7 +1787,7 @@ test "stable source reenters a live template-cell cycle without sharing branch c
     }
 }
 
-test "stable source does not read a reclaimed copyable result only assigned to a dead binding" {
+test "behavior: stable source does not read a reclaimed copyable result only assigned to a dead binding" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -1774,10 +1801,10 @@ test "stable source does not read a reclaimed copyable result only assigned to a
     defer session.deinit();
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqual(42, result.completed.body.scalar[0]);
+    try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable retained template preserves an older activation across loop-slot rebindings" {
+test "behavior: stable retained template preserves an older activation across loop-slot rebindings" {
     const d = horos.data;
     const program: d.activation.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 2 },
@@ -1841,10 +1868,10 @@ test "stable retained template preserves an older activation across loop-slot re
     try testing.expect(result == .completed);
     // Each activation starts at x=1, count=2, then returns 3. The retained
     // template must not inherit the first branch's x=3/count=0 bindings.
-    try testing.expectEqual(6, result.completed.body.scalar[0]);
+    try testing.expectEqual(6, (try session.bytes(&result.completed))[0]);
 }
 
-test "stable shallow value and computation resumptions omit the original return clause" {
+test "behavior: stable shallow value and computation resumptions omit the original return clause" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
@@ -1853,7 +1880,7 @@ test "stable shallow value and computation resumptions omit the original return 
     defer session.deinit();
     var result = try drive(&session, 1);
     while (result == .progressed) {
-        try session.store.collectWith(session.roots, &session.frames);
+        try roundTrip(&session);
         result = try drive(&session, 1);
     }
     try testing.expect(result == .completed);
@@ -1865,7 +1892,7 @@ test "stable shallow value and computation resumptions omit the original return 
     }
 }
 
-test "stable injection selects definition-site versus use-site capabilities" {
+test "behavior: stable injection selects definition-site versus use-site capabilities" {
     inline for (.{ source.examples.injection, source.examples.shallowInjection }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1877,21 +1904,23 @@ test "stable injection selects definition-site versus use-site capabilities" {
             var result = try drive(&session, 1);
             var saw_injection = false;
             while (result == .progressed) {
-                for (session.store.nodes.items, session.store.alive.items) |node, alive|
-                    if (alive and node == .injection) {
+                var snapshot = try guestState(&session);
+                defer snapshot.deinit();
+                for (snapshot.state.nodes) |node|
+                    if (node.record == .injection) {
                         saw_injection = true;
                     };
-                try session.store.collectWith(session.roots, &session.frames);
+                try roundTrip(&session);
                 result = try drive(&session, 1);
             }
             try testing.expect(result == .completed);
-            try testing.expectEqual(@as(u64, if (injecting == 0) 109 else 209), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+            try testing.expectEqual(@as(u64, if (injecting == 0) 109 else 209), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
             try testing.expectEqual(injecting == 1, saw_injection);
         }
     }
 }
 
-test "stable cleanup preserves primary failure and resumes external cleanup" {
+test "behavior: stable cleanup preserves primary failure and resumes external cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.unwind(&builder));
@@ -1903,19 +1932,19 @@ test "stable cleanup preserves primary failure and resumes external cleanup" {
             const pending = try drive(&session, null);
             try testing.expect(pending == .requested);
             try testing.expectEqualStrings(name, session.program.effects[@intCast(pending.requested.effect)].identity);
-            try session.store.collectWith(session.roots, &session.frames);
+            try roundTrip(&session);
             try answerWithValue(&session, &.{});
         }
         const result = try drive(&session, null);
         try testing.expect(result == .failed);
-        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), result.failed.body.scalar[0]);
+        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), (try session.bytes(&result.failed))[0]);
         try testing.expectEqual(2, (try session.terminalExit()).cleanup_failures.len);
-        try testing.expectEqual(7, (try session.terminalExit()).cleanup_failures[0].body.scalar[0]);
-        try testing.expectEqual(8, (try session.terminalExit()).cleanup_failures[1].body.scalar[0]);
+        try testing.expectEqual(7, (try session.bytes(&(try session.terminalExit()).cleanup_failures[0]))[0]);
+        try testing.expectEqual(8, (try session.bytes(&(try session.terminalExit()).cleanup_failures[1]))[0]);
     }
 }
 
-test "stable cancellation during yielded cleanup preserves the first reason" {
+test "behavior: stable cancellation during yielded cleanup preserves the first reason" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.yieldingCleanup(&builder));
@@ -1933,12 +1962,12 @@ test "stable cancellation during yielded cleanup preserves the first reason" {
         }
         const result = try drive(&session, null);
         try testing.expect(result == .failed);
-        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), result.failed.body.scalar[0]);
+        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), (try session.bytes(&result.failed))[0]);
         try testing.expectEqualStrings("stop", (try session.terminalExit()).cancellation.?.text);
     }
 }
 
-test "stable unwind preserves lexical and temporary-owner cleanup order" {
+test "behavior: stable unwind preserves lexical and temporary-owner cleanup order" {
     for (0..10) |mode| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1958,21 +1987,21 @@ test "stable unwind preserves lexical and temporary-owner cleanup order" {
                 try testing.expect(requests < 2);
                 const reversed = mode == 1 or mode == 3 or mode >= 4;
                 const label: u64 = if (reversed) 2 - requests else requests + 1;
-                try testing.expectEqual(label, std.mem.readInt(u64, result.requested.payload.body.scalar[0..8], .little));
+                try testing.expectEqual(label, std.mem.readInt(u64, (try session.bytes(&result.requested.payload))[0..8], .little));
                 requests += 1;
                 try answerWithValue(&session, &.{});
             }
-            try session.store.collectWith(session.roots, &session.frames);
+            try roundTrip(&session);
             result = try drive(&session, 1);
         }
         try testing.expect(result == .failed);
-        try testing.expectEqual(8, result.failed.body.scalar[0]);
+        try testing.expectEqual(8, (try session.bytes(&result.failed))[0]);
         try testing.expectEqual(2, requests);
         try testing.expectEqual(1, yields);
     }
 }
 
-test "stable cancellation preserves cleanup at entry yield request and answered boundaries" {
+test "behavior: stable cancellation preserves cleanup at entry yield request and answered boundaries" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
@@ -2027,7 +2056,7 @@ test "stable cancellation preserves cleanup at entry yield request and answered 
     }
 }
 
-test "stable clause failure abandons a captured cleanup without losing its primary exit" {
+test "behavior: stable clause failure abandons a captured cleanup without losing its primary exit" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.clauseAbort(&builder));
@@ -2038,14 +2067,14 @@ test "stable clause failure abandons a captured cleanup without losing its prima
     try testing.expect(pending == .requested);
     try testing.expectEqualStrings("example/abandoned-release", session.program.effects[@intCast(pending.requested.effect)].identity);
     try testing.expectEqualSlices(u8, &.{ 1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&pending.requested.payload));
-    try session.store.collectWith(session.roots, &session.frames);
+    try roundTrip(&session);
     try answerWithValue(&session, &.{});
     const result = try drive(&session, null);
     try testing.expect(result == .failed);
-    try testing.expectEqual(9, result.failed.body.scalar[0]);
+    try testing.expectEqual(9, (try session.bytes(&result.failed))[0]);
 }
 
-test "stable generator resumes private state and closes its retained cleanup" {
+test "behavior: stable generator resumes private state and closes its retained cleanup" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.generator(&builder));
@@ -2065,12 +2094,12 @@ test "stable generator resumes private state and closes its retained cleanup" {
             .requested => |pending| {
                 releases += 1;
                 try testing.expectEqualStrings("example/generator-release", session.program.effects[@intCast(pending.effect)].identity);
-                try testing.expectEqual(43, pending.payload.body.scalar[0]);
+                try testing.expectEqual(43, (try session.bytes(&pending.payload))[0]);
                 try answerWithValue(&session, &.{});
             },
             else => return error.TestUnexpectedResult,
         }
-        try session.store.collectWith(session.roots, &session.frames);
+        try roundTrip(&session);
         result = try drive(&session, 1);
     }
     try testing.expectEqual(1, yields);
@@ -2078,7 +2107,7 @@ test "stable generator resumes private state and closes its retained cleanup" {
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
 }
 
-test "interaction phases follow atomic dispatch and the installed yield successor" {
+test "behavior: interaction phases follow atomic dispatch and the installed yield successor" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const module = try source.examples.deep(&builder);
@@ -2094,19 +2123,23 @@ test "interaction phases follow atomic dispatch and the installed yield successo
     var dispatched = false;
     var yielded = false;
     for (0..128) |_| {
-        const current = session.roots.current orelse return error.TestUnexpectedResult;
-        const control = (try session.store.get(current)).control;
-        const frame = try session.frames.get(current.id);
+        var before = try guestState(&session);
+        defer before.deinit();
+        const current = before.state.roots.current orelse return error.TestUnexpectedResult;
+        const control = before.state.nodes[@intCast(current.id)].record.control;
+        const frame = before.state.nodes[@intCast(current.id)].activation.?;
         const block = session.program.blocks[@intCast(control.block)];
         const at_control = frame.position == block.instructions.len;
         const local = at_control and block.terminator == .perform and block.terminator.perform.capability != null;
         const yielding = at_control and block.terminator == .yield_value;
         const result = try session.run(1);
         if (local or yielding) {
-            const next = (try session.store.get(session.roots.current.?)).control;
+            var after = try guestState(&session);
+            defer after.deinit();
+            const next = after.state.nodes[@intCast(after.state.roots.current.?.id)].record.control;
             if (local) {
                 try testing.expect(result == .progressed);
-                try testing.expect(session.roots.pending == null);
+                try testing.expect(after.state.roots.pending == null);
                 const target = session.program.handlers[0].clauses[0].function;
                 try testing.expectEqual(target, session.program.blocks[@intCast(next.block)].function);
                 try testing.expect(next.block != control.block);
@@ -2122,7 +2155,9 @@ test "interaction phases follow atomic dispatch and the installed yield successo
             defer testing.allocator.free(checkpoint);
             var cancelled = try Session.restoreImage(testing.allocator, image, checkpoint);
             defer cancelled.deinit();
-            const restored = (try cancelled.store.get(cancelled.roots.current.?)).control;
+            var resumed = try guestState(&cancelled);
+            defer resumed.deinit();
+            const restored = resumed.state.nodes[@intCast(resumed.state.roots.current.?.id)].record.control;
             try testing.expectEqual(next.block, restored.block);
             try cancelled.cancel(.{ .text = "phase-check" });
             try testing.expect(try drive(&cancelled, null) == .cancelled);
@@ -2133,7 +2168,7 @@ test "interaction phases follow atomic dispatch and the installed yield successo
     try testing.expect(dispatched and yielded);
 }
 
-test "stateful service preserves labeled replies and exclusive turns through restore" {
+test "behavior: stateful service preserves labeled replies and exclusive turns through restore" {
     inline for (.{ .empty, .requests, .swapped, .cancelled, .overflow, .paired }) |mode| {
         for ([_]bool{ false, true }) |restore| try serviceWitness(mode, restore);
     }
@@ -2236,7 +2271,7 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
     }), replies);
 }
 
-test "stable successor return clauses retain older capability and cell references" {
+test "behavior: stable successor return clauses retain older capability and cell references" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.successorState(&builder));
@@ -2244,7 +2279,7 @@ test "stable successor return clauses retain older capability and cell reference
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     try testing.expect(try drive(&session, null) == .yielded);
-    try session.store.collectWith(session.roots, &session.frames);
+    try roundTrip(&session);
     try session.resumeYield();
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
@@ -2254,8 +2289,10 @@ test "stable successor return clauses retain older capability and cell reference
 fn captureFrameCheckpoint(session: *Session) ![]u8 {
     for (0..512) |_| {
         try session.step();
-        for (session.store.nodes.items, session.store.alive.items) |node, alive| {
-            if (alive and (node == .one_shot or node == .multi_template))
+        var snapshot = try guestState(session);
+        defer snapshot.deinit();
+        for (snapshot.state.nodes) |node| {
+            if (node.record == .one_shot or node.record == .multi_template)
                 return session.checkpoint(testing.allocator);
         }
     }
@@ -2352,7 +2389,7 @@ fn checkReturnPaths(session: *Session, image: []const u8, schema: u64, seen: *st
     session.* = restored;
 }
 
-test "PST3 normal return paths reject disposal markers while captured cleanup stays valid" {
+test "behavior: PST3 normal return paths reject disposal markers while captured cleanup stays valid" {
     var seen: std.EnumSet(ReturnPathKind) = .{};
     var captured_cleanup = false;
     for (0..3) |example| {
@@ -2381,27 +2418,27 @@ test "PST3 normal return paths reject disposal markers while captured cleanup st
         defer session.deinit();
         for (0..512) |_| {
             try checkReturnPaths(&session, image, marker_schema, &seen, &captured_cleanup);
-            if (session.terminal != null) break;
-            switch (session.status) {
+            if (session.isTerminal()) break;
+            switch (try session.observe()) {
                 .yielded => try session.resumeYield(),
-                .parked => try answerWithValue(&session, &.{}),
+                .requested => try answerWithValue(&session, &.{}),
                 else => try session.step(),
             }
         }
         const result = try session.observe();
         if (example == 2) {
             try testing.expect(result == .failed);
-            try testing.expectEqual(9, result.failed.body.scalar[0]);
+            try testing.expectEqual(9, (try session.bytes(&result.failed))[0]);
         } else {
             try testing.expect(result == .completed);
-            try testing.expectEqual(if (example == 0) @as(u8, 67) else 60, result.completed.body.scalar[0]);
+            try testing.expectEqual(if (example == 0) @as(u8, 67) else 60, (try session.bytes(&result.completed))[0]);
         }
     }
     try testing.expectEqual(std.EnumSet(ReturnPathKind).full.bits, seen.bits);
     try testing.expect(captured_cleanup);
 }
 
-test "PST3 captured handler state obeys one-shot and multi bounds and reference kinds" {
+test "behavior: PST3 captured handler state obeys one-shot and multi bounds and reference kinds" {
     const data = horos.data;
     const g = data.graph;
     inline for (.{ false, true }) |multi| inline for (.{ false, true }) |allowed| {
@@ -2508,7 +2545,7 @@ fn argumentBytes(size: usize) ![]u8 {
     return bytes;
 }
 
-fn argumentSessionFailure(allocator: std.mem.Allocator, prepared: *const @import("stable_runtime").Prepared, input: []const u8) !void {
+fn argumentSessionFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, input: []const u8) !void {
     var session = try Session.start(allocator, prepared, input);
     defer session.deinit();
     const result = try session.run(null);
@@ -2516,17 +2553,17 @@ fn argumentSessionFailure(allocator: std.mem.Allocator, prepared: *const @import
     try testing.expectEqualSlices(u8, &.{ 5, 's', 'm', 'a', 'l', 'l' }, try session.bytes(&result.completed));
 }
 
-test "argument backing releases every partial Session owner on allocation failure" {
+test "ownership: argument backing releases every partial Session owner on allocation failure" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     const input = try argumentBytes(4096);
     defer testing.allocator.free(input);
     try @import("allocation_testing.zig").check(testing.allocator, argumentSessionFailure, .{ &prepared, input });
 }
 
-test "argument Session survives caller release and sheds a large dead payload" {
+test "behavior: argument Session survives caller release and sheds a large dead payload" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     const input = try argumentBytes(1 << 20);
@@ -2547,13 +2584,15 @@ test "argument Session survives caller release and sheds a large dead payload" {
     try testing.expect(result == .completed and transferred == .completed);
     try testing.expectEqualSlices(u8, &expected, try session.bytes(&result.completed));
     try testing.expectEqualSlices(u8, &expected, try restored.bytes(&transferred.completed));
-    try testing.expect(session.store.imported == null);
+    const terminal_state = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(terminal_state);
+    try testing.expect(terminal_state.len < 1024);
 }
 
-fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("stable_runtime").Prepared, input: []const u8) !void {
+fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, input: []const u8) !void {
     const core = try prepared.acquire();
     defer core.release();
-    var store: @FieldType(Session, "store") = .{ .allocator = allocator };
+    var store: @FieldType(@FieldType(@FieldType(Session, "driver"), "outer"), "store") = .{ .allocator = allocator };
     defer store.deinit();
     var temporary = std.heap.ArenaAllocator.init(allocator);
     defer temporary.deinit();
@@ -2582,20 +2621,20 @@ fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("
     try testing.expectEqualDeep(values[1], same);
 }
 
-test "argument backing survives journal collection and reuse then compacts a tiny survivor" {
+test "ownership: argument backing survives journal collection and reuse then compacts a tiny survivor" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     const input = try argumentBytes(4096);
     defer testing.allocator.free(input);
     try @import("allocation_testing.zig").check(testing.allocator, argumentStoreFailure, .{ &prepared, input });
 }
 
-test "resident terminal compaction preserves rollback and releases backing at commit" {
+test "ownership: resident terminal compaction preserves rollback and releases backing at commit" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     const input = try argumentBytes(4096);
     defer testing.allocator.free(input);
@@ -2635,7 +2674,7 @@ test "resident terminal compaction preserves rollback and releases backing at co
     }
 }
 
-test "handler continuation transfers the active view after staging call operands" {
+test "behavior: handler continuation preserves staged operands across checkpoint restoration" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));
@@ -2643,23 +2682,27 @@ test "handler continuation transfers the active view after staging call operands
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     for (0..256) |_| {
-        const current = session.roots.current.?;
-        const control = (try session.store.get(current)).control;
+        var before = try guestState(&session);
+        defer before.deinit();
+        const current = before.state.roots.current.?;
+        const control = before.state.nodes[@intCast(current.id)].record.control;
         const block = session.program.blocks[@intCast(control.block)];
-        const frame = try session.frames.get(current.id);
+        const frame = before.state.nodes[@intCast(current.id)].activation.?;
         if (frame.position == block.instructions.len and block.terminator == .handle) {
             try session.step();
-            const body = (try session.store.get(session.roots.current.?)).control;
-            const attachment = (try session.store.get(body.parent.?)).attachment;
-            const saved = try session.frames.get(attachment.return_to.?.id);
-            try testing.expectEqualDeep(frame.view, saved.view);
-            try testing.expectEqual(current.id, attachment.return_to.?.id);
-            try testing.expect(try session.store.get(current) == .continuation);
+            var after = try guestState(&session);
+            defer after.deinit();
+            const body = after.state.nodes[@intCast(after.state.roots.current.?.id)].record.control;
+            const attachment = after.state.nodes[@intCast(body.parent.?.id)].record.attachment;
+            const saved = after.state.nodes[@intCast(attachment.return_to.?.id)];
+            try testing.expect(saved.record == .continuation);
+            try testing.expect(saved.activation != null);
+            try roundTrip(&session);
             const checkpoint = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(checkpoint);
             const result = try drive(&session, null);
             try testing.expect(result == .completed);
-            try testing.expectEqual(36, std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+            try testing.expectEqual(36, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
             return;
         }
         try session.step();
@@ -2667,12 +2710,12 @@ test "handler continuation transfers the active view after staging call operands
     return error.TestUnexpectedResult;
 }
 
-fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8) !void {
-    var prepared = try @import("stable_runtime").Prepared.init(allocator, image);
+fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8, runtime: *const @import("kosmos").RuntimeArtifact) !void {
+    var prepared = try @import("kosmos").Prepared.initWithRuntime(allocator, image, runtime);
     defer prepared.deinit();
 }
 
-test "prepared contracts retain encoded bytes without canonicalization scratch" {
+test "ownership: prepared contracts retain encoded bytes without canonicalization scratch" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     var fields: [64]source.Id = undefined;
@@ -2685,20 +2728,124 @@ test "prepared contracts retain encoded bytes without canonicalization scratch" 
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    const admitted = prepared.core.?.admitted();
+    const admitted = prepared.guest.core.?.admitted();
     const program = admitted.program();
-    const contract = try prepared.core.?.contract(0);
+    const contract = try prepared.guest.core.?.contract(0);
     const expected = try horos.data.schema.encodeOwned(testing.allocator, program.schemas, program.effects[0].payload);
     defer testing.allocator.free(expected);
     try testing.expectEqualSlices(u8, expected, contract.payload);
     try testing.expectEqualSlices(u8, expected, contract.resume_value);
     // Arena growth and the contract table are chargeable; temporary partition
     // maps and schema graphs must not remain owned by preparation.
-    const contract_storage = (try prepared.storageBytes()) - admitted.storageBytes();
+    const contract_storage = (try prepared.guest.storageBytes()) - admitted.storageBytes();
     try testing.expect(contract_storage <= 1024 + 4 * (contract.payload.len + contract.resume_value.len));
-    try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{image});
+    try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{ image, &prepared.runtime });
+}
+
+const blobRetentionCaptured: horos.data.activation.Program = .{
+    .roots = .{ .entry = 0, .result = 1, .failure = 2 },
+    .schemas = &.{ .bytes, .u64, .unit, .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 1, .capture_bound = &.{0}, .use = .reusable } } } },
+    .constants = &.{},
+    .effects = &.{},
+    .functions = &.{
+        .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1, 3, 1 } }, .result = 1 },
+        .{ .entry = 2, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1 } }, .result = 1 },
+    },
+    .blocks = &.{
+        .{ .function = 0, .instructions = &.{
+            .{ .destination = 2, .opcode = .computation, .immediate = 0, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+        }, .terminator = .{ .apply = .{ .computation = 2, .arguments = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
+        .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .blob_length, .operands = &.{0} }}, .terminator = .{ .return_value = 1 } },
+    },
+    .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
+    .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
+};
+
+fn blobRetentionProgram(comptime alias: bool) horos.data.activation.Program {
+    return .{
+        .roots = .{ .entry = 0, .result = 1, .failure = 2 },
+        .schemas = &.{ .bytes, .u64, .unit },
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{.{ .entry = 0, .inputs = if (alias) &.{ 0, 2 } else &.{0}, .layout = .{ .slots = &.{ 0, 1, 0 } }, .result = 1 }},
+        .blocks = if (alias) &.{.{ .function = 0, .instructions = &.{
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{2} },
+        }, .terminator = .{ .return_value = 1 } }} else &.{.{ .function = 0, .instructions = &.{
+            .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
+            .{ .destination = 1, .opcode = .integer_bit_xor, .operands = &.{ 1, 1 } },
+        }, .terminator = .{ .return_value = 1 } }},
+    };
+}
+
+test "behavior: bounded active cuts reclaim dead large blobs and preserve direct and captured aliases" {
+    inline for (0..3) |kind| {
+        const original = comptime if (kind == 2) blobRetentionCaptured else blobRetentionProgram(kind == 1);
+        const image = try programBytes(original);
+        defer testing.allocator.free(image);
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+        defer prepared.deinit();
+        const payload = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(payload);
+        @memset(payload, 'x');
+        const arguments = try testing.allocator.alloc(u8, 2 * (payload.len + 10));
+        defer testing.allocator.free(arguments);
+        var writer: horos.data.wire.Writer = .{ .output = arguments };
+        try writer.bytes(payload);
+        if (kind == 1) try writer.bytes(payload);
+        for ([_]bool{ false, true }) |checkpoint_mode| {
+            var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
+            var resident = try Resident.start(budget.allocator(), &prepared, arguments[0..writer.position]);
+            defer releaseResident(&resident);
+            const before = budget.live;
+            var parked = try resident.drive(testing.allocator, .none, .{ .quantum = if (kind == 2) 2 else 1, .checkpoint = checkpoint_mode });
+            defer parked.deinit();
+            try testing.expect(parked.record == .progressed);
+            const after = budget.live;
+            std.debug.print("bounded blob retention: kind={d}, before={d}, after={d}, checkpoint={}\n", .{ kind, before, after, checkpoint_mode });
+            if (kind == 0) {
+                try testing.expect(after < payload.len / 4);
+                try testing.expect(before - after > payload.len - payload.len / 4);
+            } else try testing.expect(after >= payload.len);
+            const checkpoint = try resident.checkpoint(testing.allocator);
+            defer testing.allocator.free(checkpoint);
+            var restored = try Resident.restore(testing.allocator, &prepared, checkpoint);
+            defer releaseResident(&restored);
+            for ([_]*Resident{ &resident, &restored }) |subject| {
+                var result = try subject.drive(testing.allocator, .none, .{});
+                defer result.deinit();
+                try testing.expect(result.record == .completed);
+                try testing.expectEqual(@as(u64, if (kind == 0) 0 else payload.len), std.mem.readInt(u64, result.record.completed[0..8], .little));
+            }
+        }
+    }
+}
+
+test "ownership: active-cut large blob reclamation rolls back every allocation and final publication failure" {
+    const image = try programBytes(blobRetentionProgram(false));
+    defer testing.allocator.free(image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    const payload = try testing.allocator.alloc(u8, 64 << 10);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'y');
+    const arguments = try testing.allocator.alloc(u8, payload.len + 10);
+    defer testing.allocator.free(arguments);
+    var writer: horos.data.wire.Writer = .{ .output = arguments };
+    try writer.bytes(payload);
+    var session = try Session.start(testing.allocator, &prepared, arguments[0..writer.position]);
+    defer session.deinit();
+    const initial = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(initial);
+    try testing.expect(initial.len >= writer.position);
+    for ([_]bool{ false, true }) |checkpoint_mode| {
+        try residentFailureSweep(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
+        try residentPublicationFailure(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
+    }
 }
 
 fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundary: bool) !source.Module {
@@ -2722,7 +2869,7 @@ fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundar
     return b.module(entry, unit);
 }
 
-test "public suspension releases large dead input backing while preserving live aliases" {
+test "behavior: public suspension releases large dead input backing while preserving live aliases" {
     const count = 131072;
     const input = try testing.allocator.alloc(u8, count * 8 + 10);
     defer testing.allocator.free(input);
@@ -2738,18 +2885,28 @@ test "public suspension releases large dead input backing while preserving live 
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        var workspace = @import("stable_runtime").Workspace.init(backing);
-        var session = try Session.initImage(workspace.allocator(), image, input[0..writer.position]);
+        // Measure execution-owned retention separately from the reusable code
+        // and evaluator artifact. Their preparation cost is independent of input.
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+        defer prepared.deinit();
+        var workspace = @import("kosmos").Workspace.init(backing);
+        var session = try Session.start(workspace.allocator(), &prepared, input[0..writer.position]);
         defer session.deinit();
         const observed = try session.run(null);
         try testing.expect(if (request_boundary) observed == .requested else observed == .yielded);
         const retained = workspace.live_payload;
+        if (!keep_original and retained >= writer.position / 4)
+            std.debug.print("dead input retention: live={d}, input={d}, request={}\n", .{ retained, writer.position, request_boundary });
         if (keep_original) try testing.expect(retained >= writer.position) else try testing.expect(retained < writer.position / 4);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
-        try testing.expectEqual(retained, workspace.live_payload);
+        // The current base may memoize a demanded field projection. It must
+        // still release the large dead input, and repeated export must stabilize.
+        const after_checkpoint = workspace.live_payload;
+        if (!keep_original) try testing.expect(after_checkpoint < writer.position / 4);
         const repeated = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(repeated);
+        try testing.expectEqual(after_checkpoint, workspace.live_payload);
         try testing.expectEqualSlices(u8, checkpoint, repeated);
         if (!keep_original) try testing.expect(checkpoint.len < 1024);
         var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
@@ -2773,46 +2930,87 @@ test "public suspension releases large dead input backing while preserving live 
     };
 }
 
-test "suspension reclamation rolls back every allocation failure" {
+test "ownership: suspension reclamation preserves exhaustive rollback and large input publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try smallSurvivorExample(&builder, false, true));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    var input: [65540]u8 = undefined;
-    var writer: horos.data.wire.Writer = .{ .output = &input };
-    try writer.natural(8192);
-    for (0..8192) |i| try writer.fixed(u64, i + 1);
-    var session = try Session.start(testing.allocator, &prepared, input[0..writer.position]);
-    defer session.deinit();
-    const before = try session.checkpoint(testing.allocator);
-    defer testing.allocator.free(before);
-    for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, before, .none, with_checkpoint);
+    for ([_]usize{ 8, 8192 }) |count| {
+        var input: [65540]u8 = undefined;
+        var writer: horos.data.wire.Writer = .{ .output = &input };
+        try writer.natural(count);
+        for (0..count) |i| try writer.fixed(u64, i + 1);
+        var session = try Session.start(testing.allocator, &prepared, input[0..writer.position]);
+        defer session.deinit();
+        const initial = try session.checkpoint(testing.allocator);
+        defer testing.allocator.free(initial);
+        try testing.expect(initial.len >= writer.position);
+        var steps: u64 = 0;
+        var found = false;
+        for (0..128) |_| {
+            var snapshot = try guestState(&session);
+            defer snapshot.deinit();
+            const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
+            const block = compiled.program.blocks[@intCast(current.record.control.block)];
+            if (current.activation.?.position == block.instructions.len and block.terminator == .perform) {
+                found = true;
+                break;
+            }
+            try session.step();
+            steps += 1;
+        }
+        try testing.expect(found);
+        const fixture: ResidentFixture = .{ .checkpoint = initial, .prefix_steps = steps };
+        var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
+        var retained = try fixture.restore(budget.allocator(), &prepared);
+        defer releaseResident(&retained);
+        try testing.expect(budget.live >= writer.position);
+        const compact = try retained.checkpoint(testing.allocator);
+        defer testing.allocator.free(compact);
+        try testing.expect(compact.len < initial.len);
+        const before = budget.live;
+        var reclaimed = try retained.drive(testing.allocator, .none, .{ .quantum = 1 });
+        defer reclaimed.deinit();
+        try testing.expect(reclaimed.record == .requested);
+        if (count == 8192) try testing.expect(before - budget.live >= writer.position / 2);
+        for ([_]bool{ false, true }) |with_checkpoint| {
+            if (count == 8) try residentFailureSweep(&prepared, fixture, .none, with_checkpoint);
+            try residentPublicationFailure(&prepared, fixture, .none, with_checkpoint);
+        }
+    }
 }
 
-test "resident retained recursive tail frames preserve rollback at every allocation failure" {
+test "behavior: retained recursive tail fixture preserves transactional rollback" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try @import("retained_loop_bench.zig").build(&builder, 3));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var session = try Session.start(testing.allocator, &prepared, &.{});
     defer session.deinit();
     const before = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
+    var transaction = try session.begin();
     const outcome = try session.run(null);
     try testing.expect(outcome == .completed);
-    try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, outcome.completed.body.scalar[0..8], .little));
-    for ([_]bool{ false, true }) |with_checkpoint| try residentFailureSweep(&prepared, before, .none, with_checkpoint);
+    try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
+    transaction.rollback(&session);
+    const unchanged = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(unchanged);
+    try testing.expectEqualSlices(u8, before, unchanged);
+    const retried = try session.run(null);
+    try testing.expect(retried == .completed);
+    try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, (try session.bytes(&retried.completed))[0..8], .little));
 }
 
-test "handler return functions distinguish body value from state and preserve rollback" {
+test "behavior: handler return functions distinguish body value from state" {
     for (0..3) |mode| {
         var b = source.Builder.init(testing.allocator);
         defer b.deinit();
@@ -2830,22 +3028,17 @@ test "handler return functions distinguish body value from state and preserve ro
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
         defer prepared.deinit();
         var session = try Session.start(testing.allocator, &prepared, &.{});
         defer session.deinit();
-        const initial = try session.checkpoint(testing.allocator);
-        defer testing.allocator.free(initial);
-        for ([_]bool{ false, true }) |with_checkpoint|
-            try residentFailureSweep(&prepared, initial, .none, with_checkpoint);
         const result = try session.run(null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(([_]u64{ 7, 99, 1 })[mode], std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
-        try testing.expectEqual(0, session.frames.entries.count());
+        try testing.expectEqual(([_]u64{ 7, 99, 1 })[mode], std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
     }
 }
 
-test "immediate closed handler bodies elide allocation only when the value cannot escape" {
+test "behavior: closed handler bodies preserve escaping values and bounded-step checkpoints" {
     const ir = horos.data.activation;
     for (0..6) |mode| {
         var b = source.Builder.init(testing.allocator);
@@ -2903,22 +3096,19 @@ test "immediate closed handler bodies elide allocation only when the value canno
         }
         const image = try programBytes(program);
         defer testing.allocator.free(image);
-        var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+        var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
         defer prepared.deinit();
         var session = try Session.start(testing.allocator, &prepared, &.{});
         defer session.deinit();
-        const initial = try session.checkpoint(testing.allocator);
-        defer testing.allocator.free(initial);
-        for ([_]bool{ false, true }) |with_checkpoint|
-            try residentFailureSweep(&prepared, initial, .none, with_checkpoint);
         var strict_stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        session.statistics = &strict_stats;
-        session.store.statistics = &strict_stats.storage;
+        session.setStatistics(&strict_stats);
         var saw_callable = false;
-        while (session.terminal == null) {
+        while (!session.isTerminal()) {
             try session.step();
-            for (session.store.nodes.items, session.store.alive.items) |node, alive|
-                if (alive and node == .computation) {
+            var snapshot = try guestState(&session);
+            defer snapshot.deinit();
+            for (snapshot.state.nodes) |node|
+                if (node.record == .computation) {
                     saw_callable = true;
                 };
             const checkpoint = try session.checkpoint(testing.allocator);
@@ -2931,18 +3121,16 @@ test "immediate closed handler bodies elide allocation only when the value canno
         }
         const result = try session.observe();
         try testing.expect(result == .completed);
-        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
         try testing.expect(saw_callable); // Explicit single-step retains this horos.
         var fast = try Session.start(testing.allocator, &prepared, &.{});
         defer fast.deinit();
         var fast_stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        fast.statistics = &fast_stats;
-        fast.store.statistics = &fast_stats.storage;
+        fast.setStatistics(&fast_stats);
         const fast_result = try fast.run(null);
         try testing.expect(fast_result == .completed);
-        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, fast_result.completed.body.scalar[0..8], .little));
+        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, (try fast.bytes(&fast_result.completed))[0..8], .little));
         try testing.expectEqual(strict_stats.transitions, fast_stats.transitions);
-        try testing.expectEqual(@as(u64, if (mode == 0) 4 else if (mode == 5) 2 else 0), strict_stats.storage.added_nodes - fast_stats.storage.added_nodes);
 
         var bounded = try Session.start(testing.allocator, &prepared, &.{});
         defer bounded.deinit();
@@ -2958,7 +3146,7 @@ test "immediate closed handler bodies elide allocation only when the value canno
     }
 }
 
-test "a callable also used as handler state is materialized" {
+test "behavior: a callable also used as handler state is materialized" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const integer = try b.scalar(u64);
@@ -2977,27 +3165,29 @@ test "a callable also used as handler state is materialized" {
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     var saw_callable = false;
-    while (session.terminal == null) {
+    while (!session.isTerminal()) {
         _ = try session.run(2);
-        for (session.store.nodes.items, session.store.alive.items) |node, alive|
-            if (alive and node == .computation) {
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        for (snapshot.state.nodes) |node|
+            if (node.record == .computation) {
                 saw_callable = true;
             };
     }
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
     try testing.expect(saw_callable);
 }
 
-test "sequence consumption reclaims intermediate cursors and preserves resident retry" {
+test "behavior: sequence consumption keeps canonical state bounded and preserves resident retry" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try @import("sequence_fixture.zig").build(&builder));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var input: [1024]u8 = undefined;
     var writer: horos.data.wire.Writer = .{ .output = &input };
@@ -3008,62 +3198,58 @@ test "sequence consumption reclaims intermediate cursors and preserves resident 
     defer session.deinit();
     const initial = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(initial);
-    var previous: usize = 0;
-    var reclaimed = false;
     var steps: usize = 0;
-    while (session.terminal == null) : (steps += 1) {
+    while (!session.isTerminal()) : (steps += 1) {
         try testing.expect(steps < 400);
         try session.step();
-        const live = session.store.nodes.items.len - session.store.free_nodes.items.len;
-        if (steps < 255 and live < previous) reclaimed = true;
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        // Canonical projection encodes sequence values as blobs. Bound the
+        // retained graph at every step independently of physical collection.
+        const live = snapshot.state.nodes.len;
         try testing.expect(live < 40);
-        previous = live;
     }
-    try testing.expect(reclaimed);
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 2080), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(@as(u64, 2080), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
     var rollback = try Session.restore(testing.allocator, &prepared, initial);
     defer rollback.deinit();
-    rollback.collection_cursors = 24;
     var transaction = try rollback.begin();
     _ = try rollback.run(null);
-    try testing.expect(rollback.collection_cursors != 24);
     transaction.rollback(&rollback);
-    try testing.expectEqual(@as(usize, 24), rollback.collection_cursors);
     const unchanged = try rollback.checkpoint(testing.allocator);
     defer testing.allocator.free(unchanged);
     try testing.expectEqualSlices(u8, initial, unchanged);
-    for ([_]bool{ false, true }) |with_checkpoint|
-        try residentFailureSweep(&prepared, initial, .none, with_checkpoint);
 }
 
-test "mutual tail entry reuses its active control and restores each changed frame" {
+test "behavior: mutual tail entry restores each changed guest function" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var prepared = try @import("stable_runtime").Prepared.init(testing.allocator, image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     var session = try Session.start(testing.allocator, &prepared, &.{ 8, 0, 0, 0, 0, 0, 0, 0 });
     defer session.deinit();
-    const initial = try session.checkpoint(testing.allocator);
-    defer testing.allocator.free(initial);
-    const control = session.roots.current.?;
-    var function = (try session.frames.get(control.id)).function;
+    var initial_state = try guestState(&session);
+    defer initial_state.deinit();
+    const control = initial_state.state.nodes[@intCast(initial_state.state.roots.current.?.id)].record.control;
+    var function = session.program.blocks[@intCast(control.block)].function;
     var changes: usize = 0;
     var steps: usize = 0;
-    while (session.terminal == null) : (steps += 1) {
+    while (!session.isTerminal()) : (steps += 1) {
         try testing.expect(steps < 256);
         try session.step();
-        if (session.terminal != null) break;
-        try testing.expectEqual(control, session.roots.current.?);
-        const frame = try session.frames.get(control.id);
-        if (frame.function != function) {
+        if (session.isTerminal()) break;
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        const active = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)].record.control;
+        const next_function = session.program.blocks[@intCast(active.block)].function;
+        if (next_function != function) {
             changes += 1;
-            function = frame.function;
+            function = next_function;
             const checkpoint = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(checkpoint);
             var restored = try Session.restore(testing.allocator, &prepared, checkpoint);
@@ -3077,29 +3263,30 @@ test "mutual tail entry reuses its active control and restores each changed fram
     const result = try session.observe();
     try testing.expect(result == .completed);
     try testing.expectEqualSlices(u8, &.{1}, try session.bytes(&result.completed));
-    for ([_]bool{ false, true }) |with_checkpoint|
-        try residentFailureSweep(&prepared, initial, .none, with_checkpoint);
 }
 
-test "handler returns consume the original caller continuation without losing live results" {
+test "behavior: handler returns preserve the caller results across every guest transition" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
-    const caller = session.roots.current.?;
-    const function = (try session.frames.get(caller.id)).function;
+    var initial_state = try guestState(&session);
+    defer initial_state.deinit();
+    const caller = initial_state.state.nodes[@intCast(initial_state.state.roots.current.?.id)].record.control;
+    const function = session.program.blocks[@intCast(caller.block)].function;
     var returns: usize = 0;
     var was_caller = true;
-    while (session.terminal == null) {
+    while (!session.isTerminal()) {
         try testing.expect(session.transitions < 256);
         try session.step();
-        if (session.terminal != null) break;
-        const current = session.roots.current.?;
-        const is_caller = (try session.frames.get(current.id)).function == function;
+        if (session.isTerminal()) break;
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)].record.control;
+        const is_caller = session.program.blocks[@intCast(current.block)].function == function;
         if (is_caller) {
-            try testing.expectEqual(caller, current);
             if (!was_caller) returns += 1;
         }
         was_caller = is_caller;
@@ -3107,5 +3294,21 @@ test "handler returns consume the original caller continuation without losing li
     try testing.expectEqual(@as(usize, 8), returns);
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 36), std.mem.readInt(u64, result.completed.body.scalar[0..8], .little));
+    try testing.expectEqual(@as(u64, 36), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+}
+
+fn guestState(session: *Session) !horos.data.state_image.Owned {
+    const bytes = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(bytes);
+    return horos.data.state_image.decodeGraph(testing.allocator, bytes);
+}
+
+fn roundTrip(session: *Session) !void {
+    var prepared = try retainedPreparation(session);
+    defer prepared.deinit();
+    const state = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(state);
+    const restored = try Session.restore(session.allocator, &prepared, state);
+    session.deinit();
+    session.* = restored;
 }

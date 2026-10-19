@@ -96,8 +96,14 @@ pub const Arena = struct {
             const added = Arena.init(segment);
             const first = added.first orelse return null;
             if (last) |tail| self.address_ordered = self.address_ordered and @intFromPtr(tail) < @intFromPtr(first);
-            if (last) |tail| tail.next = first else self.first = first;
-            first.previous = last;
+            if (last) |tail| {
+                if (tail.available and @intFromPtr(tail) + tail.length == @intFromPtr(first)) {
+                    tail.length += first.length;
+                } else {
+                    tail.next = first;
+                    first.previous = tail;
+                }
+            } else self.first = first;
             self.search = first_available orelse first;
             // The new segment was requested with sufficient alignment and metadata.
             const saved_grow = self.grow;
@@ -206,6 +212,37 @@ test "out-of-order frees coalesce and permit reuse of the complete buffer" {
     try std.testing.expectEqual(@as(usize, 0), arena.live_blocks);
     const all = try allocator.alloc(u8, 8000);
     allocator.free(all);
+}
+
+test "contiguous growth extends the existing free tail before allocating" {
+    const Growth = struct {
+        bytes: []u8,
+        calls: usize = 0,
+        fn grow(context: *anyopaque, minimum: usize) ?[]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (self.calls != 1 or minimum > self.bytes.len) return null;
+            return self.bytes;
+        }
+    };
+    var bytes: [1024]u8 align(64) = undefined;
+    var growth: Growth = .{ .bytes = bytes[256..] };
+    var arena = Arena.init(bytes[0..256]);
+    arena.grow = Growth.grow;
+    arena.grow_context = &growth;
+    const a = arena.allocator();
+    const value = try a.alloc(u8, 300);
+    try std.testing.expect(@intFromPtr(value.ptr) < @intFromPtr(bytes[256..].ptr));
+    try std.testing.expectEqual(@as(usize, 1), growth.calls);
+    @memset(value, 0x91);
+    try std.testing.expect(std.mem.allEqual(u8, value, 0x91));
+    a.free(value);
+    try std.testing.expectEqual(bytes.len, arena.first.?.length);
+    try std.testing.expectEqual(@as(?*Arena.Block, null), arena.first.?.next);
+    try std.testing.expectEqual(@as(usize, 0), arena.live_payload);
+    const all = try a.alloc(u8, 950);
+    a.free(all);
+    try std.testing.expectEqual(@as(usize, 1), growth.calls);
 }
 
 test "unrepresentable allocation demand preserves live workspace contents" {

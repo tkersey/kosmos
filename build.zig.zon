@@ -1,14 +1,14 @@
 .{
     .name = .kosmos,
-    .version = "8.0.0",
+    .version = "9.0.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xda7fbe49074dc2bd,
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#931b960723fb8a2b6808d0c53e2e18efe8394c92",
-            .hash = "horos-5.0.0-flclaAUoPwBrm_JRoAmXQzJl0J3MoctZHvr5ISkzwHKE",
+            .url = "git+https://github.com/tkersey/horos#592eb0839326f2d8a423b59ce2746ab18ef5136a",
+            .hash = "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb",
             .lazy = true,
         },
     },
-    .paths = .{ "LICENSE", "README.md", "build.zig", "build.zig.zon", "build-profile.json", "package.json", "bin", "src", "test", "docs/rename.md", "docs/kernel-abi.md", "docs/verification.md", "docs/runtime-bundles.md" },
+    .paths = .{ "LICENSE", "README.md", "build.zig", "build.zig.zon", "build-profile.json", "package.json", "bin", "src", "test", "test_semantic.zig", "test_semantic_driver.zig", "test_semantic_specialization.zig", "bench_semantics.zig", "docs/rename.md", "docs/kernel-abi.md", "docs/verification.md", "docs/runtime-bundles.md", "docs/executable-semantics.md", "docs/semantic-economy.md" },
 }

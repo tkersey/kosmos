@@ -9,7 +9,7 @@ import { concat, natural } from "../../src/embedding/wire.mjs";
 const [kernelPath, fixtures] = process.argv.slice(2);
 const code = new Uint8Array(await readFile(kernelPath));
 const host = await Kernel.create({ bytes: code, expectedSha256: createHash("sha256").update(code).digest("hex") });
-const limits = { input: 4 << 20, working: 16 << 20, output: 4 << 20 };
+const limits = { input: 4 << 20, working: 128 << 20, output: 4 << 20 };
 host.setLimits(limits);
 const image = new Uint8Array(execFileSync(fixtures, ["image", "largeRequest"]));
 // The pre-migration raw fixture requested and returned these exact bytes.

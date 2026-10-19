@@ -2,7 +2,7 @@
 
 The native roots preserve the evaluator and language contracts:
 
-- `check-storage`: the existing native interpreter/storage/allocation root.
+- `check-storage`: current base storage and allocation contracts.
 - `check-native`: shared native source/session/restore checks and storage tests.
 - `check-publication`: the public-module subset for predecessor large-state
   recovery, typed/encoded native invocation, explicit finite decoder budgets,
@@ -22,10 +22,78 @@ The native roots preserve the evaluator and language contracts:
 The aggregate `check` includes the entire `check-native` root, including
 `check-publication`.
 
+The semantic suites share setup in `src/semantic/test_support.zig`, which has
+no test declarations. Each suite retains its own cases and expected results.
+Behavioral, lifecycle, custody and restore regressions in `stable_source.zig`,
+`source_regressions.zig` and the public publication suite run against the new
+public semantic runtime. Guest-state assertions inspect canonical checkpoints;
+physical storage assertions target storage still used by the current base.
+Retired native cache layouts, frame-handle identities, flow arenas and native
+optimization counters are not requirements of the new evaluator.
+Storage-owner and base-transaction tests exhaust native allocation sites, including
+rollback and retry across complete recursive execution. Public sweeps separately
+cover owned unwind and acquired reply/transaction/publication ownership. Actual
+clone, shallow resume, cleanup, cancellation and reentry fixtures each fail the
+final encoded publication before commit, in both checkpoint modes, then require
+unchanged state and exact retry. Their algorithms execute as ordinary data
+programs over the same native owners; each does not require another exhaustive
+sweep of those owners through the full evaluator.
+Suspension reclamation exhausts rollback/retry with an eight-element encoded
+sequence, and retains the original 8192-element fixture at the final publication
+fence in both checkpoint modes. The independent 131072-element fixture preserves
+the live/dead backing bounds, aliases, canonical restore and continuation checks.
+Full-program result, effect-order and checkpoint fixtures remain separate from
+those failure sweeps; former native optimizer paths do not each require replaying
+the generic evaluator's complete allocation history.
+
+The build fetches the hash-pinned Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f`
+archive only as the independent evaluator for differential comparisons and
+benchmarks. Both use the selected Horos admission/codec module; the historical
+guest evaluator and its storage/lifecycle code are immutable. The build does not
+import the historical test root. Passing reference-engine tests would not qualify
+the new engine. The table witnesses build one image for both evaluators and retain both execution
+paths, all boundary inputs and restore assertions.
+
+Qualification separates immutable preparation from mutable lifecycle checks.
+The deep-session and PST3 restore allocation sweeps reuse an admitted `Prepared`
+owner while exhausting every allocation of the session operation. Guest
+preparation separately sweeps the full 64-field contract fixture. Artifact
+admission sweeps bundle decoding, the bridge program, all four helper owners,
+canonical encoding and the final shared core using small admitted programs;
+the complete evaluator still has exact source/packaged-byte and differential
+qualification. One full fresh-invocation sweep retains its output/input atomicity
+assertions. These are complementary ownership boundaries, not cached test results.
+
+Instruction-by-instruction lifecycle comparisons share immutable preparation
+and reconstruct fresh mutable sessions at every cut. The reconstructed invocation
+also supplies the restoration comparison: `advance(.none)` directly calls
+`Session.run`, so a second restored execution would repeat that same transition.
+The independent direct session and transactional resident remain compared at
+every cut, after their input checkpoint buffer is overwritten. Source agreement likewise
+keeps a native peer process and one WASM prepared handle, restores every PST3,
+and alternates the actual native/WASM state producer. It retains all 47 examples,
+every quantum-one observation, cancellation frontier, independent source result,
+effect trace and canonical-byte assertion. The separate kernel suite still
+exercises the complete fresh invocation entry point alongside resident execution.
+The long recursion resource fixture retains all 10,000 calls and its node bound
+at every 31-step cut. It compares framing once, then executes each remaining
+slice once while retaining canonical checkpoint checks at every cut.
+The indirect recursion fixture retains inputs 7, 127 and 1024, both tail and
+non-tail calls, every 13-step cut and every seventh-cut restoration. Tail-space
+checks still export at every cut. The intentionally growing non-tail control
+exports only at those restoration points; its other exported bytes were unused.
+
 These roots use Zig’s authenticated package cache and the ordinary `tar`
-utility. An explicit Horos source override must produce the selected package
+utility. The immutable baseline fetch rechecks the global package cache even
+when a local build cache survives, so an evicted archive is restored before use.
+An explicit Horos source override must produce the selected package
 hash; modules and emitters then consume that captured package, so later edits to
 the supplied directory cannot change the compiled input. They do not need Node, Python, a WASM bundle or a package producer.
+
+Native semantic qualification rebuilds the evaluator from authored source. An extracted
+native package consumer uses the shipped ordinary artifact after checking its
+source, compiler and content fingerprints; it does not rebuild the host generator
+or run unrelated suites. Both paths perform the same runtime artifact admission.
 
 The native recovery test retains the exact 52-byte predecessor BPI3 and the
 three original PST3 hashes in `test/v2/native_decode.zig`. Large states are
@@ -55,6 +123,37 @@ The optional foreign-environment roots have distinct consumers:
 `check` composes these existing roots. Node/browser dependencies stop at these
 explicit checks and the optional JS consumer. Native and source-dependent checks
 share a build graph; no per-feature wrapper rebuilds the authoring machinery.
+
+The source comparison overlaps the independent native child and WASM execution
+for each identical immutable command. It awaits both before the next observation,
+retaining every restore, transfer checkpoint, byte comparison and source assertion.
+
+CI runs session behavior, session ownership/failure, source regression, native
+semantic, specialization/publication, two source-agreement and portable groups independently; their union is
+exactly the aggregate `check` dependency set. The session partitions retain all
+82 named cases (52 behavior, 14 ownership/failure, 16 source regressions) and
+the anonymous import sentinel. Standalone test executables show each case and
+require the complete selected count; the ordinary `check-sessions` target still
+runs all 83 cases together. Source-agreement partitions select disjoint fixture
+sets while retaining every mode, instruction frontier, cancellation and comparison;
+together they execute all 47 fixtures and 9,570 observations. The native semantic
+group rebuilds the source artifact, while specialization and publication use the
+same authenticated packaged artifact. It does not invoke `check-native` and then the
+overlapping `check`. Native test run steps always execute, even when compilation
+is cached. An independent native-consumer lane builds only its Horos-authored
+input producer and the extracted public package, without compiling the optional
+ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
+Zig's input hashes and the dependency admission guards remain authoritative.
+The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
+artifact whose source correspondence the native semantic lane checks. All lanes
+retain full runtime artifact and guest-state admission.
+The workflow-dispatch `compiler-cache=false` input disables compiler restoration
+for a cold measurement. Every job has at most ten minutes, and the terminal gate
+also checks the elapsed time of the complete workflow against 600 seconds.
+The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
+acquisition times in the integrated Protean qualification. Upstream signature and
+archive-name verification remain active. An explicit mirror removes the action's
+randomized selection and automatic fallback; future availability is not guaranteed.
 
 Historical Python/Wasmtime transfer, timing, layout, replay, scalar/blob/history
 measurement and duplicate platform campaigns are retired with their exclusive

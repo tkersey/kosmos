@@ -4,15 +4,26 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      compiler-cache:
+        description: Restore dependency and compiler artifacts (disable for a cold run)
+        type: boolean
+        default: true
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   qualify:
+    name: Qualify / ${{ matrix.lane }}
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [sessions, session-ownership, source-regressions, native, specialization, source, source-second, portable, consumer]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -20,19 +31,23 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.17.0'
+          mirror: https://zigmirror.com
           use-cache: false
       - name: Check source formatting before compilation
         run: |
           git ls-files '*.zig' | xargs zig fmt --check
       - name: Restore complete compiler cache
         id: cache
+        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Select working cache
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -40,10 +55,41 @@ jobs:
             mv .zig-cache-upload .zig-cache
           fi
           mkdir -p .zig-cache/tmp
-      - name: Check native owners and emit the shared consumer input
-        run: zig build check-native check-zig17 emit-native-input -Doptimize=safe --summary all
-      - name: Consume the actual native source package without a JS producer
+      - name: Check native owners and independently rebuild the core
+        if: matrix.lane == 'native'
+        run: >-
+          zig build check-storage check-semantic-driver check-semantics
+          check-zig17
+          -Doptimize=safe --summary all
+      - name: Check specialization and public receipt owners
+        if: matrix.lane == 'specialization'
+        run: >-
+          zig build check-semantic-specialization check-publication
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check every selected current session fixture
+        if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
         run: |
+          set -o pipefail
+          if grep '^test "' test/v2/stable_source.zig | grep -Ev '^test "(behavior|ownership): '; then
+            exit 1
+          fi
+          case "${{ matrix.lane }}" in
+            sessions) group=behavior; expected=54 ;;
+            session-ownership) group=ownership; expected=16 ;;
+            source-regressions) group=regressions; expected=17 ;;
+          esac
+          zig build build-session-check -Dsession-group="$group" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
+          zig-out/verification/sessions 2>&1 | tee "$RUNNER_TEMP/session-tests.log"
+          if command -v rg >/dev/null; then
+            rg -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
+          else
+            grep -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
+          fi
+      - name: Consume the actual native source package without a JS producer
+        if: matrix.lane == 'consumer'
+        run: |
+          zig build emit-native-input -Doptimize=safe -Dpackaged-runtime=true --summary all
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
@@ -54,20 +100,37 @@ jobs:
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
           zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        if: matrix.lane == 'portable' || matrix.lane == 'source' || matrix.lane == 'source-second'
         with:
           node-version: '26.9.0'
       - name: Install only the browser boundary's tools
+        if: matrix.lane == 'portable'
         run: |
           npm ci --ignore-scripts --prefix test/current/browser-tools
           node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
-        run: zig build check build-runtime -Doptimize=safe --summary all
+        if: matrix.lane == 'portable'
+        # The independent lanes cover every dependency of `check` once.
+        # Native qualification rebuilds and compares the exact packaged core.
+        run: >-
+          zig build check-activation-storage-wasm check-kernel
+          check-capacity check-browser check-codecs check-package build-runtime
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Qualify every source example and instruction frontier
+        if: matrix.lane == 'source' || matrix.lane == 'source-second'
+        run: |
+          group=first
+          if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
+          zig build check-source -Dsource-group="$group" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
+        if: matrix.lane == 'portable'
         working-directory: zig-out/runtime
         run: |
           archive=$(npm pack --offline --ignore-scripts --silent --pack-destination "$RUNNER_TEMP")
           mv "$RUNNER_TEMP/$archive" "$RUNNER_TEMP/kosmos-runtime-package.tar.gz"
       - name: Retain the tested package
+        if: matrix.lane == 'portable'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: kosmos-runtime-package-${{ github.sha }}
@@ -96,4 +159,23 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+  complete:
+    name: Complete qualification
+    needs: qualify
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require complete qualification within ten minutes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          QUALIFICATION: ${{ needs.qualify.result }}
+        run: |
+          test "$QUALIFICATION" = success
+          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
+          elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
+          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$elapsed" -le 600

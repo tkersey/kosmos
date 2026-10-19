@@ -2,7 +2,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const data = horos.data;
-const Session = @import("stable_runtime").Session;
+const Session = @import("kosmos").Session;
 const testing = std.testing;
 const allocator = testing.allocator;
 const borrow_returns = @import("borrow_return_fixtures");
@@ -124,17 +124,17 @@ test "current cleanup rejects duplicate obligations and a forged running continu
         const restored = try Session.restoreImage(allocator, image, bytes);
         session.deinit();
         session = restored;
-        if (session.terminal != null) break;
-        switch (session.status) {
+        if (session.isTerminal()) break;
+        switch (try session.observe()) {
             .yielded => try session.resumeYield(),
-            .parked => try answerUnit(&session),
+            .requested => try answerUnit(&session),
             else => try session.step(),
         }
     }
     try testing.expect(duplicate and running);
     const result = try session.observe();
     try testing.expect(result == .failed);
-    try testing.expectEqual(7, result.failed.body.scalar[0]);
+    try testing.expectEqual(7, (try session.bytes(&result.failed))[0]);
 }
 
 test "current yielded cleanup preserves binary and text first cancellation through restore" {
@@ -168,7 +168,7 @@ test "current yielded cleanup preserves binary and text first cancellation throu
             }
             const result = try session.run(null);
             try testing.expect(result == .failed);
-            try testing.expectEqual(if (primary == 0) @as(u8, 7) else 9, result.failed.body.scalar[0]);
+            try testing.expectEqual(if (primary == 0) @as(u8, 7) else 9, (try session.bytes(&result.failed))[0]);
             try testing.expectEqualDeep(reason, (try session.terminalExit()).cancellation.?);
         }
     }
@@ -232,7 +232,7 @@ test "current suspended delimiters cannot terminate a live return spine" {
                 }
             }
         }
-        if (session.terminal != null) break;
+        if (session.isTerminal()) break;
         try session.step();
     }
     try testing.expect(checked);
@@ -359,10 +359,10 @@ test "current captured delimiters and branch-local region aliases reject corrupt
             const restored = try Session.restoreImage(allocator, image, bytes);
             session.deinit();
             session = restored;
-            if (session.terminal != null) break;
+            if (session.isTerminal()) break;
             try session.step();
         }
-        try testing.expect(session.terminal != null);
+        try testing.expect(session.isTerminal());
         try testing.expect(try session.observe() == .completed);
     }
     try testing.expect(one_shot and multi and local_alias);
@@ -886,7 +886,7 @@ test "saved same-family capability substitution cannot escape through a helper r
                     }
                 }
             }
-            if (session.terminal != null) break;
+            if (session.isTerminal()) break;
             const restored = try Session.restoreImage(allocator, image, bytes);
             session.deinit();
             session = restored;
@@ -1024,6 +1024,10 @@ test "tail indirect application retains its environment without accumulating ret
                     break;
                 }
                 try testing.expect(outcome == .progressed);
+                // Tail space is checked at every cut. The non-tail control
+                // intentionally grows; export it only at the existing restore
+                // points instead of constructing six unused copies per seven.
+                if (non_tail and rounds % 7 != 0) continue;
                 const state = try session.checkpoint(allocator);
                 defer allocator.free(state);
                 if (!non_tail) {

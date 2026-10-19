@@ -21,6 +21,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = std.json.parseFromSliceLeaky(Profile, b.allocator, @embedFile("build-profile.json"), .{}) catch @panic("invalid runtime profile");
+    // Declare options before a cold lazy dependency fetch can return.
+    const use_packaged_runtime = b.option(bool, "packaged-runtime", "Use the source/compiler/content-bound evaluator artifact") orelse true;
+    const session_group = b.option(enum { behavior, ownership, regressions }, "session-group", "Select independent session qualification cases (default: all)");
+    const source_group = b.option(enum { first, second }, "source-group", "Select an exhaustive half of the source fixtures (default: all)");
+    const economy_workload = b.option([]const u8, "economy-workload", "Select one semantic economy workload");
+    const input_capacity = b.option(usize, "input-capacity", "Initial current input budget") orelse profile.defaults.input;
+    const working_capacity = b.option(usize, "working-capacity", "Initial current working allocation budget") orelse profile.defaults.working;
+    const output_capacity = b.option(usize, "output-capacity", "Initial current output budget") orelse profile.defaults.output;
+    const maximum_memory = b.option(u64, "maximum-memory", "Current wasm32 memory maximum in whole pages") orelse profile.maximumMemoryBytes;
     const package = @import("build.zig.zon");
     const kernel_mode = std.meta.stringToEnum(std.lang.Optimize, profile.kernelMode) orelse @panic("invalid kernel mode");
     const supplied_source = b.option(std.Build.LazyPath, "horos-source", "Override the pinned Horos source") orelse pinned: {
@@ -44,7 +53,10 @@ pub fn build(b: *std.Build) void {
     admission.expectStdOutEqual(package.dependencies.horos.hash ++ "\n");
     admission.has_side_effects = true;
     const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
-    snapshot.removeEnvironmentVariable("TAR_OPTIONS");
+    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
+    // PATH still selects tar's decompressor; ambient archive options stay absent.
+    snapshot.clearEnvironment();
+    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
     snapshot.addFileArg2(b.graph.path(.global_cache, "p/" ++ package.dependencies.horos.hash ++ ".tar.gz"), .{ .make_absolute = true });
     snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
     const source = snapshot.addOutputDirectoryArg2("horos", .{});
@@ -72,6 +84,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "horos_data", .module = host_data }},
     }) });
     const run_native_tests = b.addRunArtifact(tests);
+    run_native_tests.has_side_effects = true;
     b.step("check-storage", "Check current private storage and allocation contracts")
         .dependOn(&run_native_tests.step);
     const activation_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -80,12 +93,65 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = host_data }},
     }) });
+    const run_activation_tests = b.addRunArtifact(activation_tests);
+    run_activation_tests.has_side_effects = true;
     b.step("check-activation-storage", "Check stable activation storage and failure atomicity")
-        .dependOn(&b.addRunArtifact(activation_tests).step);
+        .dependOn(&run_activation_tests.step);
     const host_mode = std.meta.stringToEnum(std.lang.Optimize, profile.hostMode) orelse @panic("invalid host mode");
     const source_data = if (host_mode == optimize) host_data else b.createModule(.{ .root_source_file = source.path(b, "src/data/root.zig"), .target = b.graph.host, .optimize = host_mode });
     const horos = b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    public_kosmos.addImport("horos", if (target.query.isNative() and host_mode == optimize) horos else b.createModule(.{ .root_source_file = source.path(b, "src/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "horos_data", .module = data }} }));
+    const artifact_options = b.addOptions();
+    artifact_options.addOption([]const u8, "horos_package", package.dependencies.horos.hash);
+    // Qualification rebuilds the evaluator from source and compares exact
+    // packaged bytes. A downstream consumer checks the shipped source/compiler/
+    // content bindings instead of recompiling that host generator. Runtime
+    // artifact and guest admission are identical in both cases.
+    const artifact_emitter = b.addExecutable(.{ .name = "kosmos-semantic-artifact", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/semantic_artifact.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos } },
+    }) });
+    artifact_emitter.root_module.addOptions("artifact_options", artifact_options);
+    const emit_artifact = b.addRunArtifact(artifact_emitter);
+    const semantic_artifact = emit_artifact.captureStdOut(.{});
+    const selected_artifact = if (use_packaged_runtime) packaged: {
+        const emitter = b.addExecutable(.{ .name = "kosmos-packaged-artifact", .root_module = b.createModule(.{
+            .root_source_file = b.path("src/semantic_packaged.zig"),
+            .target = b.graph.host,
+            .optimize = host_mode,
+        }) });
+        emitter.root_module.addOptions("artifact_options", artifact_options);
+        break :packaged b.addRunArtifact(emitter).captureStdOut(.{});
+    } else semantic_artifact;
+    const runtime_files = b.addWriteFiles();
+    _ = runtime_files.addCopyFile(selected_artifact, "semantic-core.kar");
+    const runtime_source = runtime_files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n");
+    const packaged_runtime = b.createModule(.{
+        .root_source_file = runtime_source,
+        .target = b.graph.host,
+        .optimize = host_mode,
+    });
+    // The source correspondence test must always receive an independent rebuild,
+    // including when `check` is requested with the packaged-runtime option.
+    const rebuilt_runtime = if (!use_packaged_runtime) packaged_runtime else rebuilt: {
+        const files = b.addWriteFiles();
+        _ = files.addCopyFile(semantic_artifact, "semantic-core.kar");
+        break :rebuilt b.createModule(.{
+            .root_source_file = files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n"),
+            .target = b.graph.host,
+            .optimize = host_mode,
+        });
+    };
+    public_kosmos.addImport("packaged_runtime", if (target.query.isNative()) packaged_runtime else b.createModule(.{ .root_source_file = runtime_source, .target = target, .optimize = optimize }));
+    b.step("semantic-artifact", "Compile and admit the reproducible portable evaluator bundle")
+        .dependOn(&b.addInstallFile(semantic_artifact, "semantic-core.kar").step);
     const host_kosmos = if (target.query.isNative() and host_mode == optimize) public_kosmos else b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    if (host_kosmos != public_kosmos) {
+        host_kosmos.addImport("packaged_runtime", packaged_runtime);
+        host_kosmos.addImport("horos", horos);
+    }
     const publication_bench = b.addExecutable(.{ .name = "publication-bench", .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/publication_bench.zig"),
         .target = b.graph.host,
@@ -96,16 +162,87 @@ pub fn build(b: *std.Build) void {
     run_publication_bench.has_side_effects = true;
     b.step("bench-publication", "Measure native preparation, publication, receipt custody and restore (JSONL)")
         .dependOn(&b.addInstallFile(run_publication_bench.captureStdOut(.{}), "publication.jsonl").step);
-    const stable_runtime = b.createModule(.{ .root_source_file = b.path("src/interpreter_v2/stable_session.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    // Immutable historical comparison input. Only qualification and benchmark
+    // roots depend on this fetch; production has no native guest evaluator.
+    const baseline_hash = "kosmos-8.0.0-vcJNB7_PDwCsxCmIN8VIVZsi9fW8qHX7Y5xesXeS6Kn5";
+    const baseline_fetch = b.addRunFile(.zig_exe);
+    baseline_fetch.setCwd(b.graph.path(.global_cache, ""));
+    baseline_fetch.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
+    baseline_fetch.addArgs(&.{ "fetch", "https://github.com/tkersey/kosmos/archive/62279bce8e916e7fe613fe4575b3bc12e530596f.tar.gz" });
+    baseline_fetch.expectStdOutEqual(baseline_hash ++ "\n");
+    baseline_fetch.has_side_effects = true;
+    const baseline_unpack = b.addSystemCommand(&.{ "tar", "-xzf" });
+    baseline_unpack.clearEnvironment();
+    if (b.graph.environ_map.get("PATH")) |path| baseline_unpack.setEnvironmentVariable("PATH", path);
+    baseline_unpack.addFileArg2(b.graph.path(.global_cache, "p/" ++ baseline_hash ++ ".tar.gz"), .{ .make_absolute = true });
+    baseline_unpack.addArgs(&.{ "--strip-components=2", "--no-same-owner", "-C" });
+    const baseline_source = baseline_unpack.addOutputDirectoryArg2("native-baseline", .{});
+    baseline_unpack.step.dependOn(&baseline_fetch.step);
+    const native_baseline = b.createModule(.{ .root_source_file = baseline_source.path(b, "src/interpreter_v2/stable_session.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos_data", .module = source_data }} });
+    const economy_bench = b.addExecutable(.{ .name = "semantic-economy", .root_module = b.createModule(.{
+        .root_source_file = b.path("bench_semantics.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = packaged_runtime } },
+    }) });
+    const run_economy_bench = b.addRunArtifact(economy_bench);
+    if (economy_workload) |name| run_economy_bench.addArg(name);
+    run_economy_bench.has_side_effects = true;
+    b.step("bench-semantics", "Measure matched native, bootstrap, generic and specialized realizations (JSONL)")
+        .dependOn(&run_economy_bench.step);
     const borrow_returns = b.createModule(.{ .root_source_file = source.path(b, "test/v2/borrow_returns.zig"), .target = b.graph.host, .optimize = host_mode, .imports = &.{.{ .name = "horos", .module = horos }} });
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/stable_source.zig"),
         .target = b.graph.host,
         .optimize = host_mode,
-        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "stable_runtime", .module = stable_runtime }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
-    }) });
+        .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "borrow_return_fixtures", .module = borrow_returns } },
+    }), .filters = if (session_group) |group| switch (group) {
+        .behavior => &.{"stable_source.test.behavior: "},
+        .ownership => &.{"stable_source.test.ownership: "},
+        .regressions => &.{"source_regressions."},
+    } else &.{} });
     const stable_source = b.addRunArtifact(stable_test);
+    stable_source.has_side_effects = true;
+    b.step("check-sessions", "Check current public session behavior, ownership and failure atomicity")
+        .dependOn(&stable_source.step);
+    b.step("build-session-check", "Build the retained session test executable")
+        .dependOn(&b.addInstallArtifact(stable_test, .{
+        .dest_dir = .{ .override = .{ .custom = "verification" } },
+        .dest_sub_path = "sessions",
+    }).step);
     const native_checks = b.step("check-native", "Check native storage, source semantics, sessions and restore without an interpreter");
+    const driver_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test_semantic_driver.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos }, .{ .name = "packaged_runtime", .module = rebuilt_runtime } },
+    }) });
+    const run_driver_tests = b.addRunArtifact(driver_tests);
+    run_driver_tests.has_side_effects = true;
+    b.step("check-semantic-driver", "Check packaged artifact admission and guest/outer bridge framing").dependOn(&run_driver_tests.step);
+    native_checks.dependOn(&run_driver_tests.step);
+    const semantic_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test_semantic.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos } },
+    }) });
+    const run_semantic_tests = b.addRunArtifact(semantic_tests);
+    run_semantic_tests.has_side_effects = true;
+    b.step("check-semantics", "Check portable semantics against the immutable historical evaluator")
+        .dependOn(&run_semantic_tests.step);
+    native_checks.dependOn(&run_semantic_tests.step);
+    const specialization_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test_semantic_specialization.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{ .{ .name = "native_baseline", .module = native_baseline }, .{ .name = "horos_data", .module = source_data }, .{ .name = "horos", .module = horos } },
+    }) });
+    const run_specialization_tests = b.addRunArtifact(specialization_tests);
+    run_specialization_tests.has_side_effects = true;
+    b.step("check-semantic-specialization", "Check specialized transitions, scalar storage and retained reconstruction")
+        .dependOn(&run_specialization_tests.step);
+    native_checks.dependOn(&run_specialization_tests.step);
     native_checks.dependOn(&stable_source.step);
     native_checks.dependOn(&run_native_tests.step);
     const public_test = b.addTest(.{ .root_module = b.createModule(.{
@@ -115,6 +252,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
     }) });
     const public_checks = b.addRunArtifact(public_test);
+    public_checks.has_side_effects = true;
     native_checks.dependOn(&public_checks.step);
     b.step("check-publication", "Check native public checkpoint recovery and receipt custody").dependOn(&public_checks.step);
     const wasm_target = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = profile.target, .cpu_features = profile.cpu }) catch @panic("invalid kernel target"));
@@ -124,15 +262,16 @@ pub fn build(b: *std.Build) void {
         .optimize = kernel_mode,
     });
     const current_runtime = b.createModule(.{
-        .root_source_file = b.path("src/interpreter_v2/stable_session.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = wasm_target,
         .optimize = kernel_mode,
         .imports = &.{.{ .name = "horos_data", .module = wasm_data }},
     });
+    current_runtime.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = wasm_target, .optimize = kernel_mode }));
     const current_options = b.addOptions();
-    current_options.addOption(usize, "input_capacity", b.option(usize, "input-capacity", "Initial current input budget") orelse profile.defaults.input);
-    current_options.addOption(usize, "working_capacity", b.option(usize, "working-capacity", "Initial current working budget and backing") orelse profile.defaults.working);
-    current_options.addOption(usize, "output_capacity", b.option(usize, "output-capacity", "Initial current output budget") orelse profile.defaults.output);
+    current_options.addOption(usize, "input_capacity", input_capacity);
+    current_options.addOption(usize, "working_capacity", working_capacity);
+    current_options.addOption(usize, "output_capacity", output_capacity);
     const current_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/main.zig"),
         .target = wasm_target,
@@ -158,7 +297,7 @@ pub fn build(b: *std.Build) void {
     };
     current_kernel.export_memory = true;
     current_kernel.stack_size = profile.stackBytes;
-    current_kernel.max_memory = b.option(u64, "maximum-memory", "Current wasm32 memory maximum in whole pages") orelse profile.maximumMemoryBytes;
+    current_kernel.max_memory = maximum_memory;
     var features: std.ArrayList([]const u8) = .empty;
     for (wasm_target.result.cpu.arch.allFeaturesList(), 0..) |feature, index| {
         if (wasm_target.result.cpu.features.isEnabled(@intCast(index)))
@@ -197,8 +336,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "kosmos", .module = host_kosmos }, .{ .name = "horos", .module = horos } },
     }) });
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{ .override = .{ .custom = "current/bin" } } });
-    const native_input = b.addRunArtifact(fixture);
-    native_input.addArgs(&.{ "image", "install" });
+    const native_input_emitter = b.addExecutable(.{ .name = "kosmos-consumer-input", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/native_consumer/emit.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{.{ .name = "horos", .module = horos }},
+    }) });
+    const native_input = b.addRunArtifact(native_input_emitter);
     b.step("emit-native-input", "Emit the shared native public-consumer input").dependOn(&b.addInstallFileWithDir(native_input.captureStdOut(.{}), .prefix, "native-consumer.bpi3").step);
     const current_package_check = b.addSystemCommand(&.{"node"});
     current_package_check.addFileArg2(b.path("test/current/package.mjs"), .{});
@@ -231,6 +375,8 @@ pub fn build(b: *std.Build) void {
     source_agreement.addFileArg2(fixture.getEmittedBin(), .{ .make_absolute = true });
     source_agreement.addDirectoryArg2(b.graph.path(.install_prefix, "source"), .{ .make_absolute = true });
     source_agreement.addFileArg2(source.path(b, "test/v2/source_oracle.mjs"), .{ .make_absolute = true });
+    if (source_group) |group|
+        source_agreement.addArg(@tagName(group));
     source_agreement.step.dependOn(&source_examples.step);
     source_agreement.step.dependOn(&current_fixtures.step);
     source_agreement.has_side_effects = true;
