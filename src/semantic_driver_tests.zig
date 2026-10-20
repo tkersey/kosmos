@@ -1009,9 +1009,14 @@ fn expectSpecializedChain(
 }
 
 fn expectRejectedLayout(original: source.ast.Module, machine: u64) !void {
+    const Field = @import("semantic/machine.zig").Field;
+    const coordinates = try a.alloc(u64, original.schemas[@intCast(machine)].product.len);
+    defer a.free(coordinates);
+    for (coordinates, 0..) |*coordinate, i| coordinate.* = @intCast(i);
+    std.mem.swap(u64, &coordinates[@backingInt(Field.program)], &coordinates[@backingInt(Field.work)]);
     var proposed = try generatedProposal(original, .{
         .schema = machine,
-        .coordinates = &.{ 4, 1, 2, 3, 0 },
+        .coordinates = coordinates,
     }, 1);
     defer proposed.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
