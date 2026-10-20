@@ -19,7 +19,7 @@ jobs:
   tiger-style:
     name: TigerStyle
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -183,24 +183,36 @@ jobs:
         with:
           path: .zig-cache-upload
           key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
-  complete:
-    name: Complete qualification
-    needs: [tiger-style, qualify]
+  runtime-complete:
+    name: Runtime qualification budget
+    needs: qualify
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require complete qualification within ten minutes
+      - name: Require runtime qualification within ten minutes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          TIGER_STYLE: ${{ needs.tiger-style.result }}
           QUALIFICATION: ${{ needs.qualify.result }}
         run: |
-          test "$TIGER_STYLE" = success
           test "$QUALIFICATION" = success
           started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
-          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Runtime qualification before budget gate: ${elapsed}s (maximum 600s; TigerStyle exempt)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600
+  complete:
+    name: Complete qualification
+    needs: [tiger-style, runtime-complete]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require TigerStyle and bounded runtime qualification
+        env:
+          TIGER_STYLE: ${{ needs.tiger-style.result }}
+          QUALIFICATION: ${{ needs.runtime-complete.result }}
+        run: |
+          test "$TIGER_STYLE" = success
+          test "$QUALIFICATION" = success

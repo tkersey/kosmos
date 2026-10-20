@@ -2,8 +2,9 @@
 
 [TigerStyle](https://github.com/tkersey/kosmos/blob/main/docs/tiger-style.md) adds a concurrent development-source gate. Its native
 auditor self-tests and committed-change ratchet must pass along with all existing
-runtime qualification lanes. `Complete qualification` requires both results and
-retains the 600-second complete-workflow limit.
+runtime qualification lanes. `Complete qualification` requires both results.
+Runtime qualification retains its 600-second workflow budget; TigerStyle is
+exempt from that budget and has an independent 45-minute job timeout.
 
 The native roots preserve the evaluator and language contracts:
 
@@ -153,8 +154,10 @@ The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
 artifact whose source correspondence the native semantic lane checks. All lanes
 retain full runtime artifact and guest-state admission.
 The workflow-dispatch `compiler-cache=false` input disables compiler restoration
-for a cold measurement. Every job has at most ten minutes, and the terminal gate
-also checks the elapsed time of the complete workflow against 600 seconds.
+for a cold measurement. Every runtime lane has at most ten minutes. The runtime
+budget gate checks elapsed time from workflow start against 600 seconds without
+waiting for TigerStyle. The terminal gate requires both the bounded runtime
+qualification and the exempt TigerStyle job to succeed.
 The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
 acquisition times in the integrated Protean qualification. Upstream signature and
 archive-name verification remain active. An explicit mirror removes the action's

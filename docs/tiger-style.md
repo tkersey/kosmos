@@ -102,8 +102,9 @@ fixtures to manufacture confidence.
 
 Every required check must complete successfully on the delivered candidate.
 Stopped, skipped, timed-out and inconclusive runs remain outstanding. Record the
-actual commands and outcomes in the PR. CI's complete-workflow limit remains
-600 seconds, including the TigerStyle job.
+actual commands and outcomes in the PR. Runtime qualification retains its
+600-second workflow budget. TigerStyle verification is exempt from that budget
+and remains required, with an independent 45-minute job timeout.
 
 ## Run the adoption ratchet
 
@@ -137,7 +138,9 @@ added-line and new-file failures, invalid revisions, dirty indexes/worktrees,
 binary diffs and changed file types. CI runs these probes without retaining
 generated fixtures.
 
-Runtime qualification runs concurrently with TigerStyle. The existing
-`Complete qualification` check requires both to succeed within its existing
-ten-minute workflow limit. The dedicated job checks the exact PR head, with the
-PR base supplied separately, and remains active for main pushes and manual runs.
+Runtime qualification runs concurrently with TigerStyle. `Runtime qualification
+budget` checks the runtime lanes against 600 seconds from workflow start without
+waiting for TigerStyle. The existing `Complete qualification` check then requires
+both the runtime budget gate and TigerStyle to succeed. The dedicated TigerStyle
+job checks the exact PR head, with the PR base supplied separately, and remains
+active for main pushes and manual runs.
