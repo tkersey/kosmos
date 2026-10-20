@@ -9,6 +9,8 @@ const ScalarRule = @FieldType(source.relation.Scalar, "rule");
 
 pub const layout = @import("transformation_layout.zig").define;
 pub const LayoutInput = @import("transformation_layout.zig").Input;
+pub const indexedLayout = @import("transformation_layout.zig").defineIndexed;
+pub const IndexedLayoutInput = @import("transformation_layout.zig").IndexedInput;
 
 pub const Input = struct {
     module: source.ast.Module,

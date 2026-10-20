@@ -839,6 +839,72 @@ test "generated transformer reads actual generic semantic source" {
     try validateGenerated(original, proposed.value, &.{});
 }
 
+test "indexed generated layout reuses exact source facts and rejects omitted users" {
+    const compiler = @import("semantic/compiler.zig");
+    const transformation = @import("semantic/transformation.zig");
+    var subject = source.Builder.init(a);
+    defer subject.deinit();
+    const e = try Author.init(&subject);
+    const product = try subject.schema(.{ .product = &.{ e.integer, e.integer } });
+    const entry = try subject.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const value = try e.tuple(product, &.{ try e.param(entry, 0), try subject.constant(u64, 37) });
+    try subject.define(entry, try subject.pure(try e.field(value, 0)));
+    const original = subject.module(entry, e.unit);
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const driver = try transformation.indexedLayout(&builder);
+    var producer = try support.prepare(builder.module(driver, try builder.scalar(void)));
+    defer producer.deinit();
+    var references = try compiler.sourceReferences(a, original);
+    defer references.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try compiler.sourceModule(original)).digest,
+        &references.value.source,
+    );
+    var first = try runIndexedLayout(&producer, original, product, references.value);
+    defer first.deinit();
+    try validateGenerated(original, first.value, &.{product});
+    var successor_references = try compiler.sourceReferences(a, first.value.selected);
+    defer successor_references.deinit();
+    var second = try runIndexedLayout(
+        &producer,
+        first.value.selected,
+        product,
+        successor_references.value,
+    );
+    defer second.deinit();
+    try validateGenerated(first.value.selected, second.value, &.{product});
+    try std.testing.expect(data.record.equal(source.Module, original, second.value.selected));
+    const kind = @backingInt(source.relation.Relocation.Kind.value);
+    @constCast(references.value.users[kind])[@intCast(value)] = &.{};
+    var omitted = try runIndexedLayout(&producer, original, product, references.value);
+    defer omitted.deinit();
+    var admitted = try source.lower(a, omitted.value.selected);
+    defer admitted.deinit();
+    try std.testing.expectError(error.InvalidRelation, validateGenerated(
+        original,
+        omitted.value,
+        &.{product},
+    ));
+}
+
+fn runIndexedLayout(
+    producer: *const base.Prepared,
+    module: source.Module,
+    schema: u64,
+    references: @import("semantic/compiler.zig").SourceReferences,
+) !projection.Owned(@import("semantic/compiler.zig").RecordProposal) {
+    const transformation = @import("semantic/transformation.zig");
+    const input = try projection.encode(transformation.IndexedLayoutInput, a, .{
+        .module = module,
+        .layout = .{ .schema = schema, .coordinates = &.{ 1, 0 } },
+        .references = references,
+    });
+    defer a.free(input);
+    return runGenerated(producer, input);
+}
+
 fn transformationSubject(b: *source.Builder, key: u64) !source.Module {
     const e = try Author.init(b);
     const entry = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});

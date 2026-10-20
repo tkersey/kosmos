@@ -99,6 +99,13 @@ pub const SourceDefinition = struct {
 };
 
 pub const SourceModule = struct { module: source.ast.Module, digest: artifact.Digest };
+pub const SourceReferences = @import("source_references.zig").Value;
+pub const OwnedSourceReferences = @import("source_references.zig").Owned;
+
+pub fn sourceReferences(a: std.mem.Allocator, module: source.ast.Module) !OwnedSourceReferences {
+    return @import("source_references.zig").init(a, module, (try sourceModule(module)).digest);
+}
+
 pub const SourceHelper = struct {
     role: enum { projector, storage, clone_context, clone_rebase },
     source: SourceModule,
