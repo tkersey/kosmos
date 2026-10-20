@@ -24,7 +24,12 @@ test "hypothetical reply interpretation runs ordinary source without consuming a
     defer pending.deinit();
     var builder = source.Builder.init(a);
     defer builder.deinit();
-    var compiled = try source.lower(a, try analysis.example(&builder));
+    var diagnostic: source.Diagnostic = .{};
+    const module = try analysis.example(&builder);
+    var compiled = source.lowerObserved(a, module, .{ .diagnostic = &diagnostic }) catch |err| {
+        std.debug.print("interpretation lowering: {any}\n", .{diagnostic});
+        return err;
+    };
     defer compiled.deinit();
     try std.testing.expectEqual(@as(usize, 0), compiled.program.effects.len);
     const code = try support.encodeCompiled(&compiled);
@@ -194,4 +199,431 @@ fn booleanGuest(guest_builder: *source.Builder) !source.Module {
         ),
     );
     return guest_builder.module(entry, e.unit);
+}
+
+test "constructed interpretation retains alternatives and resumes missing assumptions as data" {
+    var guest_builder = source.Builder.init(a);
+    defer guest_builder.deinit();
+    const image = try support.encode(try branchGuest(&guest_builder));
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const program = try analysis.interpretation(&builder, guest, null);
+    var compiled = try source.lower(a, program);
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(usize, 0), compiled.program.effects.len);
+    const code = try support.encodeCompiled(&compiled);
+    defer a.free(code);
+    const zero = encodedInteger(0);
+    const one = encodedInteger(1);
+    const seven = encodedInteger(7);
+    const eleven = encodedInteger(11);
+    var first = try runInterpretation(code, &.{ &zero, &seven }, 100);
+    defer first.deinit();
+    try std.testing.expectEqual(.terminal, first.value.stopping);
+    try expectInterpretationValue(first.value, 7);
+    var other = try runInterpretation(code, &.{ &one, &eleven }, 100);
+    defer other.deinit();
+    try std.testing.expectEqual(.missing_assumption, other.value.stopping);
+    try std.testing.expectEqual(@as(u64, 2), other.value.applied);
+    try std.testing.expectEqual(@as(usize, 2), other.value.requests.len);
+    try std.testing.expectEqualSlices(u8, &zero, other.value.requests[0].request.payload);
+    try std.testing.expectEqualSlices(u8, &one, other.value.requests[1].request.payload);
+    try std.testing.expectEqualSlices(u8, &one, other.value.assumptions[0]);
+    try std.testing.expect(other.value.observation == .requested);
+    try std.testing.expectEqualSlices(u8, &eleven, other.value.observation.requested.payload);
+    try expectResumedAlternative(guest, other.value.state);
+    var unfinished = try runInterpretation(code, &.{ &zero, &seven }, 1);
+    defer unfinished.deinit();
+    try std.testing.expectEqual(.quantum, unfinished.value.stopping);
+    try std.testing.expectEqual(@as(u64, 0), unfinished.value.applied);
+    try expectSnapshotBinding(guest, unfinished.value.state);
+}
+
+fn encodedInteger(value: u64) [8]u8 {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    return bytes;
+}
+
+fn runInterpretation(
+    code: []const u8,
+    assumptions: []const []const u8,
+    quantum: u64,
+) !projection.Owned(analysis.InterpretationOutput) {
+    const input = try projection.encode(analysis.InterpretationInput, a, .{
+        .arguments = &.{},
+        .assumptions = assumptions,
+        .guest_quantum = quantum,
+    });
+    defer a.free(input);
+    var experiment = try base.Session.initImage(a, code, input, .{});
+    defer experiment.deinit();
+    try std.testing.expect(try experiment.run(1) == .progressed);
+    const checkpoint = try experiment.checkpoint(a);
+    defer a.free(checkpoint);
+    var resumed = try base.Session.restoreImage(a, code, checkpoint, .{});
+    defer resumed.deinit();
+    const outcome = try resumed.run(null);
+    try std.testing.expect(outcome == .completed);
+    const bytes = try resumed.bytes(&outcome.completed);
+    return projection.decode(analysis.InterpretationOutput, a, bytes);
+}
+
+fn expectInterpretationValue(result: analysis.InterpretationOutput, expected: u64) !void {
+    try std.testing.expect(result.observation == .completed);
+    const actual = std.mem.readInt(u64, result.observation.completed[0..8], .little);
+    try std.testing.expectEqual(expected, actual);
+}
+
+fn expectResumedAlternative(
+    guest: *const data.program_image.Admitted,
+    state: projection.State,
+) !void {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const code = try support.encode(try analysis.interpretation(&builder, guest, state));
+    defer a.free(code);
+    const five = encodedInteger(5);
+    const nine = encodedInteger(9);
+    for ([_][]const u8{ &five, &nine }, [_]u64{ 16, 20 }) |reply, expected| {
+        var result = try runInterpretation(code, &.{reply}, 100);
+        defer result.deinit();
+        try std.testing.expectEqual(.terminal, result.value.stopping);
+        try std.testing.expectEqual(@as(u64, 1), result.value.applied);
+        try expectInterpretationValue(result.value, expected);
+    }
+}
+
+fn expectSnapshotBinding(guest: *const data.program_image.Admitted, state: projection.State) !void {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    var foreign = state;
+    foreign.program_identity[0] ^= 1;
+    if (analysis.interpretation(&builder, guest, foreign)) |_| {
+        return error.ForeignSnapshotAccepted;
+    } else |_| {}
+    var incomplete = state;
+    incomplete.nodes = &.{};
+    if (analysis.interpretation(&builder, guest, incomplete)) |_| {
+        return error.IncompleteSnapshotAccepted;
+    } else |_| {}
+}
+
+fn branchGuest(b: *source.Builder) !source.Module {
+    const Author = @import("author.zig").Author;
+    const e = try Author.init(b);
+    const effect = try b.effect(.{
+        .identity = "analysis/branch-input",
+        .payload = e.integer,
+        .result = e.integer,
+    });
+    const entry = try b.declare(&.{}, e.integer, &.{effect}, &.{});
+    const first = try b.variable(e.integer);
+    const second = try b.variable(e.integer);
+    const third = try b.variable(e.integer);
+    const additional = try b.bind(third, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.reference(second),
+    } }), try b.pure(try e.binary(.integer_add, try b.reference(second), try b.reference(third))));
+    const finish = try e.when(
+        try e.binary(.equal, try b.reference(first), e.zero),
+        try b.pure(try b.reference(second)),
+        additional,
+    );
+    try b.define(entry, try b.bind(first, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = e.zero,
+    } }), try b.bind(second, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.reference(first),
+    } }), finish)));
+    return b.module(entry, e.unit);
+}
+
+const DisclosedInput = struct {
+    program: projection.Program,
+    state: projection.State,
+    branch: bool,
+    first_assumption: u64 = 0,
+    replies_max: u64 = 3,
+};
+const DisclosedOutput = struct {
+    observation: @import("observe.zig").Observation,
+    assumptions: []const []const u8,
+    steps: u64,
+    state: projection.State,
+    stopping: analysis.Stop,
+};
+const Disclosed = struct {
+    hydrate: source.Id,
+    respond: source.Id,
+    observe: source.Id,
+    step: source.Id,
+    project: source.Id,
+    advance: source.Id,
+    output: source.Id,
+};
+
+pub fn expectDisclosedAnalysis(bundle: @import("compiler.zig").SourceBundle) !void {
+    var builder = try disclosedBuilder(bundle.generic.module);
+    defer builder.deinit();
+    const entry = try disclosedEntry(&builder, bundle);
+    const composed = builder.module(entry, bundle.generic.module.failure);
+    var sliced = try source.slice.extract(a, composed, .{
+        .entry = entry,
+        .require_pure = true,
+    });
+    defer sliced.deinit();
+    for (bundle.generic_pure_entries) |pure| switch (pure.role) {
+        .hydrate, .respond, .step, .observe, .project => {
+            try std.testing.expect(sliced.maps.functions[pure.function] != null);
+        },
+        else => {},
+    };
+    var prepared = try support.prepare(sliced.module());
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), sliced.module().effects.len);
+    var guest_builder = source.Builder.init(a);
+    defer guest_builder.deinit();
+    const image = try support.encode(try branchGuest(&guest_builder));
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    var live = try @import("native_baseline").Session.initImage(a, image, &.{});
+    defer live.deinit();
+    try std.testing.expect(try live.run(null) == .requested);
+    const before = try live.checkpoint(a);
+    defer a.free(before);
+    var snapshot = try data.state_image.decodeGraph(a, before);
+    defer snapshot.deinit();
+    const projected = try projection.programBytes(a, guest);
+    defer a.free(projected);
+    var program = try projection.decode(projection.Program, a, projected);
+    defer program.deinit();
+    for ([_]bool{ false, true }, [_]u64{ 7, 20 }) |branch, expected| {
+        try expectDisclosedBranch(&prepared, .{
+            .program = program.value,
+            .state = snapshot.state,
+            .branch = branch,
+        }, expected);
+    }
+    try expectDisclosedResume(&prepared, guest, program.value, snapshot.state);
+    const after = try live.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+fn disclosedBuilder(module: source.Module) !source.Builder {
+    var b = source.Builder.init(a);
+    errdefer b.deinit();
+    const owned = try source.own(source.Module, b.allocator(), module);
+    inline for (.{
+        "schemas", "constants", "effects",   "handlers", "resources", "variables",
+        "values",  "terms",     "functions",
+    }) |name| try @field(b, name).appendSlice(b.allocator(), @field(owned, name));
+    b.region_count = owned.region_count;
+    return b;
+}
+
+fn disclosedEntry(b: *source.Builder, bundle: @import("compiler.zig").SourceBundle) !source.Id {
+    const e = try @import("author.zig").Author.init(b);
+    var d: Disclosed = undefined;
+    for (bundle.generic_pure_entries) |pure| switch (pure.role) {
+        .hydrate => d.hydrate = pure.function,
+        .respond => d.respond = pure.function,
+        .observe => d.observe = pure.function,
+        .step => d.step = pure.function,
+        .project => d.project = pure.function,
+        else => {},
+    };
+    const machine = b.functions.items[d.hydrate].result;
+    const trace = try projection.schema([]const []const u8, b);
+    d.output = try projection.schema(DisclosedOutput, b);
+    d.advance = try b.declare(&.{
+        machine, e.boolean, trace, e.integer, e.integer, e.integer,
+    }, d.output, &.{}, &.{});
+    try disclosedAdvance(e, d);
+    const entry = try b.declare(&.{try projection.schema(DisclosedInput, b)}, d.output, &.{}, &.{});
+    const input = try e.param(entry, 0);
+    const hydrated = try b.variable(machine);
+    try b.define(entry, try b.bind(hydrated, try e.call(d.hydrate, &.{
+        try e.field(input, 0), try e.field(input, 1),
+    }), try e.call(d.advance, &.{
+        try b.reference(hydrated),
+        try e.field(input, 2),
+        try e.literal([]const []const u8, &.{}),
+        try b.constant(u64, 100),
+        try e.field(input, 3),
+        try e.field(input, 4),
+    })));
+    return entry;
+}
+
+fn disclosedAdvance(e: @import("author.zig").Author, d: Disclosed) !void {
+    const b = e.b;
+    const machine = try e.param(d.advance, 0);
+    const branch = try e.param(d.advance, 1);
+    const trace = try e.param(d.advance, 2);
+    const remaining = try e.param(d.advance, 3);
+    const observed = try b.variable(b.functions.items[d.observe].result);
+    const value = try b.reference(observed);
+    const tag = try b.primitive(e.integer, .variant_tag, &.{value}, 0);
+    const finish = try disclosedFinish(e, d, value, .terminal);
+    const stepped = try b.variable(b.functions.items[d.step].result);
+    const step = try b.bind(stepped, try e.call(d.step, &.{machine}), try e.call(d.advance, &.{
+        try e.payload(try b.reference(stepped), 0),
+        branch,
+        trace,
+        try e.binary(.integer_sub, remaining, e.one),
+        try e.param(d.advance, 4),
+        try e.param(d.advance, 5),
+    }));
+    const progress = try e.when(
+        try e.binary(.less, e.zero, remaining),
+        step,
+        try disclosedFinish(e, d, value, .quantum),
+    );
+    const count = try b.primitive(e.integer, .sequence_length, &.{trace}, 0);
+    const respond = try e.when(
+        try e.binary(.less, count, try e.param(d.advance, 5)),
+        try disclosedRespond(e, d),
+        try disclosedFinish(e, d, value, .missing_assumption),
+    );
+    const next = try e.when(try e.binary(.equal, tag, try b.constant(u64, 2)), respond, finish);
+    try b.define(d.advance, try b.bind(observed, try e.call(d.observe, &.{machine}), try e.when(
+        try e.binary(.equal, tag, e.zero),
+        progress,
+        next,
+    )));
+}
+
+fn disclosedRespond(e: @import("author.zig").Author, d: Disclosed) !source.Id {
+    const b = e.b;
+    const machine = try e.param(d.advance, 0);
+    const branch = try e.param(d.advance, 1);
+    const trace = try e.param(d.advance, 2);
+    const count = try e.binary(
+        .integer_add,
+        try b.primitive(e.integer, .sequence_length, &.{trace}, 0),
+        try e.param(d.advance, 4),
+    );
+    const bytes = try b.schema(.bytes);
+    const zero = encodedInteger(0);
+    const one = encodedInteger(1);
+    const seven = encodedInteger(7);
+    const eleven = encodedInteger(11);
+    const nine = encodedInteger(9);
+    const first = try b.primitive(bytes, .select, &.{
+        branch, try e.literal([]const u8, &one), try e.literal([]const u8, &zero),
+    }, 0);
+    const second = try b.primitive(bytes, .select, &.{
+        branch, try e.literal([]const u8, &eleven), try e.literal([]const u8, &seven),
+    }, 0);
+    const later = try b.primitive(bytes, .select, &.{
+        try e.binary(.equal, count, e.one), second, try e.literal([]const u8, &nine),
+    }, 0);
+    const reply = try b.primitive(bytes, .select, &.{
+        try e.binary(.equal, count, e.zero), first, later,
+    }, 0);
+    const trace_schema = try projection.schema([]const []const u8, b);
+    const appended = try b.primitive(trace_schema, .sequence_append, &.{ trace, reply }, 0);
+    const changed = try b.variable(b.functions.items[d.respond].result);
+    return b.bind(changed, try e.call(d.respond, &.{ machine, reply }), try e.call(d.advance, &.{
+        try b.reference(changed),  branch,                    appended, try e.param(d.advance, 3),
+        try e.param(d.advance, 4), try e.param(d.advance, 5),
+    }));
+}
+
+fn disclosedFinish(
+    e: @import("author.zig").Author,
+    d: Disclosed,
+    observed: source.Id,
+    stopping: analysis.Stop,
+) !source.Id {
+    const b = e.b;
+    const state = try b.variable(b.functions.items[d.project].result);
+    const work = try e.binary(.integer_sub, try b.constant(u64, 100), try e.param(d.advance, 3));
+    return b.bind(state, try e.call(d.project, &.{try e.param(d.advance, 0)}), try b.pure(
+        try e.tuple(d.output, &.{
+            observed,
+            try e.param(d.advance, 2),
+            work,
+            try b.reference(state),
+            try e.literal(analysis.Stop, stopping),
+        }),
+    ));
+}
+
+fn expectDisclosedBranch(
+    prepared: *const base.Prepared,
+    input: DisclosedInput,
+    expected: u64,
+) !void {
+    var result = try runDisclosed(prepared, input);
+    defer result.deinit();
+    try std.testing.expectEqual(.terminal, result.value.stopping);
+    try std.testing.expect(result.value.observation == .completed);
+    try std.testing.expectEqual(expected, std.mem.readInt(
+        u64,
+        result.value.observation.completed[0..8],
+        .little,
+    ));
+    const assumptions: []const u64 = if (input.first_assumption == 2)
+        &.{9}
+    else if (input.branch) &.{ 1, 11, 9 } else &.{ 0, 7 };
+    try std.testing.expectEqual(assumptions.len, result.value.assumptions.len);
+    for (assumptions, result.value.assumptions) |assumed, actual|
+        try std.testing.expectEqualSlices(u8, &encodedInteger(assumed), actual);
+    try std.testing.expect(result.value.steps > 0 and result.value.steps < 100);
+}
+
+fn runDisclosed(
+    prepared: *const base.Prepared,
+    input: DisclosedInput,
+) !projection.Owned(DisclosedOutput) {
+    const arguments = try projection.encode(DisclosedInput, a, input);
+    defer a.free(arguments);
+    var experiment = try base.Session.start(a, prepared, arguments, .{});
+    defer experiment.deinit();
+    const outcome = try experiment.run(null);
+    try std.testing.expect(outcome == .completed);
+    return projection.decode(DisclosedOutput, a, try experiment.bytes(&outcome.completed));
+}
+
+fn expectDisclosedResume(
+    prepared: *const base.Prepared,
+    guest: *const data.program_image.Admitted,
+    program: projection.Program,
+    state: projection.State,
+) !void {
+    var unfinished = try runDisclosed(prepared, .{
+        .program = program,
+        .state = state,
+        .branch = true,
+        .replies_max = 2,
+    });
+    defer unfinished.deinit();
+    try std.testing.expectEqual(.missing_assumption, unfinished.value.stopping);
+    try std.testing.expectEqual(@as(usize, 2), unfinished.value.assumptions.len);
+    try std.testing.expectEqualSlices(u8, &encodedInteger(1), unfinished.value.assumptions[0]);
+    try std.testing.expectEqualSlices(u8, &encodedInteger(11), unfinished.value.assumptions[1]);
+    try std.testing.expect(unfinished.value.observation == .requested);
+    try std.testing.expectEqualSlices(
+        u8,
+        &encodedInteger(11),
+        unfinished.value.observation.requested.payload,
+    );
+    var canonical = try data.state_image.canonicalize(a, unfinished.value.state);
+    defer canonical.deinit();
+    try data.state_admission.validateAdmitted(a, guest, canonical.state);
+    try expectDisclosedBranch(prepared, .{
+        .program = program,
+        .state = canonical.state,
+        .branch = true,
+        .first_assumption = 2,
+        .replies_max = 1,
+    }, 20);
 }

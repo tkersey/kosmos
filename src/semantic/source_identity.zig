@@ -15,6 +15,7 @@ pub fn digest() [32]u8 {
         .{ "clone_validation.zig", @embedFile("clone_validation.zig") },
         .{ "codec.zig", @embedFile("codec.zig") },
         .{ "compiler.zig", @embedFile("compiler.zig") },
+        .{ "construction.zig", @embedFile("construction.zig") },
         .{ "collect.zig", @embedFile("collect.zig") },
         .{ "collection_instructions.zig", @embedFile("collection_instructions.zig") },
         .{ "collections.zig", @embedFile("collections.zig") },

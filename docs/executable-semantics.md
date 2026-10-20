@@ -158,6 +158,63 @@ The expected environmental request identity is preserved because the guest
 checkpoint is unchanged. Kosmos cannot determine whether a host has dispatched
 that request; checking active/unknown delivery belongs to the enclosing owner.
 
+## Semantic source and checked construction
+
+`RuntimeCompiler.exportSource` reconstructs and checks the actual selected
+artifact before returning its source bundle. The bundle distinguishes the
+approved root, selected module, guest scope, recovery interfaces and four helper
+images. It does not substitute the packaged generic module for a selected
+realization. Horos `source.slice.extract` admits the complete module, extracts
+the selected function's dependency closure and can require an effect-free slice.
+The resulting source is ordinary editable Horos data.
+
+`RuntimeCompiler.deriveRecord` packages a proposed module and finite relation
+steps as an admitted candidate. `validateAgainst` separately checks it against
+the owner-selected ancestor. The new artifact and lowering contracts are
+`kosmos.semantic-artifact/3` and `kosmos.source-relation/1`; historical `/2` decoding
+and verification retain their original meaning. A candidate cannot supply its
+own approved root or convert successful compilation into validation.
+
+The Horos relation checker reconstructs scalar simplifications, closed pure
+inlining, private product coordinate permutations, catalog relocation and
+existing specialization steps. It compares complete successor modules and
+rejects unsupported changes. Kosmos then derives recovery mappings and checks
+the final runtime and helper images against that source. Intermediate evidence
+uses reconstructible canonical byte deltas; every reconstructed step remains
+subject to the same checker. Resource exhaustion is not approval.
+
+`RuntimeTransformation.scalar` and `.layout` construct ordinary Horos producer
+programs. Their inputs contain source records and selected objectives; their
+outputs contain candidate source and relation records. Native compilation and
+validation consume those outputs without choosing replacement code. Producer
+execution, candidate admission, validation and retained-state realization are
+separate operations.
+
+`RuntimeExperiment` runs an unapproved candidate without live guest custody.
+Its bounded pumps retain initialization, execution, observation and projection
+progress. The enclosing owner must independently execute its approved reference,
+admit and compare complete guest state, observation and work, and publish only
+the reference successor. Finite agreement does not authorize an ordinary
+realization switch. Real guest cancellation remains the reference owner's duty.
+
+## Views and isolated interpretations
+
+Guest views default to metadata. `RuntimeViews.captureDetailed` accepts explicit
+node, field and blob-range disclosure, reports value coverage, and includes the
+schema information needed to interpret authorized values. Borrowed PST3 decoding
+avoids copying an entire payload merely to inspect metadata. The input buffer
+must outlive the borrowed view. Outer-capsule inspection exposes the selected
+runtime's private execution state under a separate binding; it is not a
+committed guest cut.
+
+`RuntimeAnalysis.interpretation` builds an ordinary pure driver with an explicit
+sequence of assumed replies, request history, guest-work allowance and stopping
+disposition. It can start from admitted arguments or an admitted snapshot.
+Unavailable replies remain unavailable; partial execution returns state for a
+later hypothetical continuation. Generated source may instead compose disclosed
+pure functions into its own interpretation. Neither source admission nor an
+analysis result grants guest acquisition, settlement or custody.
+
 ## Evidence and physical limits
 
 The pure hypothetical-reply example admits argument and reply bytes against the

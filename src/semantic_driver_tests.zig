@@ -19,6 +19,10 @@ test "downstream packaged core equals independently rebuilt and validated source
 
     var admitted = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
     defer admitted.deinit();
+    try expectSourceExport(&admitted);
+    var exported = try @import("semantic/compiler.zig").exportSource(a, &admitted);
+    defer exported.deinit();
+    try @import("semantic/analysis_tests.zig").expectDisclosedAnalysis(exported.value);
     try retained.check(admitted.content.value.manifest.compiler.horos_package);
     try std.testing.expectEqualSlices(u8, packaged.bytes, retained.bytes);
     try std.testing.expectError(
@@ -44,7 +48,7 @@ test "artifact admission binds exact content and independently scans its invento
     );
     var bundle = admitted.content.value;
     bundle.manifest.inventory.instructions += 1;
-    const forged = try projection.encode(artifact.Bundle, a, bundle);
+    const forged = try artifact.encode(a, bundle);
     defer a.free(forged);
     try std.testing.expectError(
         error.InvalidInventory,
@@ -52,7 +56,7 @@ test "artifact admission binds exact content and independently scans its invento
     );
     bundle = admitted.content.value;
     bundle.manifest.bridge.identity = "model-authored-bridge";
-    const bridge = try projection.encode(artifact.Bundle, a, bundle);
+    const bridge = try artifact.encode(a, bundle);
     defer a.free(bridge);
     try std.testing.expectError(
         error.UnsupportedArtifact,
@@ -63,7 +67,7 @@ test "artifact admission binds exact content and independently scans its invento
     defer a.free(anchors);
     anchors[0].role = .committed_service;
     bundle.recovery.anchors = anchors;
-    const changed_map = try projection.encode(artifact.Bundle, a, bundle);
+    const changed_map = try artifact.encode(a, bundle);
     defer a.free(changed_map);
     var changed = try artifact.Admitted.init(a, changed_map, artifact.digest(changed_map));
     defer changed.deinit();
@@ -147,7 +151,7 @@ test "carried recovery binds admitted image and helpers to reconstructed source"
     var bundle = admitted.content.value;
     bundle.image = image;
     bundle.manifest.image = checked.identity();
-    const forged_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    const forged_bytes = try artifact.encode(a, bundle);
     defer a.free(forged_bytes);
     var forged = try artifact.Admitted.init(a, forged_bytes, artifact.digest(forged_bytes));
     defer forged.deinit();
@@ -155,16 +159,17 @@ test "carried recovery binds admitted image and helpers to reconstructed source"
 
     bundle = admitted.content.value;
     bundle.recovery.storage = bundle.recovery.projector;
-    const helper_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    const helper_bytes = try artifact.encode(a, bundle);
     defer a.free(helper_bytes);
     var helper = try artifact.Admitted.init(a, helper_bytes, artifact.digest(helper_bytes));
     defer helper.deinit();
     try std.testing.expectError(error.InvalidRecovery, compiler.validate(a, &helper));
+    try std.testing.expectError(error.InvalidRecovery, compiler.exportSource(a, &helper));
 
     bundle = admitted.content.value;
     bundle.manifest.compiler.policy = "kosmos.source-lower/1";
     bundle.evidence = &.{};
-    const legacy_bytes = try projection.encode(artifact.Bundle, a, bundle);
+    const legacy_bytes = try artifact.encode(a, bundle);
     defer a.free(legacy_bytes);
     var legacy = try artifact.Admitted.init(a, legacy_bytes, artifact.digest(legacy_bytes));
     defer legacy.deinit();
@@ -180,7 +185,7 @@ test "source instrumentation preserves cuts and blocks publication without guest
     defer a.free(bytes);
     var selected = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer selected.deinit();
-    try compiler.validate(a, &selected);
+    try expectSourceExport(&selected);
     const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     try switchRealizations(image, &selected);
@@ -193,7 +198,7 @@ test "source instrumentation preserves cuts and blocks publication without guest
     defer generic.deinit();
     var counterfeit = generic.runtime.content.value;
     counterfeit.hooks = .{ .control = true, .storage = true };
-    const forged_bytes = try projection.encode(artifact.Bundle, a, counterfeit);
+    const forged_bytes = try artifact.encode(a, counterfeit);
     defer a.free(forged_bytes);
     var forged = try artifact.Admitted.init(a, forged_bytes, artifact.digest(forged_bytes));
     defer forged.deinit();
@@ -216,7 +221,7 @@ test "packaged specialized realization carries independently checked recovery an
     defer a.free(bytes);
     var selected = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer selected.deinit();
-    try compiler.validate(a, &selected);
+    try expectSourceExport(&selected);
     try std.testing.expect(
         selected.content.value.guest != null and selected.content.value.specialization != null,
     );
@@ -446,7 +451,7 @@ fn admissionOwnerBundle(
 ) ![]u8 {
     const profile = @import("base/profile.zig");
     const root = compiled.program.functions[@intCast(compiled.program.roots.entry)];
-    return projection.encode(artifact.Bundle, a, .{
+    return artifact.encode(a, .{
         .manifest = .{
             .image = program.identity(),
             .source = artifact.digest(image),
@@ -830,4 +835,434 @@ fn expectPumpObservations(pump: *driver.Driver, expected: *native.Session) !void
         }
     }
     return error.UnfinishedTest;
+}
+
+fn expectSourceExport(runtime: *const artifact.Admitted) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var exported = try compiler.exportSource(a, runtime);
+    defer exported.deinit();
+    const value = exported.value;
+    try std.testing.expectEqual(runtime.identity, value.realization);
+    try std.testing.expectEqual(runtime.content.value.manifest.image, value.image);
+    try std.testing.expectEqual(runtime.content.value.manifest.source, value.emitter);
+    try std.testing.expect(exported.retained.core != runtime.core);
+    try std.testing.expect(!std.mem.eql(u8, &value.generic.digest, &value.emitter));
+    try std.testing.expect(!std.mem.eql(u8, &value.selected.digest, &value.image));
+    try expectModuleDigest(value.generic);
+    try expectModuleDigest(value.selected);
+    if (value.construction == null)
+        try std.testing.expectEqual(value.evidence.derivation != null, value.guest != null);
+    if (value.guest == null) {
+        try std.testing.expectEqual(value.generic.digest, value.selected.digest);
+    } else if (value.evidence.derivation != null) {
+        try std.testing.expect(!std.mem.eql(u8, &value.generic.digest, &value.selected.digest));
+    }
+    for (value.helpers, runtime.helpers) |helper, image| {
+        try expectModuleDigest(helper.source);
+        var lowered = try source.lower(a, helper.source.module);
+        defer lowered.deinit();
+        try std.testing.expect(data.record.equal(
+            data.activation.Program,
+            lowered.program,
+            image.program(),
+        ));
+    }
+    for (value.generic_pure_entries) |entry| {
+        try std.testing.expectEqual(@as(usize, 0), entry.signature.effects.len);
+        try std.testing.expect(data.record.equal(
+            source.ast.Function,
+            entry.signature,
+            value.generic.module.functions[entry.function],
+        ));
+    }
+    try std.testing.expect(value.parameters.len != 0);
+    try std.testing.expect(data.record.equal(
+        []const artifact.Anchor,
+        runtime.content.value.recovery.anchors,
+        value.anchors,
+    ));
+    for (value.selected_roles) |role| {
+        const function = value.selected.module.functions[role.function];
+        for (role.ordinals) |ordinal| try std.testing.expect(ordinal < function.parameters.len);
+    }
+}
+
+fn expectModuleDigest(module: @import("semantic/compiler.zig").SourceModule) !void {
+    var length: data.wire.Writer = .{};
+    try data.record.write(source.ast.Module, module.module, &length);
+    const bytes = try a.alloc(u8, length.position);
+    defer a.free(bytes);
+    var writer: data.wire.Writer = .{ .output = bytes };
+    try data.record.write(source.ast.Module, module.module, &writer);
+    try std.testing.expectEqual(artifact.digest(bytes), module.digest);
+}
+
+test "source candidates keep exact checked ancestry through retained guest switching" {
+    const compiler = @import("semantic/compiler.zig");
+    var root = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    defer root.deinit();
+    var exported = try compiler.exportSource(a, &root);
+    defer exported.deinit();
+    const image = try support.guestImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    var proposed = try generatedProposal(exported.value.selected.module, null, 1);
+    defer proposed.deinit();
+    const proposal = proposed.value;
+    const bytes = try compiler.deriveRecord(a, &root, guest, proposal, .{
+        .horos_package = root.content.value.manifest.compiler.horos_package,
+    });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try compiler.validateAgainst(a, &candidate, &root);
+    try std.testing.expectEqual(root.identity, compiler.approvedRootIdentity(&candidate));
+    try std.testing.expect(artifact.hasProgramArgument(candidate.content.value));
+    try expectSourceExport(&candidate);
+    try switchRealizations(image, &candidate);
+    try expectCanonicalDelta(&candidate);
+    try expectDerivedChain(&candidate, guest, proposal.selected);
+    expectLayoutChain(&candidate, guest, image) catch |err| {
+        std.debug.print("source layout chain: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    expectSpecializedChain(&candidate, guest, image) catch |err| {
+        std.debug.print("source specialization chain: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    try expectRejectedCandidate(&root, guest, exported.value.selected.module);
+    try std.testing.expectError(error.RelationLimit, compiler.validateWithPolicy(
+        a,
+        &candidate,
+        .{ .work = 1 },
+    ));
+}
+
+test "generated scalar candidates measure actual evaluator work on identical guest cuts" {
+    const compiler = @import("semantic/compiler.zig");
+    var root = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    defer root.deinit();
+    var exported = try compiler.exportSource(a, &root);
+    defer exported.deinit();
+    const image = try support.guestImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    try expectGeneratedWork(&root, guest, image, exported.value.selected.module);
+}
+
+fn expectSpecializedChain(
+    parent: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    image: []const u8,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var exported = try compiler.exportSource(a, parent);
+    defer exported.deinit();
+    const request: source.specialize.Request = .{
+        .function = exported.value.selected.module.entry,
+        .arguments = &.{ .{ .known = .{
+            .schema = exported.definition.machine.program,
+            .bytes = try projection.programBytes(scratch, guest),
+        } }, .dynamic },
+        .context = compiler.contextWithHooks(guest.identity(), parent.content.value.hooks),
+        .policy = .{ .work = 8_000_000, .keys_per_function = 1, .depth = 1024 },
+    };
+    var specialized = try source.specialize.specialize(
+        a,
+        exported.value.selected.module,
+        request,
+    );
+    defer specialized.deinit();
+    var projected = try generatedProposal(specialized.module(), null, 1);
+    defer projected.deinit();
+    const specialized_step: source.relation.Step = .{
+        .successor = specialized.module(),
+        .rule = .{ .specialization = .{
+            .request = request,
+            .entry = specialized.entry,
+            .functions = specialized.functions.items,
+            .values = specialized.value_proofs.items,
+            .terms = specialized.term_proofs.items,
+        } },
+    };
+    const records = [_]source.relation.RecordStep{
+        try source.relation.encodeRecordStep(scratch, specialized_step),
+        projected.value.steps[0],
+    };
+    const bytes = try compiler.deriveRecord(a, parent, guest, .{
+        .selected = projected.value.selected,
+        .steps = &records,
+    }, .{ .horos_package = parent.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try compiler.validateAgainst(a, &candidate, parent);
+    try std.testing.expect(!artifact.hasProgramArgument(candidate.content.value));
+    try expectCompactEvidence(&candidate);
+    try expectSourceExport(&candidate);
+    try switchRealizations(image, &candidate);
+}
+
+fn expectRejectedLayout(original: source.ast.Module, machine: u64) !void {
+    var proposed = try generatedProposal(original, .{
+        .schema = machine,
+        .coordinates = &.{ 4, 1, 2, 3, 0 },
+    }, 1);
+    defer proposed.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var remaining: usize = 64_000_000;
+    const step = try source.relation.decodeRecordStep(
+        arena.allocator(),
+        proposed.value.steps[0],
+        &remaining,
+    );
+    try std.testing.expectError(error.UnsupportedRelation, source.relation.validate(
+        a,
+        original,
+        proposed.value.selected,
+        &.{step},
+        .{ .work = 64_000_000, .private_schemas = &.{machine} },
+    ));
+}
+
+fn expectCandidateWork(
+    root: *const artifact.Admitted,
+    candidate: *const artifact.Admitted,
+    image: []const u8,
+) !bool {
+    var original = try facade.Prepared.initWithRuntime(a, image, root);
+    defer original.deinit();
+    var transformed = try facade.Prepared.initWithRuntime(a, image, candidate);
+    defer transformed.deinit();
+    const input = std.mem.toBytes(@as(u64, 37));
+    var before = try facade.Session.start(a, &original, &input);
+    defer before.deinit();
+    var after = try facade.Session.start(a, &transformed, &input);
+    defer after.deinit();
+    const initialized = [2]u64{ before.driver.outer.transitions, after.driver.outer.transitions };
+    for (0..6) |_| {
+        _ = try before.run(1);
+        _ = try after.run(1);
+        const expected = try before.checkpoint(a);
+        defer a.free(expected);
+        const actual = try after.checkpoint(a);
+        defer a.free(actual);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
+    std.debug.print(
+        "source_candidate_work guest_steps=6 generic_init={d} candidate_init={d} " ++
+            "generic_total={d} candidate_total={d}\n",
+        .{
+            initialized[0],                  initialized[1],
+            before.driver.outer.transitions, after.driver.outer.transitions,
+        },
+    );
+    return after.driver.outer.transitions < before.driver.outer.transitions;
+}
+
+fn expectGeneratedWork(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    image: []const u8,
+    original: source.ast.Module,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var proposed = try generatedProposal(original, null, 16);
+    defer proposed.deinit();
+    std.debug.print("source_candidate_edits={d}\n", .{proposed.value.steps.len});
+    const bytes = try compiler.deriveRecord(a, root, guest, proposed.value, .{
+        .horos_package = root.content.value.manifest.compiler.horos_package,
+    });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try compiler.validateAgainst(a, &candidate, root);
+    _ = try expectCandidateWork(root, &candidate, image);
+}
+
+fn generatedProposal(
+    original: source.ast.Module,
+    layout: ?source.relation.Layout,
+    edits_max: u64,
+) !projection.Owned(@import("semantic/compiler.zig").RecordProposal) {
+    const compiler = @import("semantic/compiler.zig");
+    const transformation = @import("semantic/transformation.zig");
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = if (layout != null)
+        builder.module(try transformation.layout(&builder), try builder.scalar(void))
+    else
+        try transformation.scalar(&builder);
+    var prepared = try support.prepare(module);
+    defer prepared.deinit();
+    const input = if (layout) |selected|
+        try projection.encode(transformation.LayoutInput, a, .{
+            .module = original,
+            .layout = selected,
+        })
+    else
+        try projection.encode(transformation.Input, a, .{
+            .module = original,
+            .edits_max = edits_max,
+        });
+    defer a.free(input);
+    var work = try @import("base/session.zig").Session.start(a, &prepared, input, .{});
+    defer work.deinit();
+    const outcome = try work.run(null);
+    try std.testing.expect(outcome == .completed);
+    var result = try projection.decode(compiler.RecordProposal, a, try work.bytes(
+        &outcome.completed,
+    ));
+    errdefer result.deinit();
+    try std.testing.expect(result.value.steps.len > 0 and result.value.steps.len <= edits_max);
+    return result;
+}
+
+fn expectLayoutChain(
+    parent: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    image: []const u8,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var exported = try compiler.exportSource(a, parent);
+    defer exported.deinit();
+    var proposed = try generatedProposal(exported.value.selected.module, .{
+        .schema = exported.definition.service.state,
+        .coordinates = &.{ 1, 0 },
+    }, 1);
+    defer proposed.deinit();
+    const bytes = try compiler.deriveRecord(a, parent, guest, proposed.value, .{
+        .horos_package = parent.content.value.manifest.compiler.horos_package,
+    });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try compiler.validateAgainst(a, &candidate, parent);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        candidate.content.value.recovery.layout.service_machine,
+    );
+    try expectCompactEvidence(&candidate);
+    try expectSourceExport(&candidate);
+    try switchRealizations(image, &candidate);
+    try expectRejectedLayout(exported.value.selected.module, exported.definition.machine.schema);
+}
+
+fn expectCompactEvidence(candidate: *const artifact.Admitted) !void {
+    const construction = @import("semantic/construction.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const storage = arena.allocator();
+    const stored = candidate.content.value.evidence;
+    var evidence = try construction.decodeEvidence(storage, stored);
+    evidence.selected = null;
+    var expanded: data.wire.Writer = .{};
+    try data.record.writeAlloc(construction.Evidence, storage, evidence, &expanded);
+    try std.testing.expect(stored.len < expanded.position);
+}
+
+fn expectCanonicalDelta(candidate: *const artifact.Admitted) !void {
+    const construction = @import("semantic/construction.zig");
+    const evidence = candidate.content.value.evidence;
+    var reader: data.wire.Reader = .{ .input = evidence };
+    _ = try reader.bytes();
+    _ = try reader.bytes();
+    _ = try reader.natural();
+    try std.testing.expectEqual(@as(u64, 1), try reader.natural());
+    const start = reader.position;
+    const prefix = try reader.natural();
+    try std.testing.expect(prefix != 0);
+    try std.testing.expectEqual(@as(u64, 0), try reader.natural());
+    try std.testing.expectEqual(@as(usize, 0), (try reader.bytes()).len);
+    const mutated = try a.alloc(u8, evidence.len + 20);
+    defer a.free(mutated);
+    var writer: data.wire.Writer = .{ .output = mutated };
+    try writer.put(evidence[0..start]);
+    try writer.natural(prefix - 1);
+    try writer.natural(1);
+    try writer.bytes(&.{});
+    try writer.put(evidence[reader.position..]);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.NonCanonicalSourceDelta, construction.decodeEvidence(
+        arena.allocator(),
+        mutated[0..writer.position],
+    ));
+    writer.position = 0;
+    try writer.put(evidence[0..start]);
+    try writer.natural(std.math.maxInt(u64));
+    try writer.natural(0);
+    try writer.bytes(&.{});
+    try writer.put(evidence[reader.position..]);
+    try std.testing.expectError(error.InvalidSourceDelta, construction.decodeEvidence(
+        arena.allocator(),
+        mutated[0..writer.position],
+    ));
+}
+
+fn expectDerivedChain(
+    parent: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    selected: source.ast.Module,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    const bytes = try compiler.derive(a, parent, guest, .{
+        .selected = selected,
+        .steps = &.{},
+    }, .{ .horos_package = parent.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    var next = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer next.deinit();
+    try compiler.validateAgainst(a, &next, parent);
+    try std.testing.expectEqual(
+        compiler.approvedRootIdentity(parent),
+        compiler.approvedRootIdentity(&next),
+    );
+    try std.testing.expectEqual(parent.identity, next.content.value.lineage.?.parent);
+    try std.testing.expectError(error.InvalidAncestor, compiler.validateAgainst(a, parent, &next));
+    var wrong = next.content.value;
+    wrong.recovery.layout.machine_program = 1;
+    const forged = try artifact.encode(a, wrong);
+    defer a.free(forged);
+    var admitted = try artifact.Admitted.init(a, forged, artifact.digest(forged));
+    defer admitted.deinit();
+    try std.testing.expectError(error.InvalidRecovery, compiler.validate(a, &admitted));
+}
+
+fn expectRejectedCandidate(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    original: source.ast.Module,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const selected = try source.own(source.ast.Module, scratch, original);
+    var changed = false;
+    for (@constCast(selected.constants)) |*literal| {
+        if (selected.schemas[@intCast(literal.schema)] != .u64) continue;
+        @constCast(literal.bytes)[0] ^= 1;
+        changed = true;
+        break;
+    }
+    try std.testing.expect(changed);
+    const bytes = try compiler.derive(a, root, guest, .{
+        .selected = selected,
+        .steps = &.{},
+    }, .{ .horos_package = root.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try std.testing.expectError(
+        error.InvalidRelation,
+        compiler.validateAgainst(a, &candidate, root),
+    );
+    try std.testing.expectError(error.InvalidRelation, compiler.exportSource(a, &candidate));
 }

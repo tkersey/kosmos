@@ -1119,6 +1119,7 @@ fn configureActivation(b: *std.Build, wasm_modules: WasmModules) Activation {
     activation_wasm.stack_size = 65536;
     activation_wasm.max_memory = 4 << 20;
     const activation_wasm_run = b.addSystemCommand(&.{"node"});
+    activation_wasm_run.has_side_effects = true;
     activation_wasm_run.addFileArg2(b.path("test/v2/activation_storage_wasm.mjs"), .{});
     activation_wasm_run.addFileArg2(activation_wasm.getEmittedBin(), .{});
     b.step("check-activation-storage-wasm", "Check storage on import-free unshared wasm32")
@@ -1152,6 +1153,7 @@ fn configureQualification(
         }),
     });
     const borrow_check = b.addRunArtifact(borrow_probe);
+    borrow_check.has_side_effects = true;
     borrow_check.addArg("check");
     borrow_check.addArtifactArg2(borrow_probe, .{ .make_absolute = true });
     zig17.dependOn(&borrow_check.step);

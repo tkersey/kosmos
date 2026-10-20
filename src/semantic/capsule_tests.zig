@@ -8,6 +8,68 @@ const driver = @import("driver.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
+const experiment = @import("experiment.zig");
+
+test "quarantined runtime preserves bounded phase progress without guest custody" {
+    const retained = @import("packaged_runtime").bytes;
+    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer runtime.deinit();
+    const image = try support.guestImage();
+    defer a.free(image);
+    var oracle = try @import("native_baseline").Session.initImage(
+        a,
+        image,
+        &std.mem.toBytes(@as(u64, 5)),
+    );
+    defer oracle.deinit();
+    const before = try oracle.checkpoint(a);
+    defer a.free(before);
+    var candidate = try experiment.Experiment.init(a, image, &runtime, before);
+    defer candidate.deinit();
+    var initialized = try finishExperiment(&candidate, image, &runtime);
+    defer initialized.deinit();
+    try std.testing.expectEqual(.initialized, initialized.stage);
+    try std.testing.expectEqual(@as(u64, 0), initialized.guest_work);
+    try std.testing.expectEqualSlices(u8, before, initialized.checkpoint);
+    try candidate.begin(.none, 2);
+    var advanced = try finishExperiment(&candidate, image, &runtime);
+    defer advanced.deinit();
+    try std.testing.expectEqual(.advanced, advanced.stage);
+    _ = try oracle.run(2);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, advanced.checkpoint);
+    try std.testing.expectEqual(@as(u64, 2), advanced.guest_work);
+    try std.testing.expectError(error.NoOperation, candidate.pump(1));
+}
+
+fn finishExperiment(
+    candidate: *experiment.Experiment,
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+) !experiment.Segment {
+    var retained: [5]bool = @splat(false);
+    for (0..100_000) |_| {
+        const before = candidate.execution.outer.transitions;
+        const phase = candidate.phase;
+        const result = try candidate.pump(31);
+        try std.testing.expect(candidate.execution.outer.transitions - before <= 31);
+        if (result == .complete) return result.complete;
+        const index = @backingInt(phase);
+        if (retained[index]) continue;
+        retained[index] = true;
+        const bytes = try candidate.checkpointOuter(a);
+        defer a.free(bytes);
+        var restored = try experiment.Experiment.restore(a, image, runtime, bytes);
+        errdefer restored.deinit();
+        const again = try restored.checkpointOuter(a);
+        defer a.free(again);
+        try std.testing.expectEqualSlices(u8, bytes, again);
+        candidate.deinit();
+        candidate.* = restored;
+    }
+    return error.ExperimentDidNotComplete;
+}
 
 const Custody = struct {
     expected: capsule.Reference,
@@ -197,6 +259,7 @@ test "outer capsule retains clone microprogress and requires exact consumed cust
     };
     const bytes = try capsule.publish(a, &original, .outer_execution, provenance);
     defer a.free(bytes);
+    try inspectOuterView(&original, &selected, bytes);
     const before = try original.outer.checkpoint(a);
     defer a.free(before);
     var custody = try checkRejectedCustody(&prepared, &selected, bytes, provenance);
@@ -223,6 +286,44 @@ test "outer capsule retains clone microprogress and requires exact consumed cust
     var state = try data.state_image.decodeGraph(a, checkpoint);
     defer state.deinit();
     try data.state_admission.validateAdmitted(a, restored.guest.admitted(), state.state);
+}
+
+fn inspectOuterView(
+    owner: *driver.Driver,
+    selected: *artifact.Admitted,
+    bytes: []const u8,
+) !void {
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    var view = try capsule.inspectOuter(
+        a,
+        owner.guest.admitted(),
+        selected,
+        bytes,
+        .{},
+        @splat(23),
+    );
+    defer view.deinit();
+    try std.testing.expectEqual(.outer_execution, view.value.capsule.kind);
+    try std.testing.expectEqual(.not_requested, view.value.state.value_coverage);
+    try std.testing.expectEqualDeep(
+        owner.guest.admitted().identity(),
+        view.value.capsule.guest.identity,
+    );
+    try std.testing.expectEqualDeep(
+        selected.program.identity(),
+        view.value.state.metadata.binding.guest,
+    );
+    const encoded = try capsule.encodeOuterView(a, view.value);
+    defer a.free(encoded);
+    const schema = try capsule.outerViewSchemaBytes(a);
+    defer a.free(schema);
+    var descriptor = try data.schema.decode(a, schema);
+    defer descriptor.deinit();
+    try data.schema.validateValue(a, descriptor.descriptor, encoded);
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "resident capsule receipts bind level generation and exact outer progress" {

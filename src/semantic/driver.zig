@@ -118,12 +118,13 @@ pub const Driver = struct {
             &lease.admitted().identity(),
         )) return error.GuestIdentityMismatch;
         try admitInitial(a, lease.admitted(), initial);
-        // Specialized code already binds the admitted guest program. Only the
-        // generic service accepts its projection as a dynamic argument.
-        const program = if (selected.content.value.guest == null) try projection.programBytes(
-            a,
-            lease.admitted(),
-        ) else null;
+        const program = if (artifact.hasProgramArgument(selected.content.value))
+            try projection.programBytes(
+                a,
+                lease.admitted(),
+            )
+        else
+            null;
         defer if (program) |bytes| a.free(bytes);
         const input = try projection.encode(service.Initial, a, initial);
         errdefer a.free(input);
