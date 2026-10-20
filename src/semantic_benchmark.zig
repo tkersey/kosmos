@@ -1033,7 +1033,7 @@ fn buildProposal(
     const result = try producer.bytes(&outcome.completed);
     var proposed = try projection.decode(kosmos.RuntimeCompiler.RecordProposal, storage, result);
     errdefer proposed.deinit();
-    if (proposed.value.steps.len != 1) return error.MissingGeneratedEdit;
+    if (proposed.value.steps.len != 16) return error.MissingGeneratedEdit;
     try emit(output, .{
         .phase = "generated-producer",
         .source_export_ns = export_ns,
