@@ -45,7 +45,11 @@ pub const Disclosure = struct {
 };
 pub const TypedValue = struct { node: u64, field: []const u8, value: g.Value };
 pub const Structure = struct { node: u64, schema: u64, tag: u64 };
-pub const Schema = struct { id: u64, descriptor: []const u8 };
+pub const Schema = struct {
+    id: u64,
+    definition: data.program.Schema,
+    descriptor: ?[]const u8,
+};
 pub const BlobSlice = struct {
     blob: u64,
     schema: u64,
@@ -254,6 +258,9 @@ fn valueSchemas(
     var schemas: std.ArrayList(Schema) = .empty;
     for (values) |value| try appendSchema(a, guest, &schemas, value.value.schema);
     for (structures) |structure| try appendSchema(a, guest, &schemas, structure.schema);
+    var index: usize = 0;
+    while (index < schemas.items.len) : (index += 1)
+        try appendSchemaChildren(a, guest, &schemas, schemas.items[index].definition);
     return schemas.items;
 }
 
@@ -264,10 +271,57 @@ fn appendSchema(
     id: u64,
 ) !void {
     for (schemas.items) |schema| if (schema.id == id) return;
+    const definition = guest.program().schemas[@intCast(id)];
     try schemas.append(a, .{
         .id = id,
-        .descriptor = try data.schema.encodeOwned(a, guest.program().schemas, id),
+        .definition = try copySchema(a, definition),
+        .descriptor = if (guest.schemaFacts().exportable[@intCast(id)])
+            try data.schema.encodeOwned(a, guest.program().schemas, id)
+        else
+            null,
     });
+}
+
+fn copySchema(a: std.mem.Allocator, definition: data.program.Schema) !data.program.Schema {
+    var measure: data.wire.Writer = .{};
+    try data.record.write(data.program.Schema, definition, &measure);
+    const bytes = try a.alloc(u8, measure.position);
+    defer a.free(bytes);
+    var writer: data.wire.Writer = .{ .output = bytes };
+    try data.record.write(data.program.Schema, definition, &writer);
+    var reader: data.wire.Reader = .{ .input = bytes };
+    return data.record.read(data.program.Schema, &reader, a);
+}
+
+fn appendSchemaChildren(
+    a: std.mem.Allocator,
+    guest: *const data.program_image.Admitted,
+    schemas: *std.ArrayList(Schema),
+    definition: data.program.Schema,
+) !void {
+    switch (definition) {
+        .product, .sum => |fields| for (fields) |id| try appendSchema(a, guest, schemas, id),
+        .seq => |id| try appendSchema(a, guest, schemas, id),
+        .vector => |value| try appendSchema(a, guest, schemas, value.element),
+        .array => |value| try appendSchema(a, guest, schemas, value.element),
+        .internal => |internal| switch (internal) {
+            .computation => |value| {
+                for (value.parameters) |id| try appendSchema(a, guest, schemas, id);
+                for (value.capture_bound) |id| try appendSchema(a, guest, schemas, id);
+                try appendSchema(a, guest, schemas, value.result);
+            },
+            .resumption => |value| {
+                try appendSchema(a, guest, schemas, value.input);
+                try appendSchema(a, guest, schemas, value.answer);
+                for (value.capture_bound) |id| try appendSchema(a, guest, schemas, id);
+            },
+            .cell => |value| try appendSchema(a, guest, schemas, value.element),
+            .suspension_package => |id| try appendSchema(a, guest, schemas, id),
+            .borrowed => |value| try appendSchema(a, guest, schemas, value.value),
+            else => {},
+        },
+        else => {},
+    }
 }
 
 fn blobSlices(

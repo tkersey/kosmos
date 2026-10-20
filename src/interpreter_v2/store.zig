@@ -115,6 +115,16 @@ pub const Store = struct {
     ) = .empty,
     projection_heads: std.AutoHashMapUnmanaged(data.program.Id, DataProjection) = .empty,
 
+    projection_retirements: usize = 0,
+    head_retirements: usize = 0,
+    intern_retirements: usize = 0,
+
+    fn normalizeIndex(map: anytype, retired: *usize, context: anytype) void {
+        if (retired.* < @max(16, map.capacity() / 8)) return;
+        map.rehash(context);
+        retired.* = 0;
+    }
+
     pub fn rememberProjection(self: *Store, key: DataProjection, value: g.Value) Error!void {
         try self.data_projections.ensureUnusedCapacity(self.allocator, 1);
         // Scalars have no retention edge. Only blob-valued projections need
@@ -202,6 +212,8 @@ pub const Store = struct {
     pub fn rollback(self: *Store) void {
         self.data_projections.clearRetainingCapacity();
         self.projection_heads.clearRetainingCapacity();
+        self.projection_retirements = 0;
+        self.head_retirements = 0;
         var journal = self.journal.?;
         self.journal = null;
         var nodes = journal.nodes.iterator();
@@ -246,6 +258,7 @@ pub const Store = struct {
         );
         self.free_blobs.clearRetainingCapacity();
         self.interned.clearRetainingCapacity();
+        self.intern_retirements = 0;
         for (self.blob_alive.items, 0..) |alive, id| {
             if (alive) {
                 self.interned.putAssumeCapacity(self.blobs.items[id], id);
@@ -739,13 +752,25 @@ pub const Store = struct {
             @intCast(
                 entry.key_ptr.blob,
             )
-        ]) self.data_projections.removeByPtr(entry.key_ptr);
+        ]) {
+            self.data_projections.removeByPtr(entry.key_ptr);
+            self.projection_retirements +|= 1;
+        };
         var heads = self.projection_heads.iterator();
         while (heads.next()) |entry| if (!blob_marks[
             @intCast(
                 entry.key_ptr.*,
             )
-        ]) self.projection_heads.removeByPtr(entry.key_ptr);
+        ]) {
+            self.projection_heads.removeByPtr(entry.key_ptr);
+            self.head_retirements +|= 1;
+        };
+        normalizeIndex(&self.data_projections, &self.projection_retirements, ProjectionContext{});
+        normalizeIndex(
+            &self.projection_heads,
+            &self.head_retirements,
+            std.hash_map.AutoContext(data.program.Id){},
+        );
     }
 
     fn sweepNodes(self: *Store, frames: anytype) Error!void {
@@ -783,6 +808,7 @@ pub const Store = struct {
                 if (blob_marks[id]) continue;
                 const held = try self.holdBlob(id);
                 self.interned.removeByPtr(entry.key_ptr);
+                self.intern_retirements +|= 1;
                 self.retireBlob(id, self.blobs.items[id], held);
                 self.blobs.items[id] = .{ .schema = 0, .bytes = &.{} };
                 self.blob_alive.items[id] = false;
@@ -790,6 +816,7 @@ pub const Store = struct {
                 if (self.statistics) |s| s.blob_retirements +|= 1;
             }
         }
+        normalizeIndex(&self.interned, &self.intern_retirements, BlobContext{});
     }
 };
 
