@@ -18,7 +18,10 @@ test "base rejects guest control before running any instruction" {
     defer b.deinit();
     const image = try encode(try source.examples.cloned(&b));
     defer a.free(image);
-    try std.testing.expectError(error.UnsupportedBaseSchema, Session.initImage(a, image, &.{}, .{}));
+    try std.testing.expectError(
+        error.UnsupportedBaseSchema,
+        Session.initImage(a, image, &.{}, .{}),
+    );
 }
 
 test "base bridge response binding survives checkpoint and transaction rollback" {
@@ -26,9 +29,16 @@ test "base bridge response binding survives checkpoint and transaction rollback"
     defer b.deinit();
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "kosmos.base.test/1", .payload = integer, .result = integer });
+    const effect = try b.effect(.{
+        .identity = "kosmos.base.test/1",
+        .payload = integer,
+        .result = integer,
+    });
     const entry = try b.declare(&.{integer}, integer, &.{effect}, &.{});
-    try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
+    try b.define(entry, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.reference(b.parameter(entry, 0)),
+    } }));
     const image = try encode(b.module(entry, unit));
     defer a.free(image);
     const admitted = try data.program_image.Admitted.decode(a, image);
@@ -71,7 +81,7 @@ test "base bridge response binding survives checkpoint and transaction rollback"
     try std.testing.expectError(error.InvalidState, restored.answer(reply));
 }
 
-test "base transaction rolls back and retries complete recursive execution at every allocation failure" {
+test "base transaction rolls back and retries recursive execution at every allocation failure" {
     var b = source.Builder.init(a);
     defer b.deinit();
     const image = try encode(try source.examples.recursive(&b));
@@ -87,9 +97,9 @@ test "base transaction rolls back and retries complete recursive execution at ev
     try std.testing.expect(result == .completed);
     const expected = try a.dupe(u8, try reference.bytes(&result.completed));
     defer a.free(expected);
-    var failures: usize = 0;
+    const allocation_count = try recursiveAllocationCount(&prepared, &input);
     var failed_after_mutation = false;
-    while (true) : (failures += 1) {
+    for (0..allocation_count + 1) |failures| {
         var fixed_growth = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
         var failing = std.testing.FailingAllocator.init(fixed_growth.allocator(), .{});
         var session = try Session.start(failing.allocator(), &prepared, &input, .{});
@@ -97,22 +107,14 @@ test "base transaction rolls back and retries complete recursive execution at ev
         var statistics: @import("../interpreter_v2/runtime_types.zig").Statistics = .{};
         session.statistics = &statistics;
         failing.fail_index = failing.alloc_index + failures;
-        const attempt = struct {
-            fn run(subject: *Session) !void {
-                var transaction = try subject.begin();
-                errdefer transaction.rollback(subject);
-                try std.testing.expect(try subject.run(null) == .completed);
-                transaction.commit(subject);
-            }
-        }.run;
-        attempt(&session) catch |err| {
+        runTransaction(&session) catch |err| {
             failing.fail_index = std.math.maxInt(usize);
             try std.testing.expectEqual(error.OutOfMemory, err);
             failed_after_mutation = failed_after_mutation or statistics.transitions != 0;
             const unchanged = try session.checkpoint(a);
             defer a.free(unchanged);
             try std.testing.expectEqualSlices(u8, before, unchanged);
-            try attempt(&session);
+            try runTransaction(&session);
             const retried = try session.observe();
             try std.testing.expectEqualSlices(u8, expected, try session.bytes(&retried.completed));
             continue;
@@ -121,26 +123,68 @@ test "base transaction rolls back and retries complete recursive execution at ev
         const actual = try session.observe();
         try std.testing.expectEqualSlices(u8, expected, try session.bytes(&actual.completed));
         try std.testing.expect(failures != 0 and failed_after_mutation);
-        break;
+        return;
     }
+    return error.AllocationSweepIncomplete;
 }
+
+fn runTransaction(subject: *Session) !void {
+    var transaction = try subject.begin();
+    errdefer transaction.rollback(subject);
+    try std.testing.expect(try subject.run(null) == .completed);
+    transaction.commit(subject);
+}
+
+fn recursiveAllocationCount(prepared: *const SessionPrepared, input: []const u8) !usize {
+    var fixed_growth = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    var counting = std.testing.FailingAllocator.init(fixed_growth.allocator(), .{});
+    var session = try Session.start(counting.allocator(), prepared, input, .{});
+    defer session.deinit();
+    const before = counting.alloc_index;
+    try runTransaction(&session);
+    return counting.alloc_index - before;
+}
+
+const SessionPrepared = @import("session.zig").Prepared;
 
 const AllocationCounter = struct {
     backing: std.mem.Allocator,
     allocations: usize = 0,
     fn allocator(self: *@This()) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
     }
-    fn alloc(context: *anyopaque, length: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
+    fn alloc(
+        context: *anyopaque,
+        length: usize,
+        alignment: std.mem.Alignment,
+        address: usize,
+    ) ?[*]u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.allocations += 1;
         return self.backing.rawAlloc(length, alignment, address);
     }
-    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) bool {
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        length: usize,
+        address: usize,
+    ) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         return self.backing.rawResize(memory, alignment, length, address);
     }
-    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) ?[*]u8 {
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        length: usize,
+        address: usize,
+    ) ?[*]u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         return self.backing.rawRemap(memory, alignment, length, address);
     }
@@ -160,7 +204,16 @@ test "base temporary allocation cost preserves recursive dynamic results" {
     const count = try e.param(entry, 0);
     const zero = try builder.constant(u64, 0);
     const one = try builder.constant(u64, 1);
-    try builder.define(entry, try e.when(try e.binary(.equal, count, zero), try builder.pure(count), try e.call(entry, &.{try e.binary(.integer_sub, count, one)})));
+    try builder.define(
+        entry,
+        try e.when(
+            try e.binary(.equal, count, zero),
+            try builder.pure(count),
+            try e.call(entry, &.{
+                try e.binary(.integer_sub, count, one),
+            }),
+        ),
+    );
     const image = try encode(builder.module(entry, unit));
     defer a.free(image);
     for ([_]u64{ 64, 512 }) |iterations| {
@@ -171,8 +224,14 @@ test "base temporary allocation cost preserves recursive dynamic results" {
         const before = counted.allocations;
         const result = try session.run(null);
         try std.testing.expect(result == .completed);
-        try std.testing.expectEqualSlices(u8, &std.mem.toBytes(@as(u64, 0)), try session.bytes(&result.completed));
+        try std.testing.expectEqualSlices(
+            u8,
+            &std.mem.toBytes(@as(u64, 0)),
+            try session.bytes(&result.completed),
+        );
         try std.testing.expect(counted.allocations - before <= 8);
-        std.debug.print("base recursive iterations={d} physical_allocations={d}\n", .{ iterations, counted.allocations - before });
+        std.debug.print("base recursive iterations={d} physical_allocations={d}\n", .{
+            iterations, counted.allocations - before,
+        });
     }
 }

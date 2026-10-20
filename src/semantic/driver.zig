@@ -90,23 +90,47 @@ pub const Driver = struct {
         errdefer self.allocator.free(command);
         const outer = try self.outer.begin();
         self.transaction_active = true;
-        return .{ .outer = outer, .operation = self.operation, .command = command, .last_cut = self.last_cut, .expected_reply = self.expected_reply, .revision = self.revision, .guest_revision = self.guest_revision, .closed = self.closed };
+        return .{
+            .outer = outer,
+            .operation = self.operation,
+            .command = command,
+            .last_cut = self.last_cut,
+            .expected_reply = self.expected_reply,
+            .revision = self.revision,
+            .guest_revision = self.guest_revision,
+            .closed = self.closed,
+        };
     }
 
-    pub fn start(a: std.mem.Allocator, guest: *const preparation.Prepared, selected: *const artifact.Admitted, initial: service.Initial) !Driver {
+    pub fn start(
+        a: std.mem.Allocator,
+        guest: *const preparation.Prepared,
+        selected: *const artifact.Admitted,
+        initial: service.Initial,
+    ) !Driver {
         const lease = try guest.acquire();
         errdefer lease.release();
         const runtime = try selected.acquire();
         errdefer runtime.release();
-        if (selected.content.value.guest) |identity| if (!std.mem.eql(u8, &identity, &lease.admitted().identity())) return error.GuestIdentityMismatch;
+        if (selected.content.value.guest) |identity| if (!std.mem.eql(
+            u8,
+            &identity,
+            &lease.admitted().identity(),
+        )) return error.GuestIdentityMismatch;
         try admitInitial(a, lease.admitted(), initial);
         // Specialized code already binds the admitted guest program. Only the
         // generic service accepts its projection as a dynamic argument.
-        const program = if (selected.content.value.guest == null) try projection.programBytes(a, lease.admitted()) else null;
+        const program = if (selected.content.value.guest == null) try projection.programBytes(
+            a,
+            lease.admitted(),
+        ) else null;
         defer if (program) |bytes| a.free(bytes);
         const input = try projection.encode(service.Initial, a, initial);
         errdefer a.free(input);
-        const arguments = if (program) |bytes| try std.mem.concat(a, u8, &.{ bytes, input }) else try a.dupe(u8, input);
+        const arguments = if (program) |bytes| try std.mem.concat(a, u8, &.{
+            bytes,
+            input,
+        }) else try a.dupe(u8, input);
         defer a.free(arguments);
         return .{
             .allocator = a,
@@ -140,7 +164,10 @@ pub const Driver = struct {
         const revision = try std.math.add(u64, self.revision, 1);
         const bytes = try projection.encode(service.Command, self.allocator, command);
         errdefer self.allocator.free(bytes);
-        var transaction: ?base.Session.Transaction = if (self.transaction_active) null else try self.outer.begin();
+        var transaction: ?base.Session.Transaction = if (self.transaction_active)
+            null
+        else
+            try self.outer.begin();
         errdefer if (transaction) |*active| active.rollback(&self.outer);
         try self.outer.replyBridge(self.core_identity, 0, bytes);
         if (transaction) |*active| active.commit(&self.outer);
@@ -180,26 +207,20 @@ pub const Driver = struct {
             },
             .failed, .yielded => return error.RuntimeFailure,
             .requested => |request| {
-                if (request.effect != 0 or !std.mem.eql(u8, self.outer.program.effects[0].identity, service.identity)) return error.InvalidBridge;
-                var event = try projection.decode(service.Event, self.allocator, try self.outer.bytes(&request.payload));
+                if (request.effect != 0 or !std.mem.eql(
+                    u8,
+                    self.outer.program.effects[0].identity,
+                    service.identity,
+                )) return error.InvalidBridge;
+                var event = try projection.decode(
+                    service.Event,
+                    self.allocator,
+                    try self.outer.bytes(&request.payload),
+                );
                 errdefer event.deinit();
                 switch (operation) {
                     .initialize, .advance => {
-                        if (event.value != .cut) return error.InvalidServiceEvent;
-                        const hooks = self.selected.content.value.hooks;
-                        if (hooks.enabled() != (event.value.cut.trace != null)) return error.InvalidServiceEvent;
-                        if (event.value.cut.trace) |trace| {
-                            if (hooks.control != (trace.control != null) or hooks.storage != (trace.storage != null)) return error.InvalidServiceEvent;
-                        }
-                        if (operation == .initialize and event.value.cut.guest_work != 0) return error.InvalidServiceEvent;
-                        if (operation == .advance) {
-                            var command = try projection.decode(service.Command, self.allocator, self.command);
-                            defer command.deinit();
-                            if (event.value.cut.guest_work > command.value.advance.quantum) return error.InvalidServiceEvent;
-                            if (event.value.cut.guest_work != 0 or command.value.advance.control != .none)
-                                self.guest_revision = guest_revision;
-                        }
-                        self.last_cut = event.value.cut;
+                        try self.acceptCut(event.value, operation, guest_revision);
                     },
                     .observe => if (event.value != .observation) return error.InvalidServiceEvent,
                     .project => if (event.value != .projection) return error.InvalidServiceEvent,
@@ -210,6 +231,34 @@ pub const Driver = struct {
                 return .{ .event = event };
             },
         }
+    }
+
+    fn acceptCut(self: *Driver, event: service.Event, operation: Operation, revision: u64) !void {
+        if (event != .cut) return error.InvalidServiceEvent;
+        const hooks = self.selected.content.value.hooks;
+        if (hooks.enabled() != (event.cut.trace != null))
+            return error.InvalidServiceEvent;
+        if (event.cut.trace) |trace| {
+            if (hooks.control != (trace.control != null) or
+                hooks.storage != (trace.storage != null))
+                return error.InvalidServiceEvent;
+        }
+        if (operation == .initialize and
+            event.cut.guest_work != 0) return error.InvalidServiceEvent;
+        if (operation == .advance) {
+            var command = try projection.decode(
+                service.Command,
+                self.allocator,
+                self.command,
+            );
+            defer command.deinit();
+            if (event.cut.guest_work > command.value.advance.quantum)
+                return error.InvalidServiceEvent;
+            if (event.cut.guest_work != 0 or
+                command.value.advance.control != .none)
+                self.guest_revision = revision;
+        }
+        self.last_cut = event.cut;
     }
 
     pub fn exchange(self: *Driver, command: service.Command) !projection.Owned(service.Event) {
@@ -229,7 +278,12 @@ pub const Driver = struct {
 
     fn projectState(self: *Driver) !data.state_image.Owned {
         if (self.operation != null) return error.GuestCutUnavailable;
-        return @import("realization.zig").guestCut(self.allocator, &self.outer, self.selected, self.guest.admitted());
+        return @import("realization.zig").guestCut(
+            self.allocator,
+            &self.outer,
+            self.selected,
+            self.guest.admitted(),
+        );
     }
 
     pub fn pendingBinding(self: *Driver, a: std.mem.Allocator, materialize: bool) !base.Pending {
@@ -248,12 +302,19 @@ pub const Driver = struct {
         // Program-relative admission has checked this external value. Native
         // code only publishes its existing canonical scalar/blob encoding.
         const payload_bytes: []const u8 = switch (pending.payload.body) {
-            .scalar => |*bytes| bytes[0..data.scalar.width(program.schemas[@intCast(effect.payload)]).?],
+            .scalar => |*bytes| bytes[0..data.scalar.width(
+                program.schemas[@intCast(effect.payload)],
+            ).?],
             .blob => |blob| actual.blobs[@intCast(blob.id)].bytes,
             else => return error.InvalidServiceEvent,
         };
         var hasher = protocol.stateDigestHasher();
-        const serialized = try data.state_image.serialize(self.allocator, actual, if (materialize) .{ .allocate = a } else .none, &hasher);
+        const serialized = try data.state_image.serialize(
+            self.allocator,
+            actual,
+            if (materialize) .{ .allocate = a } else .none,
+            &hasher,
+        );
         const state: []u8 = serialized.bytes orelse &.{};
         errdefer a.free(state);
         const contract = try self.guest.contract(pending.effect);
@@ -279,7 +340,8 @@ pub const Driver = struct {
     }
 
     fn currentExpected(self: *Driver) !ExpectedReply {
-        if (self.closed or self.last_cut == null or self.last_cut.?.status != .parked) return error.InvalidState;
+        if (self.closed or self.last_cut == null or
+            self.last_cut.?.status != .parked) return error.InvalidState;
         if (self.expected_reply) |expected| return expected;
         var pending = try self.pendingBinding(self.allocator, false);
         defer pending.deinit();
@@ -293,34 +355,63 @@ pub const Driver = struct {
         try self.replyExpected(bytes, try self.currentExpected(), quantum);
     }
 
-    pub fn replyExpected(self: *Driver, bytes: []const u8, expected: ExpectedReply, quantum: u64) !void {
+    pub fn replyExpected(
+        self: *Driver,
+        bytes: []const u8,
+        expected: ExpectedReply,
+        quantum: u64,
+    ) !void {
         if (self.operation != null) return error.OperationInProgress;
         var response = try protocol.decode(protocol.Result, self.allocator, bytes);
         defer response.deinit();
         if (self.statistics) |statistics| statistics.expected_binding_checks +|= 1;
         const actual = try self.currentExpected();
         if (!std.meta.eql(actual, expected)) return error.InvalidResult;
-        if (!std.mem.eql(u8, &response.value.request_identity, &expected.identity)) return error.InvalidResult;
+        if (!std.mem.eql(
+            u8,
+            &response.value.request_identity,
+            &expected.identity,
+        )) return error.InvalidResult;
         const admitted = self.guest.admitted();
         const program = admitted.program();
         if (expected.effect >= program.effects.len) return error.InvalidResult;
         const effect = program.effects[@intCast(expected.effect)];
-        try data.admission.value(self.allocator, program.schemas, admitted.schemaFacts(), .{ .schema = effect.result, .bytes = response.value.value });
-        try self.submit(.{ .advance = .{ .control = .{ .answer = response.value.value }, .quantum = quantum } });
+        try data.admission.value(self.allocator, program.schemas, admitted.schemaFacts(), .{
+            .schema = effect.result,
+            .bytes = response.value.value,
+        });
+        try self.submit(.{ .advance = .{
+            .control = .{ .answer = response.value.value },
+            .quantum = quantum,
+        } });
     }
 };
 
-pub fn admitInitial(a: std.mem.Allocator, admitted: *const data.program_image.Admitted, initial: service.Initial) !void {
+pub fn admitInitial(
+    a: std.mem.Allocator,
+    admitted: *const data.program_image.Admitted,
+    initial: service.Initial,
+) !void {
     switch (initial) {
         .arguments => |arguments| try admitArguments(a, admitted, arguments),
         .state => |state| try data.state_admission.validateAdmitted(a, admitted, state),
     }
 }
 
-fn admitArguments(a: std.mem.Allocator, admitted: *const data.program_image.Admitted, bytes: []const u8) !void {
+fn admitArguments(
+    a: std.mem.Allocator,
+    admitted: *const data.program_image.Admitted,
+    bytes: []const u8,
+) !void {
     const program = admitted.program();
     const entry = program.functions[@intCast(program.roots.entry)];
     var reader: data.wire.Reader = .{ .input = bytes };
-    for (entry.inputs) |slot| _ = try data.admission.readValue(a, program.schemas, admitted.schemaFacts(), entry.layout.slots[@intCast(slot)], &reader);
+    for (entry.inputs) |slot| _ = try data.admission.readValue(
+        a,
+        program.schemas,
+        admitted.schemaFacts(),
+        entry.layout.slots[@intCast(slot)],
+        &reader,
+    );
     try reader.finish();
 }

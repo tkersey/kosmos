@@ -48,7 +48,9 @@ fn encodedCursorFailure(allocator: std.mem.Allocator) !void {
     var store: heap.Store = .{ .allocator = allocator };
     defer store.deinit();
     const schemas = [_]data.program.Schema{ .u64, .{ .seq = 0 } };
-    const original = try store.literal(&schemas, .{ .schema = 1, .bytes = &.{ 2, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0 } });
+    const original = try store.literal(&schemas, .{ .schema = 1, .bytes = &.{
+        2, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
+    } });
     const cursor = try store.encodedSequence(1, .{
         .backing = original.body.blob,
         .start = 9,
@@ -69,7 +71,10 @@ fn encodedCursorFailure(allocator: std.mem.Allocator) !void {
     _ = try store.add(.{ .environment = .{ .values = &.{}, .tail = null } });
     store.rollback();
     try testing.expectEqual(@as(u64, 1), store.encoded_sequences.get(@intCast(cursor.id)).?.count);
-    const encoded = try @import("value_encoding.zig").encode(allocator, &schemas, &store, .{ .schema = 1, .body = .{ .reference = cursor } });
+    const encoded = try @import("value_encoding.zig").encode(allocator, &schemas, &store, .{
+        .schema = 1,
+        .body = .{ .reference = cursor },
+    });
     defer allocator.free(encoded);
     try testing.expectEqualSlices(u8, &.{ 1, 2, 0, 0, 0, 0, 0, 0, 0 }, encoded);
 }
@@ -127,7 +132,12 @@ test "shared sequence backing survives rollback collection and every allocation 
     try testing.checkAllAllocationFailures(testing.allocator, sharedFieldsFailure, .{});
 }
 
-fn ownedLiteral(allocator: std.mem.Allocator, store: *heap.Store, schema: data.program.Id, contents: []const u8) !data.graph.Value {
+fn ownedLiteral(
+    allocator: std.mem.Allocator,
+    store: *heap.Store,
+    schema: data.program.Id,
+    contents: []const u8,
+) !data.graph.Value {
     const buffer = try allocator.dupe(u8, contents);
     errdefer allocator.free(buffer);
     return store.literalOwned(&.{ .bytes, .u64 }, schema, buffer);
@@ -155,7 +165,11 @@ fn ownedConstruction(allocator: std.mem.Allocator) !void {
     try testing.expectEqual(first.body.blob.id, replacement.body.blob.id);
     store.rollback();
     const restored = (try store.get(root)).environment.values[0];
-    try testing.expectEqualSlices(u8, &.{ 3, 'o', 'n', 'e' }, store.blobs.items[@intCast(restored.body.blob.id)].bytes);
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 3, 'o', 'n', 'e' },
+        store.blobs.items[@intCast(restored.body.blob.id)].bytes,
+    );
 }
 
 test "owned blob construction transfers only on success and survives journal reuse" {
@@ -187,7 +201,10 @@ test "journal retains one entry version across repeated changes, collection and 
     const old_payload = store.blobs.items[0].bytes.ptr;
     try store.begin();
     for (0..64) |index| {
-        const value = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = &.{ 1, @intCast(index) } });
+        const value = try store.literal(&.{.bytes}, .{
+            .schema = 0,
+            .bytes = &.{ 1, @intCast(index) },
+        });
         try store.replace(root, .{ .environment = .{ .values = &.{value}, .tail = null } });
         try store.collect(roots);
     }
@@ -199,13 +216,20 @@ test "journal retains one entry version across repeated changes, collection and 
     const after = try bytes(&store, roots);
     defer testing.allocator.free(after);
     try testing.expectEqualSlices(u8, before, after);
-    try testing.expectEqual(0, (try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = &.{ 3, 'o', 'l', 'd' } })).body.blob.id);
+    try testing.expectEqual(0, (try store.literal(&.{.bytes}, .{
+        .schema = 0,
+        .bytes = &.{ 3, 'o', 'l', 'd' },
+    })).body.blob.id);
     try store.begin();
     const value = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = &.{ 1, 99 } });
     try store.replace(root, .{ .environment = .{ .values = &.{value}, .tail = null } });
     try store.collect(roots);
     store.commit();
-    try testing.expectEqualSlices(u8, &.{ 1, 99 }, store.blobs.items[@intCast(value.body.blob.id)].bytes);
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 1, 99 },
+        store.blobs.items[@intCast(value.body.blob.id)].bytes,
+    );
 }
 
 test "journal rollback retains imported bytes after collection and replacement" {
@@ -213,7 +237,10 @@ test "journal rollback retains imported bytes after collection and replacement" 
         .program_identity = @as([32]u8, @splat(0)),
         .status = .active,
         .roots = .{ .current = .{ .id = 0 } },
-        .nodes = &.{.{ .record = .{ .environment = .{ .values = &.{.{ .schema = 0, .body = .{ .blob = .{ .id = 0 } } }}, .tail = null } } }},
+        .nodes = &.{.{ .record = .{ .environment = .{ .values = &.{.{
+            .schema = 0,
+            .body = .{ .blob = .{ .id = 0 } },
+        }}, .tail = null } } }},
         .blobs = &.{.{ .schema = 0, .bytes = &.{ 3, 'o', 'l', 'd' } }},
     };
     const encoded = try data.state_image.emit(testing.allocator, state);

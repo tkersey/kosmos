@@ -37,14 +37,25 @@ pub const DataProjection = struct {
 const CachedProjection = struct { value: g.Value, next: ?DataProjection };
 const ProjectionContext = struct {
     pub fn hash(_: ProjectionContext, key: DataProjection) u64 {
-        const words: [5]u64 = .{ key.blob, key.schema, key.field, @intFromBool(key.element), key.offset };
+        const words: [5]u64 = .{
+            key.blob, key.schema, key.field, @intFromBool(key.element), key.offset,
+        };
         return std.hash.Wyhash.hash(0, std.mem.asBytes(&words));
     }
     pub fn eql(_: ProjectionContext, left: DataProjection, right: DataProjection) bool {
-        return left.blob == right.blob and left.schema == right.schema and left.field == right.field and left.element == right.element and left.offset == right.offset;
+        return left.blob == right.blob and
+            left.schema == right.schema and
+            left.field == right.field and
+            left.element == right.element and left.offset == right.offset;
     }
 };
-const SavedNode = struct { value: g.Node, alive: bool, borrowed: bool, fields: ?*SharedFields, sequence: ?EncodedSequence };
+const SavedNode = struct {
+    value: g.Node,
+    alive: bool,
+    borrowed: bool,
+    fields: ?*SharedFields,
+    sequence: ?EncodedSequence,
+};
 const SavedBlob = struct { value: g.Blob, alive: bool, borrowed: bool };
 const Journal = struct {
     node_count: usize,
@@ -96,7 +107,12 @@ pub const Store = struct {
     encoded_sequences: std.AutoHashMapUnmanaged(usize, EncodedSequence) = .empty,
     // Derived immutable data survives only while its source blob is reachable.
     // These edges are private storage, not checkpoint state or independent roots.
-    data_projections: std.HashMapUnmanaged(DataProjection, CachedProjection, ProjectionContext, 80) = .empty,
+    data_projections: std.HashMapUnmanaged(
+        DataProjection,
+        CachedProjection,
+        ProjectionContext,
+        80,
+    ) = .empty,
     projection_heads: std.AutoHashMapUnmanaged(data.program.Id, DataProjection) = .empty,
 
     pub fn rememberProjection(self: *Store, key: DataProjection, value: g.Value) Error!void {
@@ -105,7 +121,10 @@ pub const Store = struct {
         // visiting when their immutable source is marked by the collector.
         const retained = value.body == .blob;
         if (retained) try self.projection_heads.ensureUnusedCapacity(self.allocator, 1);
-        self.data_projections.putAssumeCapacity(key, .{ .value = value, .next = if (retained) self.projection_heads.get(key.blob) else null });
+        self.data_projections.putAssumeCapacity(key, .{
+            .value = value,
+            .next = if (retained) self.projection_heads.get(key.blob) else null,
+        });
         if (retained) self.projection_heads.putAssumeCapacity(key.blob, key);
     }
 
@@ -114,7 +133,10 @@ pub const Store = struct {
         // Rollback rebuilds only private indexes, and must never allocate.
         try self.free_nodes.ensureTotalCapacity(self.allocator, self.nodes.items.len);
         try self.free_blobs.ensureTotalCapacity(self.allocator, self.blobs.items.len);
-        try self.interned.ensureTotalCapacity(self.allocator, std.math.cast(u32, self.blobs.items.len) orelse return error.Capacity);
+        try self.interned.ensureTotalCapacity(
+            self.allocator,
+            std.math.cast(u32, self.blobs.items.len) orelse return error.Capacity,
+        );
         self.journal = .{ .node_count = self.nodes.items.len, .blob_count = self.blobs.items.len };
     }
 
@@ -126,7 +148,11 @@ pub const Store = struct {
             .alive = self.alive.items[id],
             .borrowed = id < self.borrowed_nodes.len and self.borrowed_nodes[id],
             .fields = self.field_owners.get(id),
-            .sequence = if (self.nodes.items[id] == .aggregate and self.nodes.items[id].aggregate.fields.len == 0) self.encoded_sequences.get(id) else null,
+            .sequence = if (self.nodes.items[id] == .aggregate and
+                self.nodes.items[id].aggregate.fields.len == 0)
+                self.encoded_sequences.get(id)
+            else
+                null,
         });
         if (self.statistics) |statistics| statistics.journal_nodes +|= 1;
         return true;
@@ -145,7 +171,8 @@ pub const Store = struct {
     fn retireNode(self: *Store, id: usize, value: g.Node, held: bool) void {
         if (held) {
             _ = self.field_owners.remove(id); // Physical ownership moves to the journal.
-            if (value == .aggregate and value.aggregate.fields.len == 0) _ = self.encoded_sequences.remove(id);
+            if (value == .aggregate and
+                value.aggregate.fields.len == 0) _ = self.encoded_sequences.remove(id);
             if (id < self.borrowed_nodes.len) self.borrowed_nodes[id] = false;
         } else self.releaseNode(id, value);
     }
@@ -160,10 +187,15 @@ pub const Store = struct {
         self.journal = null;
         var nodes = journal.nodes.valueIterator();
         while (nodes.next()) |saved| if (saved.alive and !saved.borrowed) {
-            if (saved.fields) |fields| self.releaseFields(fields) else release(g.Node, self.allocator, saved.value);
+            if (saved.fields) |fields| self.releaseFields(fields) else release(
+                g.Node,
+                self.allocator,
+                saved.value,
+            );
         };
         var blobs = journal.blobs.valueIterator();
-        while (blobs.next()) |saved| if (saved.alive and !saved.borrowed) self.allocator.free(saved.value.bytes);
+        while (blobs.next()) |saved| if (saved.alive and
+            !saved.borrowed) self.allocator.free(saved.value.bytes);
         journal.deinit(self.allocator);
     }
 
@@ -188,7 +220,10 @@ pub const Store = struct {
             self.alive.items[id] = entry.value_ptr.alive;
             if (id < self.borrowed_nodes.len) self.borrowed_nodes[id] = entry.value_ptr.borrowed;
             if (entry.value_ptr.fields) |fields| self.field_owners.putAssumeCapacity(id, fields);
-            if (entry.value_ptr.sequence) |sequence| self.encoded_sequences.putAssumeCapacity(id, sequence);
+            if (entry.value_ptr.sequence) |sequence| self.encoded_sequences.putAssumeCapacity(
+                id,
+                sequence,
+            );
         }
         self.nodes.items.len = journal.node_count;
         self.alive.items.len = journal.node_count;
@@ -200,21 +235,28 @@ pub const Store = struct {
             self.blob_alive.items[id] = entry.value_ptr.alive;
             if (id < self.borrowed_blobs.len) self.borrowed_blobs[id] = entry.value_ptr.borrowed;
         }
-        for (journal.blob_count..self.blobs.items.len) |id| if (self.blob_alive.items[id]) self.releaseBlob(id, self.blobs.items[id]);
+        for (journal.blob_count..self.blobs.items.len) |id| {
+            if (self.blob_alive.items[id]) self.releaseBlob(id, self.blobs.items[id]);
+        }
         self.blobs.items.len = journal.blob_count;
         self.blob_alive.items.len = journal.blob_count;
         self.free_nodes.clearRetainingCapacity();
-        for (self.alive.items, 0..) |alive, id| if (!alive) self.free_nodes.appendAssumeCapacity(id);
+        for (self.alive.items, 0..) |alive, id| if (!alive) self.free_nodes.appendAssumeCapacity(
+            id,
+        );
         self.free_blobs.clearRetainingCapacity();
         self.interned.clearRetainingCapacity();
         for (self.blob_alive.items, 0..) |alive, id| {
-            if (alive) self.interned.putAssumeCapacity(self.blobs.items[id], id) else self.free_blobs.appendAssumeCapacity(id);
+            if (alive) {
+                self.interned.putAssumeCapacity(self.blobs.items[id], id);
+            } else self.free_blobs.appendAssumeCapacity(id);
         }
         journal.deinit(self.allocator);
     }
 
     fn releaseNode(self: *Store, id: usize, value: g.Node) void {
-        if (value == .aggregate and value.aggregate.fields.len == 0) _ = self.encoded_sequences.remove(id);
+        if (value == .aggregate and value.aggregate.fields.len == 0)
+            _ = self.encoded_sequences.remove(id);
         if (self.field_owners.fetchRemove(id)) |entry| {
             self.releaseFields(entry.value);
             return;
@@ -231,8 +273,13 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         if (self.journal != null) self.rollback();
-        for (self.nodes.items, self.alive.items, 0..) |item, live, id| if (live) self.releaseNode(id, item);
-        for (self.blobs.items, self.blob_alive.items, 0..) |blob, live, id| if (live) self.releaseBlob(id, blob);
+        for (self.nodes.items, self.alive.items, 0..) |item, live, id| if (live) self.releaseNode(
+            id,
+            item,
+        );
+        for (self.blobs.items, self.blob_alive.items, 0..) |blob, live, id| {
+            if (live) self.releaseBlob(id, blob);
+        }
         if (self.imported) |*base| base.deinit(self.allocator);
         self.allocator.free(self.borrowed_nodes);
         self.allocator.free(self.borrowed_blobs);
@@ -306,7 +353,11 @@ pub const Store = struct {
     }
 
     /// Execution-only immutable leaf; public projection restores canonical bytes.
-    pub fn encodedSequence(self: *Store, schema: data.program.Id, sequence: EncodedSequence) Error!g.NodeRef {
+    pub fn encodedSequence(
+        self: *Store,
+        schema: data.program.Id,
+        sequence: EncodedSequence,
+    ) Error!g.NodeRef {
         if (sequence.backing.id >= self.blobs.items.len or
             !self.blob_alive.items[@intCast(sequence.backing.id)]) return error.InvalidReference;
         const bytes = self.blobs.items[@intCast(sequence.backing.id)].bytes;
@@ -324,7 +375,13 @@ pub const Store = struct {
 
     /// Shares only physical descriptor storage. Graph tracing, ownership checks
     /// and serialization see each node's live fields, never discarded prefixes.
-    pub fn aggregateSlice(self: *Store, schema: data.program.Id, parent: g.NodeRef, start: usize, count: usize) Error!g.NodeRef {
+    pub fn aggregateSlice(
+        self: *Store,
+        schema: data.program.Id,
+        parent: g.NodeRef,
+        start: usize,
+        count: usize,
+    ) Error!g.NodeRef {
         const node = try self.get(parent);
         if (node != .aggregate or start > node.aggregate.fields.len or
             count > node.aggregate.fields.len - start) return error.InvalidReference;
@@ -363,7 +420,8 @@ pub const Store = struct {
     }
 
     pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
-        if (reference.id >= self.nodes.items.len or !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
+        if (reference.id >= self.nodes.items.len or
+            !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
         return self.nodes.items[@intCast(reference.id)];
     }
 
@@ -385,15 +443,25 @@ pub const Store = struct {
         self.retireNode(@intCast(reference.id), previous, held);
     }
 
-    pub fn literal(self: *Store, schemas: []const data.program.Schema, value: data.program.Literal) Error!g.Value {
+    pub fn literal(
+        self: *Store,
+        schemas: []const data.program.Schema,
+        value: data.program.Literal,
+    ) Error!g.Value {
         if (data.scalar.width(schemas[@intCast(value.schema)])) |width| {
             var scalar = @as([8]u8, @splat(0));
             @memcpy(scalar[0..width], value.bytes);
             return .{ .schema = value.schema, .body = .{ .scalar = scalar } };
         }
         const key: g.Blob = .{ .schema = value.schema, .bytes = value.bytes };
-        if (self.interned.get(key)) |id| return .{ .schema = value.schema, .body = .{ .blob = .{ .id = id } } };
-        const copied: g.Blob = .{ .schema = value.schema, .bytes = try self.allocator.dupe(u8, value.bytes) };
+        if (self.interned.get(key)) |id| return .{
+            .schema = value.schema,
+            .body = .{ .blob = .{ .id = id } },
+        };
+        const copied: g.Blob = .{
+            .schema = value.schema,
+            .bytes = try self.allocator.dupe(u8, value.bytes),
+        };
         errdefer self.allocator.free(copied.bytes);
         const result = try self.insertBlobOwned(copied);
         if (self.statistics) |statistics| statistics.copied_blob_bytes +|= copied.bytes.len;
@@ -451,7 +519,12 @@ pub const Store = struct {
     /// Own one snapshot of the complete argument buffer. All typed blob slices
     /// are derived here, so no external borrowed storage can enter this backing.
     /// Result descriptors belong to scratch and are used only during Session entry.
-    pub fn importArguments(self: *Store, admitted: *const data.program_image.Admitted, input: []const u8, scratch: std.mem.Allocator) (Error || data.program_image.Error)![]g.Value {
+    pub fn importArguments(
+        self: *Store,
+        admitted: *const data.program_image.Admitted,
+        input: []const u8,
+        scratch: std.mem.Allocator,
+    ) (Error || data.program_image.Error)![]g.Value {
         if (self.nodes.items.len != 0 or self.blobs.items.len != 0 or self.imported != null or
             self.journal != null) return error.InvalidState;
         const owned = try self.allocator.dupe(u8, input);
@@ -464,7 +537,13 @@ pub const Store = struct {
         var blob_count: usize = 0;
         for (literals, entry.inputs) |*item, slot| {
             const schema = entry.layout.slots[@intCast(slot)];
-            item.* = .{ .schema = schema, .bytes = try data.admission.readValue(scratch, program.schemas, admitted.schemaFacts(), schema, &reader) };
+            item.* = .{ .schema = schema, .bytes = try data.admission.readValue(
+                scratch,
+                program.schemas,
+                admitted.schemaFacts(),
+                schema,
+                &reader,
+            ) };
             if (data.scalar.width(program.schemas[@intCast(schema)]) == null) blob_count += 1;
         }
         try reader.finish();
@@ -473,7 +552,10 @@ pub const Store = struct {
         @memset(flags, false);
         try self.blobs.ensureTotalCapacityPrecise(self.allocator, blob_count);
         try self.blob_alive.ensureTotalCapacityPrecise(self.allocator, blob_count);
-        try self.interned.ensureUnusedCapacity(self.allocator, std.math.cast(u32, blob_count) orelse return error.Capacity);
+        try self.interned.ensureUnusedCapacity(
+            self.allocator,
+            std.math.cast(u32, blob_count) orelse return error.Capacity,
+        );
         // Every fallible operation precedes backing/blob publication.
         for (literals, values) |item, *value| {
             if (data.scalar.width(program.schemas[@intCast(item.schema)])) |width| {
@@ -502,7 +584,9 @@ pub const Store = struct {
     /// Adopt immutable decoded storage; transfer only on complete success.
     /// Semantic admission belongs to the caller before this physical operation.
     pub fn importOwned(self: *Store, incoming: *data.state_image.Owned) Error!void {
-        if (self.nodes.items.len != 0 or self.blobs.items.len != 0 or self.imported != null or self.journal != null) return error.InvalidState;
+        if (self.nodes.items.len != 0 or
+            self.blobs.items.len != 0 or
+            self.imported != null or self.journal != null) return error.InvalidState;
         const state_ = incoming.state;
         const node_flags = try self.allocator.alloc(bool, state_.nodes.len);
         errdefer self.allocator.free(node_flags);
@@ -551,7 +635,10 @@ pub const Store = struct {
         };
         for (self.borrowed_blobs, 0..) |borrowed, id| if (borrowed) {
             const previous = self.blobs.items[id];
-            const copy: g.Blob = .{ .schema = previous.schema, .bytes = try self.allocator.dupe(u8, previous.bytes) };
+            const copy: g.Blob = .{
+                .schema = previous.schema,
+                .bytes = try self.allocator.dupe(u8, previous.bytes),
+            };
             errdefer self.allocator.free(copy.bytes);
             _ = try self.holdBlob(id);
             _ = self.interned.remove(previous);
@@ -596,45 +683,73 @@ pub const Store = struct {
         try data.graph_order.references(g.Roots, roots, pending, self.allocator);
         if (self.statistics) |s| s.traced_edges +|= pending.items.len;
         while (pending.pop()) |reference| switch (reference) {
-            .node => |id| {
-                if (id >= marks.len or !self.alive.items[@intCast(id)]) return error.InvalidReference;
-                if (marks[@intCast(id)]) continue;
-                marks[@intCast(id)] = true;
-                const before = pending.items.len;
-                try data.graph_order.references(g.Node, self.nodes.items[@intCast(id)], pending, self.allocator);
-                const node = self.nodes.items[@intCast(id)];
-                if (node == .aggregate and node.aggregate.fields.len == 0)
-                    if (self.encoded_sequences.get(@intCast(id))) |sequence|
-                        try pending.append(self.allocator, .{ .blob = sequence.backing.id });
-                try frames.references(id, pending, self.allocator);
-                if (self.statistics) |s| {
-                    s.traced_nodes +|= 1;
-                    s.traced_edges +|= pending.items.len - before;
-                }
-            },
-            .blob => |id| {
-                if (id >= blob_marks.len or !self.blob_alive.items[@intCast(id)]) return error.InvalidReference;
-                if (blob_marks[@intCast(id)]) continue;
-                blob_marks[@intCast(id)] = true;
-                var key = self.projection_heads.get(id);
-                while (key) |selected| {
-                    const cached = self.data_projections.get(selected) orelse return error.InvalidState;
-                    const before = pending.items.len;
-                    try data.graph_order.references(g.Value, cached.value, pending, self.allocator);
-                    if (self.statistics) |statistics| statistics.traced_edges +|= pending.items.len - before;
-                    key = cached.next;
-                }
-            },
+            .node => |id| try self.traceNode(id, frames),
+            .blob => |id| try self.traceBlob(id),
         };
-        // Retire cache entries before any slot can be reused. If collection
-        // fails later, surviving entries still refer only to live source data.
-        var projections = self.data_projections.iterator();
-        while (projections.next()) |entry| if (!blob_marks[@intCast(entry.key_ptr.blob)]) self.data_projections.removeByPtr(entry.key_ptr);
-        var heads = self.projection_heads.iterator();
-        while (heads.next()) |entry| if (!blob_marks[@intCast(entry.key_ptr.*)]) self.projection_heads.removeByPtr(entry.key_ptr);
+        self.retireProjections();
         try self.free_nodes.ensureTotalCapacity(self.allocator, marks.len);
         try self.free_blobs.ensureTotalCapacity(self.allocator, blob_marks.len);
         if (self.statistics) |s| s.swept_slots +|= marks.len + blob_marks.len;
+        try self.sweepNodes(frames);
+        try self.sweepBlobs();
+        try self.compactImported();
+    }
+
+    fn traceNode(self: *Store, id: u64, frames: anytype) Error!void {
+        if (id >= self.marks.items.len or
+            !self.alive.items[@intCast(id)]) return error.InvalidReference;
+        if (self.marks.items[@intCast(id)]) return;
+        self.marks.items[@intCast(id)] = true;
+        const pending = &self.pending;
+        const before = pending.items.len;
+        const node = self.nodes.items[@intCast(id)];
+        try data.graph_order.references(g.Node, node, pending, self.allocator);
+        if (node == .aggregate and node.aggregate.fields.len == 0)
+            if (self.encoded_sequences.get(@intCast(id))) |sequence|
+                try pending.append(self.allocator, .{ .blob = sequence.backing.id });
+        try frames.references(id, pending, self.allocator);
+        if (self.statistics) |s| {
+            s.traced_nodes +|= 1;
+            s.traced_edges +|= pending.items.len - before;
+        }
+    }
+
+    fn traceBlob(self: *Store, id: u64) Error!void {
+        if (id >= self.blob_marks.items.len or
+            !self.blob_alive.items[@intCast(id)]) return error.InvalidReference;
+        if (self.blob_marks.items[@intCast(id)]) return;
+        self.blob_marks.items[@intCast(id)] = true;
+        var key = self.projection_heads.get(id);
+        while (key) |selected| {
+            const cached = self.data_projections.get(selected) orelse return error.InvalidState;
+            const before = self.pending.items.len;
+            try data.graph_order.references(g.Value, cached.value, &self.pending, self.allocator);
+            if (self.statistics) |statistics|
+                statistics.traced_edges +|= self.pending.items.len - before;
+            key = cached.next;
+        }
+    }
+
+    fn retireProjections(self: *Store) void {
+        const blob_marks = self.blob_marks.items;
+        // Retire cache entries before any slot can be reused. If collection
+        // fails later, surviving entries still refer only to live source data.
+        var projections = self.data_projections.iterator();
+        while (projections.next()) |entry| if (!blob_marks[
+            @intCast(
+                entry.key_ptr.blob,
+            )
+        ]) self.data_projections.removeByPtr(entry.key_ptr);
+        var heads = self.projection_heads.iterator();
+        while (heads.next()) |entry| if (!blob_marks[
+            @intCast(
+                entry.key_ptr.*,
+            )
+        ]) self.projection_heads.removeByPtr(entry.key_ptr);
+    }
+
+    fn sweepNodes(self: *Store, frames: anytype) Error!void {
+        const marks = self.marks.items;
         for (marks, 0..) |marked, id| if (!marked and self.alive.items[id]) {
             frames.remove(id) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -648,6 +763,10 @@ pub const Store = struct {
             self.alive.items[id] = false;
             self.free_nodes.appendAssumeCapacity(id);
         };
+    }
+
+    fn sweepBlobs(self: *Store) Error!void {
+        const blob_marks = self.blob_marks.items;
         {
             const free_start = self.free_blobs.items.len;
             // Preserve the ordinary ascending retirement order without hashing
@@ -671,7 +790,6 @@ pub const Store = struct {
                 if (self.statistics) |s| s.blob_retirements +|= 1;
             }
         }
-        try self.compactImported();
     }
 };
 
@@ -690,24 +808,39 @@ fn ownedBytes(comptime T: type, value: T) usize {
         .pointer => |info| blk: {
             var size = @sizeOf(info.child) *| value.len;
             if (info.child != u8) for (value) |item| {
-                size +|= ownedBytes(info.child, item);
+                size +|= @call(.always_inline, ownedBytes, .{ info.child, item });
             };
             break :blk size;
         },
-        .optional => |info| if (value) |present| ownedBytes(info.child, present) else 0,
+        .optional => |info| if (value) |present|
+            @call(.always_inline, ownedBytes, .{ info.child, present })
+        else
+            0,
         .@"struct" => |info| blk: {
             var size: usize = 0;
-            inline for (info.field_names, info.field_types) |field_name, FieldType| size +|= ownedBytes(FieldType, @field(value, field_name));
+            inline for (info.field_names, info.field_types) |field_name, FieldType| {
+                size +|= @call(.always_inline, ownedBytes, .{
+                    FieldType,
+                    @field(value, field_name),
+                });
+            }
             break :blk size;
         },
         .@"union" => switch (value) {
-            inline else => |payload| ownedBytes(@TypeOf(payload), payload),
+            inline else => |payload| @call(.always_inline, ownedBytes, .{
+                @TypeOf(payload), payload,
+            }),
         },
         else => 0,
     };
 }
 
-pub fn duplicate(comptime T: type, allocator: std.mem.Allocator, value: T) std.mem.Allocator.Error!T {
+pub fn duplicate(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) std.mem.Allocator.Error!T {
+    @setEvalBranchQuota(10000);
     return switch (@typeInfo(T)) {
         .pointer => |info| blk: {
             const result = try allocator.alloc(info.child, value.len);
@@ -717,27 +850,44 @@ pub fn duplicate(comptime T: type, allocator: std.mem.Allocator, value: T) std.m
                 allocator.free(result);
             }
             for (result, value) |*target, source| {
-                target.* = try duplicate(info.child, allocator, source);
+                target.* = try @call(.always_inline, duplicate, .{ info.child, allocator, source });
                 initialized += 1;
             }
             break :blk result;
         },
-        .optional => |info| if (value) |present| try duplicate(info.child, allocator, present) else null,
+        .optional => |info| if (value) |present|
+            try @call(.always_inline, duplicate, .{ info.child, allocator, present })
+        else
+            null,
         .@"struct" => |info| blk: {
             var result: T = undefined;
             var initialized: usize = 0;
-            errdefer inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (index < initialized) release(FieldType, allocator, @field(result, field_name));
-            };
+            errdefer {
+                inline for (info.field_names, info.field_types, 0..) |name, FieldType, index| {
+                    if (index < initialized) release(FieldType, allocator, @field(result, name));
+                }
+            }
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
-                @field(result, field_name) = try duplicate(FieldType, allocator, @field(value, field_name));
+                @field(result, field_name) = try @call(.always_inline, duplicate, .{
+                    FieldType,
+                    allocator,
+                    @field(value, field_name),
+                });
                 initialized += 1;
             }
             break :blk result;
         },
         .@"union" => |info| blk: {
-            inline for (info.field_names, info.field_types) |field_name, FieldType| if (std.mem.eql(u8, @tagName(value), field_name)) {
-                break :blk @unionInit(T, field_name, try duplicate(FieldType, allocator, @field(value, field_name)));
+            inline for (info.field_names, info.field_types) |field_name, FieldType| if (std.mem.eql(
+                u8,
+                @tagName(value),
+                field_name,
+            )) {
+                break :blk @unionInit(T, field_name, try @call(.always_inline, duplicate, .{
+                    FieldType,
+                    allocator,
+                    @field(value, field_name),
+                }));
             };
             unreachable; // Closed native union.
         },
@@ -748,20 +898,29 @@ pub fn duplicate(comptime T: type, allocator: std.mem.Allocator, value: T) std.m
 pub fn release(comptime T: type, allocator: std.mem.Allocator, value: T) void {
     switch (@typeInfo(T)) {
         .pointer => |info| {
-            for (value) |item| release(info.child, allocator, item);
+            for (value) |item| @call(.always_inline, release, .{ info.child, allocator, item });
             allocator.free(value);
         },
-        .optional => |info| if (value) |present| release(info.child, allocator, present),
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| release(FieldType, allocator, @field(value, field_name)),
-        .@"union" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| if (std.mem.eql(u8, @tagName(value), field_name)) {
-            release(FieldType, allocator, @field(value, field_name));
-            return;
+        .optional => |info| if (value) |present|
+            @call(.always_inline, release, .{ info.child, allocator, present }),
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, FieldType| {
+            @call(.always_inline, release, .{ FieldType, allocator, @field(value, name) });
+        },
+        .@"union" => switch (value) {
+            inline else => |payload| @call(.always_inline, release, .{
+                @TypeOf(payload), allocator, payload,
+            }),
         },
         else => {},
     }
 }
 
 const NoFrames = struct {
-    fn references(_: NoFrames, _: data.program.Id, _: *std.ArrayList(data.graph_order.Reference), _: std.mem.Allocator) Error!void {}
+    fn references(
+        _: NoFrames,
+        _: data.program.Id,
+        _: *std.ArrayList(data.graph_order.Reference),
+        _: std.mem.Allocator,
+    ) Error!void {}
     fn remove(_: NoFrames, _: data.program.Id) Error!void {}
 };

@@ -18,10 +18,19 @@ fn makeImage(cleanup: bool) ![]u8 {
     const module = if (cleanup) try horos.source.examples.unwind(&b) else blk: {
         const integer = try b.scalar(u64);
         const unit = try b.scalar(void);
-        const effect = try b.effect(.{ .identity = "binding/retained", .payload = unit, .result = unit });
+        const effect = try b.effect(.{
+            .identity = "binding/retained",
+            .payload = unit,
+            .result = unit,
+        });
         const entry = try b.declare(&.{integer}, integer, &.{effect}, &.{});
-        const operation = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } });
-        try b.define(entry, try b.bind(try b.variable(unit), operation, try b.pure(try b.reference(b.parameter(entry, 0)))));
+        const operation = try b.term(.{ .perform = .{
+            .effect = effect,
+            .payload = try b.constant(void, {}),
+        } });
+        try b.define(entry, try b.bind(try b.variable(unit), operation, try b.pure(
+            try b.reference(b.parameter(entry, 0)),
+        )));
         break :blk b.module(entry, unit);
     };
     var compiled = try horos.program.compile(a, module);
@@ -35,7 +44,8 @@ fn finish(resident: *runtime.Resident) void {
     resident.close() catch |err| switch (err) {
         error.InvalidState => {},
         error.UnfinishedSession => {
-            const state = resident.takeCheckpoint(a) catch unreachable;
+            const state = resident.takeCheckpoint(a) catch |checkpoint_error|
+                std.debug.panic("{s}", .{@errorName(checkpoint_error)});
             a.free(state);
         },
         else => unreachable,
@@ -44,27 +54,19 @@ fn finish(resident: *runtime.Resident) void {
 fn encodeReply(request: []const u8, value: []const u8) ![]u8 {
     var decoded = try protocol.decode(protocol.Request, a, request);
     defer decoded.deinit();
-    return protocol.encodeOwned(protocol.Result, a, .{ .request_identity = decoded.value.request_identity, .value = value });
+    return protocol.encodeOwned(protocol.Result, a, .{
+        .request_identity = decoded.value.request_identity,
+        .value = value,
+    });
 }
 fn rejected(session: *runtime.Session, reply: []const u8) anyerror {
     session.answer(reply) catch |err| return err;
     return error.UnexpectedSuccess;
 }
 
-test "public expected replies remain bound to the current request through advance restore and rollback" {
-    var b = horos.source.Builder.init(a);
-    defer b.deinit();
-    const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "binding/sequential", .payload = unit, .result = unit });
-    const entry = try b.declare(&.{}, unit, &.{effect}, &.{});
-    const first_op = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } });
-    const second_op = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } });
-    try b.define(entry, try b.bind(try b.variable(unit), first_op, second_op));
-    var compiled = try horos.program.compile(a, b.module(entry, unit));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+test "public expected replies remain bound to the request through advance restore and rollback" {
+    const image = try sequentialImage();
     defer a.free(image);
-    _ = try compiled.encode(a, image);
     var prepared = try runtime.Prepared.init(a, image);
     defer prepared.deinit();
     var session = try runtime.Session.start(a, &prepared, &.{});
@@ -72,8 +74,14 @@ test "public expected replies remain bound to the current request through advanc
     try expect(try session.run(null) == .requested);
     var first = try session.pendingBinding(a, false);
     defer first.deinit();
-    const binding_a: ExpectedReply = .{ .identity = first.request.request_identity, .effect = first.request.binding.effect };
-    const reply_a = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = first.request.request_identity, .value = &.{} });
+    const binding_a: ExpectedReply = .{
+        .identity = first.request.request_identity,
+        .effect = first.request.binding.effect,
+    };
+    const reply_a = try protocol.encodeOwned(protocol.Result, a, .{
+        .request_identity = first.request.request_identity,
+        .value = &.{},
+    });
     defer a.free(reply_a);
     var transaction = try session.begin();
     var transaction_live = true;
@@ -82,8 +90,14 @@ test "public expected replies remain bound to the current request through advanc
     try expect(try session.run(null) == .requested);
     var second = try session.pendingBinding(a, false);
     defer second.deinit();
-    const binding_b: ExpectedReply = .{ .identity = second.request.request_identity, .effect = second.request.binding.effect };
-    const reply_b = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = second.request.request_identity, .value = &.{} });
+    const binding_b: ExpectedReply = .{
+        .identity = second.request.request_identity,
+        .effect = second.request.binding.effect,
+    };
+    const reply_b = try protocol.encodeOwned(protocol.Result, a, .{
+        .request_identity = second.request.request_identity,
+        .value = &.{},
+    });
     defer a.free(reply_b);
     try expect(!std.mem.eql(u8, &binding_a.identity, &binding_b.identity));
     transaction.rollback(&session);
@@ -92,7 +106,11 @@ test "public expected replies remain bound to the current request through advanc
     try session.answerExpected(reply_a, binding_a);
     try expect(try session.run(null) == .requested);
     try std.testing.expectError(error.InvalidResult, session.answerExpected(reply_a, binding_a));
-    try std.testing.expectError(error.InvalidResult, session.submitAdvance(.{ .reply = reply_a }, 0, binding_a));
+    try std.testing.expectError(error.InvalidResult, session.submitAdvance(
+        .{ .reply = reply_a },
+        0,
+        binding_a,
+    ));
     try std.testing.expectError(error.InvalidResult, session.answer(reply_a));
     var wrong_effect = binding_b;
     wrong_effect.effect += 1;
@@ -105,13 +123,13 @@ test "public expected replies remain bound to the current request through advanc
     try restored.answerExpected(reply_b, binding_b);
     try expect(try restored.run(null) == .completed);
     try session.submitAdvance(.{ .reply = reply_b }, 100, binding_b);
-    while (true) {
+    for (0..std.math.maxInt(usize)) |_| {
         var progress = try session.pump(64);
         defer progress.deinit();
         if (progress == .suspended) continue;
         try expect(progress == .event and progress.event.value.cut.status == .completed);
         break;
-    }
+    } else return error.PumpBoundExhausted;
 }
 
 test "resident reuses exact binding across independent invalid replies inspection and restore" {
@@ -137,13 +155,19 @@ test "resident reuses exact binding across independent invalid replies inspectio
     var wrong_image = decoded.value.binding;
     wrong_image.program_identity[0] ^= 1;
     const unrelated = try protocol.request(wrong_image);
-    const wrongly_bound = try protocol.encodeOwned(protocol.Result, a, .{ .request_identity = unrelated.request_identity, .value = &.{} });
+    const wrongly_bound = try protocol.encodeOwned(protocol.Result, a, .{
+        .request_identity = unrelated.request_identity,
+        .value = &.{},
+    });
     defer a.free(wrongly_bound);
     var reference = try runtime.Session.restore(a, &prepared, state);
     defer reference.deinit();
     stats = .{};
     for ([_][]const u8{ &.{0}, wrongly_bound, ill_typed }) |reply| {
-        try std.testing.expectError(rejected(&reference, reply), resident.drive(a, .{ .reply = reply }, .{}));
+        try std.testing.expectError(
+            rejected(&reference, reply),
+            resident.drive(a, .{ .reply = reply }, .{}),
+        );
         _ = try resident.diagnostics();
     }
     try eq(0, stats.pending_bindings);
@@ -159,22 +183,7 @@ test "resident reuses exact binding across independent invalid replies inspectio
     try eq(projections, stats.state_projections);
     try bytesEq(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, completed.record.completed);
 
-    var restored = try runtime.Resident.restore(a, &prepared, state);
-    defer finish(&restored);
-    var restored_stats: Statistics = .{};
-    try restored.setStatistics(&restored_stats);
-    try std.testing.expectError(error.InvalidResult, restored.drive(a, .{ .reply = wrongly_bound }, .{}));
-    try eq(1, restored_stats.pending_bindings);
-    try eq(1, restored_stats.state_projections);
-    restored_stats = .{};
-    try std.testing.expectError(error.InvalidResult, restored.drive(a, .{ .reply = wrongly_bound }, .{}));
-    try eq(0, restored_stats.state_projections);
-    var resumed = try restored.drive(a, .{ .reply = valid }, .{ .quantum = 0 });
-    defer resumed.deinit();
-    try expect(resumed.record == .progressed);
-    var restored_done = try restored.drive(a, .none, .{});
-    defer restored_done.deinit();
-    try bytesEq(u8, completed.record.completed, restored_done.record.completed);
+    try checkRestoredBinding(&prepared, state, wrongly_bound, valid, completed.record.completed);
 }
 
 test "every resident output route restores the cached binding after late publication failure" {
@@ -195,9 +204,20 @@ test "every resident output route restores the cached binding after late publica
         var output = std.heap.FixedBufferAllocator.init(&empty);
         stats = .{};
         switch (route) {
-            0 => try std.testing.expectError(error.OutOfMemory, resident.drive(output.allocator(), .{ .reply = reply }, .{})),
-            1 => try std.testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), .{ .reply = reply }, .{})),
-            2 => try std.testing.expectError(error.Capacity, resident.driveInto(.{ .reply = reply }, .{}, &empty)),
+            0 => try std.testing.expectError(error.OutOfMemory, resident.drive(
+                output.allocator(),
+                .{ .reply = reply },
+                .{},
+            )),
+            1 => try std.testing.expectError(error.OutOfMemory, resident.driveEncoded(
+                output.allocator(),
+                .{ .reply = reply },
+                .{},
+            )),
+            2 => try std.testing.expectError(
+                error.Capacity,
+                resident.driveInto(.{ .reply = reply }, .{}, &empty),
+            ),
             else => unreachable,
         }
         try expect(stats.transitions != 0);
@@ -238,7 +258,10 @@ test "resident cancellation replaces a cleanup binding and rejects its actual pr
     try std.testing.expectError(error.InvalidResult, reference.answer(previous));
     var stats: Statistics = .{};
     try resident.setStatistics(&stats);
-    try std.testing.expectError(error.InvalidResult, resident.drive(a, .{ .reply = previous }, .{}));
+    try std.testing.expectError(
+        error.InvalidResult,
+        resident.drive(a, .{ .reply = previous }, .{}),
+    );
     try eq(0, stats.state_projections);
     const reply = try encodeReply(rebound.record.requested.request, &.{});
     defer a.free(reply);
@@ -259,7 +282,8 @@ test "bounded resident reply uses retained binding and consumes control once" {
     defer prepared.deinit();
     var owner = try runtime.Resident.start(a, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer if (owner.live) {
-        const state = owner.takeCheckpoint(a) catch unreachable;
+        const state = owner.takeCheckpoint(a) catch |err|
+            std.debug.panic("{s}", .{@errorName(err)});
         a.free(state);
     };
     var first = try owner.drive(a, .none, .{});
@@ -275,17 +299,77 @@ test "bounded resident reply uses retained binding and consumes control once" {
     try owner.beginAdvance(.{ .reply = reply }, 100);
     try std.testing.expectEqual(@as(u64, 0), stats.state_projections);
     try std.testing.expectEqual(@as(u64, 2), stats.reused_expected_bindings);
-    while (true) {
+    for (0..std.math.maxInt(usize)) |_| {
         var progress = try owner.pump(64);
         defer progress.deinit();
         if (progress == .suspended) continue;
         try std.testing.expect(progress == .event and progress.event.value == .cut);
         break;
-    }
+    } else return error.PumpBoundExhausted;
     try std.testing.expectError(error.NoOperation, owner.pump(64));
     var done = try owner.drive(a, .none, .{ .quantum = 0 });
     defer done.deinit();
     try std.testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, done.record.completed);
     try std.testing.expectEqual(@as(u64, 0), stats.state_projections);
     try owner.close();
+}
+
+fn sequentialImage() ![]u8 {
+    var b = horos.source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{
+        .identity = "binding/sequential",
+        .payload = unit,
+        .result = unit,
+    });
+    const entry = try b.declare(&.{}, unit, &.{effect}, &.{});
+    const first_op = try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.constant(void, {}),
+    } });
+    const second_op = try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.constant(void, {}),
+    } });
+    try b.define(entry, try b.bind(try b.variable(unit), first_op, second_op));
+    var compiled = try horos.program.compile(a, b.module(entry, unit));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    errdefer a.free(image);
+    _ = try compiled.encode(a, image);
+    return image;
+}
+
+fn checkRestoredBinding(
+    prepared: *runtime.Prepared,
+    state: []const u8,
+    wrongly_bound: []const u8,
+    valid: []const u8,
+    completed: []const u8,
+) !void {
+    var restored = try runtime.Resident.restore(a, prepared, state);
+    defer finish(&restored);
+    var restored_stats: Statistics = .{};
+    try restored.setStatistics(&restored_stats);
+    try std.testing.expectError(error.InvalidResult, restored.drive(
+        a,
+        .{ .reply = wrongly_bound },
+        .{},
+    ));
+    try eq(1, restored_stats.pending_bindings);
+    try eq(1, restored_stats.state_projections);
+    restored_stats = .{};
+    try std.testing.expectError(error.InvalidResult, restored.drive(
+        a,
+        .{ .reply = wrongly_bound },
+        .{},
+    ));
+    try eq(0, restored_stats.state_projections);
+    var resumed = try restored.drive(a, .{ .reply = valid }, .{ .quantum = 0 });
+    defer resumed.deinit();
+    try expect(resumed.record == .progressed);
+    var restored_done = try restored.drive(a, .none, .{});
+    defer restored_done.deinit();
+    try bytesEq(u8, completed, restored_done.record.completed);
 }

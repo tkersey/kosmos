@@ -25,7 +25,10 @@ fn packedPages() !void {
         if (count > 8 and copied != dense) return error.DenseGrowth;
         for (0..count) |slot| {
             if (try store.get(original, slot) != slot + 1) return error.ChangedPredecessor;
-            if (try store.get(active, slot) != (if (slot == 0) @as(u64, 99) else slot + 1)) return error.WrongMapping;
+            if (try store.get(active, slot) != (if (slot == 0) @as(
+                u64,
+                99,
+            ) else slot + 1)) return error.WrongMapping;
         }
         if (count > 1) {
             try store.clear(active, 0);

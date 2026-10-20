@@ -44,8 +44,17 @@ pub fn schemaBytes(a: std.mem.Allocator) ![]u8 {
 /// `allowed` is the enclosing owner's node disclosure mask, not model-supplied
 /// permission. Null means that owner has authorized the whole reference graph.
 /// Admission proves shape; the owner separately binds the actual publication.
-pub fn capture(a: std.mem.Allocator, guest: *const data.program_image.Admitted, checkpoint: []const u8, binding: Binding, allowed: ?[]const bool) !Owned {
-    if (!std.meta.eql(guest.identity(), binding.guest) or !std.meta.eql(artifact.digest(checkpoint), binding.checkpoint)) return error.InvalidViewBinding;
+pub fn capture(
+    a: std.mem.Allocator,
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+    binding: Binding,
+    allowed: ?[]const bool,
+) !Owned {
+    if (!std.meta.eql(guest.identity(), binding.guest) or !std.meta.eql(
+        artifact.digest(checkpoint),
+        binding.checkpoint,
+    )) return error.InvalidViewBinding;
     var state = try data.state_image.decodeGraph(a, checkpoint);
     defer state.deinit();
     try data.state_admission.validateAdmitted(a, guest, state.state);
@@ -65,16 +74,30 @@ pub fn capture(a: std.mem.Allocator, guest: *const data.program_image.Admitted, 
         }
         const block: ?u64 = switch (node.record) {
             .control => |v| v.block,
-            inline .continuation, .region_scope, .protection, .obligation, .pending => |v| v.source_block,
+            inline .continuation, .region_scope, .protection, .obligation, .pending => |v| blk: {
+                break :blk v.source_block;
+            },
+
             else => null,
         };
-        try nodes.append(collector.a, .{ .id = i, .tag = @backingInt(std.meta.activeTag(node.record)), .block = block, .position = if (node.activation) |v| v.position else null });
+        try nodes.append(collector.a, .{
+            .id = i,
+            .tag = @backingInt(std.meta.activeTag(node.record)),
+            .block = block,
+            .position = if (node.activation) |v| v.position else null,
+        });
         collector.from = i;
         try collector.walk(@TypeOf(node), node, "node", false);
     }
     collector.from = null;
     try collector.walk(g.Roots, state.state.roots, "roots", false);
-    result.value = .{ .binding = binding, .complete_graph = complete, .nodes = nodes.items, .roots = collector.roots.items, .edges = collector.edges.items };
+    result.value = .{
+        .binding = binding,
+        .complete_graph = complete,
+        .nodes = nodes.items,
+        .roots = collector.roots.items,
+        .edges = collector.edges.items,
+    };
     return result;
 }
 
@@ -87,42 +110,98 @@ const Collector = struct {
     fn permits(self: Collector, id: usize) bool {
         return if (self.allowed) |mask| id < mask.len and mask[id] else true;
     }
-    fn walk(self: *Collector, comptime T: type, value: T, path: []const u8, owned: bool) std.mem.Allocator.Error!void {
+    fn appendReference(
+        self: *Collector,
+        value: g.NodeRef,
+        path: []const u8,
+        owned: bool,
+    ) std.mem.Allocator.Error!void {
+        if (!self.permits(@intCast(value.id))) return;
+        const field = try self.a.dupe(u8, path);
+        if (self.from) |from| {
+            try self.edges.append(self.a, .{
+                .from = from,
+                .to = value.id,
+                .owned = owned,
+                .field = field,
+            });
+        } else try self.roots.append(self.a, .{
+            .node = value.id,
+            .owned = owned,
+            .field = field,
+        });
+        return;
+    }
+    inline fn walk(
+        self: *Collector,
+        comptime T: type,
+        value: T,
+        path: []const u8,
+        owned: bool,
+    ) std.mem.Allocator.Error!void {
+        @setEvalBranchQuota(100_000);
         if (T == g.BlobRef) return;
-        if (T == g.NodeRef) {
-            if (!self.permits(@intCast(value.id))) return;
-            const field = try self.a.dupe(u8, path);
-            if (self.from) |from| {
-                try self.edges.append(self.a, .{ .from = from, .to = value.id, .owned = owned, .field = field });
-            } else try self.roots.append(self.a, .{ .node = value.id, .owned = owned, .field = field });
-            return;
-        }
-        if (T == g.OwnedRef) return self.walk(g.NodeRef, value.node, path, true);
+        if (T == g.NodeRef) return self.appendReference(value, path, owned);
+        if (T == g.OwnedRef)
+            return @call(.always_inline, walk, .{ self, g.NodeRef, value.node, path, true });
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Child| {
-                if (comptime containsReference(Child)) try self.walk(Child, @field(value, name), try std.fmt.allocPrint(self.a, "{s}.{s}", .{ path, name }), owned);
+                if (comptime containsReference(Child)) try @call(.always_inline, walk, .{
+                    self,
+                    Child,
+                    @field(value, name),
+                    try std.fmt.allocPrint(self.a, "{s}.{s}", .{ path, name }),
+                    owned,
+                });
             },
             .@"union" => switch (value) {
-                inline else => |child, tag| if (comptime containsReference(@TypeOf(child))) try self.walk(@TypeOf(child), child, try std.fmt.allocPrint(self.a, "{s}.{s}", .{ path, @tagName(tag) }), owned),
+                inline else => |child, tag| if (comptime containsReference(@TypeOf(
+                    child,
+                ))) try @call(.always_inline, walk, .{
+                    self,
+                    @TypeOf(child),
+                    child,
+                    try std.fmt.allocPrint(self.a, "{s}.{s}", .{ path, @tagName(tag) }),
+                    owned,
+                }),
             },
-            .optional => |info| if (value) |child| try self.walk(info.child, child, path, owned),
+            .optional => |info| if (value) |child| try @call(.always_inline, walk, .{
+                self, info.child, child, path, owned,
+            }),
             .pointer => |info| if (comptime containsReference(info.child)) {
-                for (value, 0..) |child, i| try self.walk(info.child, child, try std.fmt.allocPrint(self.a, "{s}[{d}]", .{ path, i }), owned);
+                for (value, 0..) |child, i| try @call(.always_inline, walk, .{
+                    self,
+                    info.child,
+                    child,
+                    try std.fmt.allocPrint(self.a, "{s}[{d}]", .{ path, i }),
+                    owned,
+                });
             },
             .array => |info| if (comptime containsReference(info.child)) {
-                for (value, 0..) |child, i| try self.walk(info.child, child, try std.fmt.allocPrint(self.a, "{s}[{d}]", .{ path, i }), owned);
+                for (value, 0..) |child, i| try @call(.always_inline, walk, .{
+                    self,
+                    info.child,
+                    child,
+                    try std.fmt.allocPrint(self.a, "{s}[{d}]", .{ path, i }),
+                    owned,
+                });
             },
             else => {},
         }
     }
 };
-fn containsReference(comptime T: type) bool {
+inline fn containsReference(comptime T: type) bool {
     if (T == g.NodeRef or T == g.OwnedRef) return true;
     if (T == g.BlobRef) return false;
     return switch (@typeInfo(T)) {
-        inline .pointer, .array, .optional => |info| containsReference(info.child),
+        inline .pointer, .array, .optional => |info| @call(
+            .always_inline,
+            containsReference,
+            .{info.child},
+        ),
         inline .@"struct", .@"union" => |info| blk: {
-            inline for (info.field_types) |Child| if (containsReference(Child)) break :blk true;
+            inline for (info.field_types) |Child|
+                if (@call(.always_inline, containsReference, .{Child})) break :blk true;
             break :blk false;
         },
         else => false,

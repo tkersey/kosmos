@@ -16,7 +16,9 @@ pub fn Slots(comptime Value: type) type {
             initialized: u16 = 0,
             capacity: u8,
         };
-        const page_alignment = std.mem.Alignment.fromByteUnits(@max(@alignOf(Page), @alignOf(Value)));
+        const page_alignment = std.mem.Alignment.fromByteUnits(
+            @max(@alignOf(Page), @alignOf(Value)),
+        );
         const value_offset = std.mem.alignForward(usize, @sizeOf(Page), @alignOf(Value));
         fn pageBytes(capacity: usize) usize {
             return value_offset + capacity * @sizeOf(Value);
@@ -44,14 +46,24 @@ pub fn Slots(comptime Value: type) type {
             const page: *Page = if (capacity == width)
                 @ptrCast(try self.allocator.create(DensePage))
             else blk: {
-                const bytes = try self.allocator.alignedAlloc(u8, page_alignment, pageBytes(capacity));
+                const bytes = try self.allocator.alignedAlloc(
+                    u8,
+                    page_alignment,
+                    pageBytes(capacity),
+                );
                 break :blk @ptrCast(bytes.ptr);
             };
             page.* = .{ .capacity = @intCast(capacity) };
             self.statistics.live_pages += 1;
-            self.statistics.peak_pages = @max(self.statistics.peak_pages, self.statistics.live_pages);
+            self.statistics.peak_pages = @max(
+                self.statistics.peak_pages,
+                self.statistics.live_pages,
+            );
             self.statistics.live_page_bytes += pageBytes(capacity);
-            self.statistics.peak_page_bytes = @max(self.statistics.peak_page_bytes, self.statistics.live_page_bytes);
+            self.statistics.peak_page_bytes = @max(
+                self.statistics.peak_page_bytes,
+                self.statistics.live_page_bytes,
+            );
             return page;
         }
         const Branch = struct { references: usize = 1, children: [width]Node = @splat(.empty) };
@@ -102,12 +114,17 @@ pub fn Slots(comptime Value: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Error!Self {
             var current = next_instance.load(.monotonic);
-            while (true) {
-                if (current == std.math.maxInt(usize)) return error.CapacityExceeded;
-                if (next_instance.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |next| {
+            while (current < std.math.maxInt(usize)) { // tiger: event-loop
+                if (next_instance.cmpxchgWeak(
+                    current,
+                    current + 1,
+                    .monotonic,
+                    .monotonic,
+                )) |next| {
                     current = next;
                 } else return .{ .allocator = allocator, .instance = current };
             }
+            return error.CapacityExceeded;
         }
 
         pub fn deinit(self: *Self) void {
@@ -153,7 +170,8 @@ pub fn Slots(comptime Value: type) type {
             if (handle.instance != self.instance or handle.index >= self.views.items.len)
                 return error.InvalidHandle;
             const result = &self.views.items[handle.index];
-            if (!result.active or result.generation != handle.generation) return error.InvalidHandle;
+            if (!result.active or result.generation != handle.generation)
+                return error.InvalidHandle;
             return result;
         }
 
@@ -177,7 +195,10 @@ pub fn Slots(comptime Value: type) type {
         /// Move ownership without copying or allocating. Old descriptors and
         /// iterators lose access even though the new owner retains the same root.
         /// A containing owner can preflight several views before transferring any.
-        pub fn transfer(self: *Self, handle: Handle) error{ InvalidHandle, CapacityExceeded }!Handle {
+        pub fn transfer(self: *Self, handle: Handle) error{
+            InvalidHandle,
+            CapacityExceeded,
+        }!Handle {
             const entry = try self.lookupView(handle);
             if (entry.generation == std.math.maxInt(u64)) return error.CapacityExceeded;
             entry.generation += 1;
@@ -242,7 +263,8 @@ pub fn Slots(comptime Value: type) type {
         pub fn get(self: *Self, handle: Handle, slot: usize) ReadError!Value {
             const entry = try self.lookupView(handle);
             if (slot >= entry.limit) return error.InvalidSlot;
-            const page = locate(entry.root, entry.depth, slot) orelse return error.UninitializedSlot;
+            const page = locate(entry.root, entry.depth, slot) orelse
+                return error.UninitializedSlot;
             if (page.initialized & mask(slot) == 0) return error.UninitializedSlot;
             return values(page)[physicalIndex(page, page.initialized, slot)];
         }
@@ -303,7 +325,7 @@ pub fn Slots(comptime Value: type) type {
                 _ = try self.get(handle, slot);
             }
             const temporary = try self.create(original.limit);
-            defer self.release(temporary) catch unreachable;
+            defer self.release(temporary) catch |err| std.debug.panic("{s}", .{@errorName(err)});
             for (selected) |slot| try self.set(temporary, slot, try self.get(handle, slot));
             try self.protect(handle);
             self.views.lockPointers();
@@ -318,12 +340,34 @@ pub fn Slots(comptime Value: type) type {
         }
 
         fn changed(self: *Self, node: Node, depth: u8, slot: usize, value: ?Value) Error!Node {
-            if (depth == 0) return self.changedPage(node, slot, value);
-            const index = childIndex(depth, slot);
-            const old = if (node == .empty) Node.empty else node.branch.children[index];
-            const child = try self.changed(old, depth - 1, slot, value);
+            std.debug.assert(depth <= maximum_depth);
+            var ancestors: [maximum_depth]Node = undefined;
+            var current = node;
+            var remaining = depth;
+            while (remaining != 0) : (remaining -= 1) {
+                ancestors[remaining - 1] = current;
+                current = if (current == .empty)
+                    .empty
+                else
+                    current.branch.children[childIndex(remaining, slot)];
+            }
+            var child = try self.changedPage(current, slot, value);
             errdefer self.drop(child);
-            if (child == .empty and (node == .empty or onlyChild(node.branch, index))) return .empty;
+            for (ancestors[0..depth], 1..) |ancestor, level|
+                child = try self.changedBranch(ancestor, @intCast(level), slot, child);
+            return child;
+        }
+
+        fn changedBranch(
+            self: *Self,
+            node: Node,
+            depth: u8,
+            slot: usize,
+            child: Node,
+        ) Error!Node {
+            const index = childIndex(depth, slot);
+            if (child == .empty and (node == .empty or
+                onlyChild(node.branch, index))) return .empty;
             const result = try self.allocator.create(Branch);
             result.* = .{};
             self.statistics.live_directories += 1;
@@ -345,7 +389,8 @@ pub fn Slots(comptime Value: type) type {
             // Preserve ordinary unique growth without copying prior values.
             // Sparse allocation is earned at a COW boundary, where copying is
             // already required to isolate a retained activation version.
-            const capacity = if (node == .empty or node.page.references == 1) width else @popCount(after);
+            const capacity = if (node == .empty or
+                node.page.references == 1) width else @popCount(after);
             const page = try self.createPage(capacity);
             if (node == .page) {
                 // Copy only the resulting live values; a removed slot need not
@@ -362,7 +407,9 @@ pub fn Slots(comptime Value: type) type {
                     if (index == (slot & (width - 1)) and value != null) {
                         destination[destination_index] = value.?;
                     } else {
-                        destination[destination_index] = source[if (dense_source) index else rank(before, index)];
+                        destination[destination_index] = source[
+                            if (dense_source) index else rank(before, index)
+                        ];
                         self.statistics.value_copies +|= 1;
                     }
                     packed_index += 1;
@@ -373,40 +420,47 @@ pub fn Slots(comptime Value: type) type {
             return .{ .page = page };
         }
 
-        /// A unique prefix stays in place. Build the first shared/missing suffix
-        /// before publishing it; unwinding this recursion performs no fallible work.
         fn changeOwned(self: *Self, node: *Node, depth: u8, slot: usize, value: ?Value) Error!void {
-            const unique = switch (node.*) {
-                .empty => false,
-                .page => |page| page.references == 1,
-                .branch => |branch| branch.references == 1,
-            };
-            if (!unique) {
-                const successor = try self.changed(node.*, depth, slot, value);
-                const previous = node.*;
-                node.* = successor;
-                self.drop(previous);
-                return;
+            std.debug.assert(depth <= maximum_depth);
+            var ancestors: [maximum_depth]*Node = undefined;
+            var current = node;
+            var remaining = depth;
+            while (remaining != 0 and current.* == .branch and
+                current.branch.references == 1) : (remaining -= 1)
+            {
+                ancestors[remaining - 1] = current;
+                current = &current.branch.children[childIndex(remaining, slot)];
             }
-            if (depth == 0) {
-                if (node.page.capacity != width and value != null and node.page.initialized & mask(slot) == 0 and @popCount(node.page.initialized) == node.page.capacity) {
-                    const successor = try self.changedPage(node.*, slot, value);
-                    self.drop(node.*);
-                    node.* = successor;
-                    return;
-                }
+            if (remaining == 0 and current.* == .page and current.page.references == 1) {
+                try self.changeUniquePage(current, slot, value);
+            } else {
+                const successor = try self.changed(current.*, remaining, slot, value);
+                const previous = current.*;
+                current.* = successor;
+                self.drop(previous);
+            }
+            for (ancestors[remaining..depth]) |ancestor| {
+                for (ancestor.branch.children) |child| if (child != .empty) return;
+                self.drop(ancestor.*);
+                ancestor.* = .empty;
+            }
+        }
+
+        fn changeUniquePage(self: *Self, node: *Node, slot: usize, value: ?Value) Error!void {
+            if (node.page.capacity != width and
+                value != null and node.page.initialized & mask(slot) == 0 and
+                @popCount(node.page.initialized) == node.page.capacity)
+            {
+                const successor = try self.changedPage(node.*, slot, value);
+                self.drop(node.*);
+                node.* = successor;
+            } else {
                 self.assign(node.page, slot, value);
                 if (node.page.initialized == 0) {
                     self.drop(node.*);
                     node.* = .empty;
                 }
-                return;
             }
-            const index = childIndex(depth, slot);
-            try self.changeOwned(&node.branch.children[index], depth - 1, slot, value);
-            for (node.branch.children) |child| if (child != .empty) return;
-            self.drop(node.*);
-            node.* = .empty;
         }
 
         fn assign(self: *Self, page: *Page, slot: usize, value: ?Value) void {
@@ -478,34 +532,55 @@ pub fn Slots(comptime Value: type) type {
         }
 
         fn drop(self: *Self, node: Node) void {
-            switch (node) {
-                .empty => {},
-                .page => |page| {
-                    std.debug.assert(page.references != 0);
-                    page.references -= 1;
-                    if (page.references != 0) return;
-                    self.statistics.live_pages -= 1;
-                    const size = pageBytes(page.capacity);
-                    self.statistics.live_page_bytes -= size;
-                    if (page.capacity == width) {
-                        const dense: *DensePage = @ptrCast(@alignCast(page));
-                        self.allocator.destroy(dense);
-                    } else {
-                        const bytes: [*]align(page_alignment.toByteUnits()) u8 = @ptrCast(@alignCast(page));
-                        self.allocator.free(bytes[0..size]);
-                    }
-                },
-                .branch => |branch| {
-                    std.debug.assert(branch.references != 0);
-                    branch.references -= 1;
-                    if (branch.references != 0) return;
-                    for (branch.children) |child| self.drop(child);
-                    self.statistics.live_directories -= 1;
-                    self.allocator.destroy(branch);
-                },
+            const Visit = struct { node: Node, release: bool = false };
+            var pending: [maximum_depth * width + 1]Visit = undefined;
+            pending[0] = .{ .node = node };
+            var length: usize = 1;
+            while (length != 0) {
+                length -= 1;
+                const current = pending[length];
+                switch (current.node) {
+                    .empty => {},
+                    .page => |page| self.dropPage(page),
+                    .branch => |branch| {
+                        if (current.release) {
+                            self.statistics.live_directories -= 1;
+                            self.allocator.destroy(branch);
+                            continue;
+                        }
+                        std.debug.assert(branch.references != 0);
+                        branch.references -= 1;
+                        if (branch.references != 0) continue;
+                        std.debug.assert(length + width + 1 <= pending.len);
+                        pending[length] = .{ .node = current.node, .release = true };
+                        length += 1;
+                        var index: usize = width;
+                        while (index != 0) {
+                            index -= 1;
+                            pending[length] = .{ .node = branch.children[index] };
+                            length += 1;
+                        }
+                    },
+                }
             }
         }
 
+        fn dropPage(self: *Self, page: *Page) void {
+            std.debug.assert(page.references != 0);
+            page.references -= 1;
+            if (page.references != 0) return;
+            self.statistics.live_pages -= 1;
+            const size = pageBytes(page.capacity);
+            self.statistics.live_page_bytes -= size;
+            if (page.capacity == width) {
+                const dense: *DensePage = @ptrCast(@alignCast(page));
+                self.allocator.destroy(dense);
+            } else {
+                const bytes: [*]align(page_alignment.toByteUnits()) u8 =
+                    @ptrCast(@alignCast(page));
+                self.allocator.free(bytes[0..size]);
+            }
+        }
         pub fn iterator(self: *Self, handle: Handle) Error!Iterator {
             const entry = try self.lookupView(handle);
             var result: Iterator = .{
@@ -560,13 +635,36 @@ pub fn Slots(comptime Value: type) type {
                 }
                 const index = @ctz(self.live);
                 self.live &= self.live - 1;
-                return .{ .slot = self.base + index, .value = values(self.page.?)[physicalIndex(self.page.?, self.page.?.initialized, index)] };
+                return .{ .slot = self.base + index, .value = values(self.page.?)[
+                    physicalIndex(self.page.?, self.page.?.initialized, index)
+                ] };
             }
         };
     };
 }
 
 pub const ActivationSlots = Slots(@import("horos_data").graph.Value);
+
+test "maximum-depth slots retain and release sparse shared paths" {
+    var store = try Slots(u64).init(std.testing.allocator);
+    defer store.deinit();
+    const limit = std.math.maxInt(usize);
+    const original = try store.create(limit);
+    try store.set(original, 0, 10);
+    try store.set(original, limit - 1, 20);
+    const successor = try store.fork(original);
+    try store.set(successor, limit - 1, 30);
+    try std.testing.expectEqual(20, try store.get(original, limit - 1));
+    try std.testing.expectEqual(30, try store.get(successor, limit - 1));
+    try store.clear(successor, 0);
+    try store.clear(successor, limit - 1);
+    try std.testing.expectEqual(10, try store.get(original, 0));
+    try std.testing.expectError(error.UninitializedSlot, store.get(successor, limit - 1));
+    try store.release(original);
+    try store.release(successor);
+    try std.testing.expectEqual(0, store.statistics.live_pages);
+    try std.testing.expectEqual(0, store.statistics.live_directories);
+}
 
 test "retained bytes match allocator storage across dense and packed page lifetimes" {
     var counter = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -575,15 +673,27 @@ test "retained bytes match allocator storage across dense and packed page lifeti
     const original = try store.create(32);
     try store.set(original, 0, 1);
     try store.set(original, 31, 2);
-    try std.testing.expectEqual(counter.allocated_bytes - counter.freed_bytes, store.retainedBytes());
+    try std.testing.expectEqual(
+        counter.allocated_bytes - counter.freed_bytes,
+        store.retainedBytes(),
+    );
     const branch = try store.fork(original);
     try store.set(branch, 0, 3);
-    try std.testing.expectEqual(counter.allocated_bytes - counter.freed_bytes, store.retainedBytes());
+    try std.testing.expectEqual(
+        counter.allocated_bytes - counter.freed_bytes,
+        store.retainedBytes(),
+    );
     try store.clear(branch, 31);
     try store.release(original);
-    try std.testing.expectEqual(counter.allocated_bytes - counter.freed_bytes, store.retainedBytes());
+    try std.testing.expectEqual(
+        counter.allocated_bytes - counter.freed_bytes,
+        store.retainedBytes(),
+    );
     try store.release(branch);
-    try std.testing.expectEqual(counter.allocated_bytes - counter.freed_bytes, store.retainedBytes());
+    try std.testing.expectEqual(
+        counter.allocated_bytes - counter.freed_bytes,
+        store.retainedBytes(),
+    );
 }
 
 test "sparse retained pages pack distinct logical slots and preserve predecessor views" {
@@ -591,12 +701,12 @@ test "sparse retained pages pack distinct logical slots and preserve predecessor
     var store = try S.init(std.testing.allocator);
     defer store.deinit();
     const original = try store.create(16);
-    defer store.release(original) catch unreachable;
+    defer store.release(original) catch |err| std.debug.panic("{s}", .{@errorName(err)});
     try store.set(original, 0, 10);
     try store.set(original, 15, 20);
     const before = store.statistics.live_page_bytes;
     const active = try store.fork(original);
-    defer store.release(active) catch unreachable;
+    defer store.release(active) catch |err| std.debug.panic("{s}", .{@errorName(err)});
     try store.set(active, 0, 11);
     const page = S.locate((try store.lookupView(active)).root, 0, 0).?;
     try std.testing.expectEqual(@as(u8, 2), page.capacity);
@@ -608,7 +718,10 @@ test "sparse retained pages pack distinct logical slots and preserve predecessor
     try store.clear(active, 0);
     try std.testing.expectError(error.UninitializedSlot, store.get(active, 0));
     try std.testing.expectEqual(@as(u64, 20), try store.get(active, 15));
-    try std.testing.expectEqual(reusable_address, &S.values(page)[S.physicalIndex(page, page.initialized, 15)]);
+    try std.testing.expectEqual(
+        reusable_address,
+        &S.values(page)[S.physicalIndex(page, page.initialized, 15)],
+    );
     var iterator = try store.iterator(active);
     try std.testing.expectEqual(@as(usize, 15), (try iterator.next()).?.slot);
     try std.testing.expect(try iterator.next() == null);
@@ -628,19 +741,35 @@ test "packed page lookup and iteration match every eight-position occupancy subs
         var store = try S.init(std.testing.allocator);
         defer store.deinit();
         const original = try store.create(16);
-        defer store.release(original) catch unreachable;
+        defer store.release(original) catch |err| std.debug.panic("{s}", .{@errorName(err)});
         // Noncontiguous logical positions include both ends of the page.
         const positions = [_]usize{ 0, 2, 4, 6, 9, 11, 13, 15 };
-        for (positions, 0..) |slot, bit| if (subset & (@as(usize, 1) << @intCast(bit)) != 0) try store.set(original, slot, slot + 100);
+        for (positions, 0..) |slot, bit| if (subset & (@as(
+            usize,
+            1,
+        ) << @intCast(
+            bit,
+        )) != 0) try store.set(original, slot, slot + 100);
         for (0..16) |changed| for ([_]bool{ false, true }) |insert| {
             const active = try store.fork(original);
-            defer store.release(active) catch unreachable;
+            defer store.release(active) catch |err| std.debug.panic("{s}", .{@errorName(err)});
             if (insert) try store.set(active, changed, 999) else try store.clear(active, changed);
             var iterator = try store.iterator(active);
             for (0..16) |slot| {
                 const bit = std.mem.indexOfScalar(usize, &positions, slot);
-                const present = if (bit) |i| subset & (@as(usize, 1) << @intCast(i)) != 0 else false;
-                if (present) try std.testing.expectEqual(@as(u64, slot + 100), try store.get(original, slot)) else try std.testing.expectError(error.UninitializedSlot, store.get(original, slot));
+                const present = if (bit) |i| subset & (@as(
+                    usize,
+                    1,
+                ) << @intCast(
+                    i,
+                )) != 0 else false;
+                if (present) try std.testing.expectEqual(
+                    @as(u64, slot + 100),
+                    try store.get(original, slot),
+                ) else try std.testing.expectError(
+                    error.UninitializedSlot,
+                    store.get(original, slot),
+                );
                 const current = if (slot == changed) insert else present;
                 if (current) {
                     const expected: u64 = if (slot == changed) 999 else slot + 100;
@@ -648,7 +777,10 @@ test "packed page lookup and iteration match every eight-position occupancy subs
                     const binding = (try iterator.next()).?;
                     try std.testing.expectEqual(slot, binding.slot);
                     try std.testing.expectEqual(expected, binding.value);
-                } else try std.testing.expectError(error.UninitializedSlot, store.get(active, slot));
+                } else try std.testing.expectError(
+                    error.UninitializedSlot,
+                    store.get(active, slot),
+                );
             }
             try std.testing.expect(try iterator.next() == null);
         };
@@ -662,18 +794,21 @@ test "trailing packed payload preserves over-aligned and zero-sized values" {
         var store = try S.init(std.testing.allocator);
         defer store.deinit();
         const original = try store.create(16);
-        defer store.release(original) catch unreachable;
+        defer store.release(original) catch |err| std.debug.panic("{s}", .{@errorName(err)});
         const first: Value = if (Value == void) {} else .{ .number = 42 };
         const second: Value = if (Value == void) {} else .{ .number = 99 };
         try store.set(original, 15, first);
         const active = try store.fork(original);
-        defer store.release(active) catch unreachable;
+        defer store.release(active) catch |err| std.debug.panic("{s}", .{@errorName(err)});
         try store.set(active, 0, second);
         try std.testing.expectEqualDeep(first, try store.get(original, 15));
         try std.testing.expectEqualDeep(first, try store.get(active, 15));
         try std.testing.expectEqualDeep(second, try store.get(active, 0));
         const page = S.locate((try store.lookupView(active)).root, 0, 0).?;
-        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(S.values(page).ptr) % @alignOf(Value));
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            @intFromPtr(S.values(page).ptr) % @alignOf(Value),
+        );
     }
 }
 
@@ -682,10 +817,10 @@ fn packedGrowthFailure(allocator: std.mem.Allocator) !void {
     var store = try S.init(allocator);
     defer store.deinit();
     const original = try store.create(16);
-    defer store.release(original) catch unreachable;
+    defer store.release(original) catch |err| std.debug.panic("{s}", .{@errorName(err)});
     try store.set(original, 15, 42);
     const active = try store.fork(original);
-    defer store.release(active) catch unreachable;
+    defer store.release(active) catch |err| std.debug.panic("{s}", .{@errorName(err)});
     try store.set(active, 15, 99);
     const page = S.locate((try store.lookupView(active)).root, 0, 15).?;
     try std.testing.expectEqual(@as(u8, 1), page.capacity);

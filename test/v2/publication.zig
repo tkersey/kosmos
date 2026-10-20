@@ -11,11 +11,18 @@ fn image(external: bool) ![]u8 {
     defer b.deinit();
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "publication/test", .payload = unit, .result = unit });
+    const effect = try b.effect(.{
+        .identity = "publication/test",
+        .payload = unit,
+        .result = unit,
+    });
     const entry = try b.declare(&.{integer}, integer, if (external) &.{effect} else &.{}, &.{});
     const returned = try b.pure(try b.reference(b.parameter(entry, 0)));
     const body = if (external)
-        try b.bind(try b.variable(unit), try b.term(.{ .perform = .{ .effect = effect, .payload = try b.constant(void, {}) } }), returned)
+        try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
+            .effect = effect,
+            .payload = try b.constant(void, {}),
+        } }), returned)
     else
         try b.term(.{ .yield_then = returned });
     try b.define(entry, body);
@@ -30,7 +37,8 @@ fn image(external: bool) ![]u8 {
 fn release(resident: *kosmos.Resident) void {
     if (!resident.live) return;
     resident.close() catch {
-        const bytes = resident.takeCheckpoint(a) catch unreachable;
+        const bytes = resident.takeCheckpoint(a) catch |err|
+            std.debug.panic("{s}", .{@errorName(err)});
         a.free(bytes);
     };
 }
@@ -41,28 +49,48 @@ test "encoded publication charges only final bytes to an exact output budget" {
         defer a.free(program);
         var prepared = try kosmos.Prepared.init(a, program);
         defer prepared.deinit();
-        for ([_]kosmos.invocation.CheckpointMode{ .none, .inline_state, .receipt }) |checkpoint_mode| {
+        for ([_]kosmos.invocation.CheckpointMode{
+            .none,
+            .inline_state,
+            .receipt,
+        }) |checkpoint_mode| {
             var reference = try kosmos.Resident.start(a, &prepared, &argument);
             defer release(&reference);
             const original = try reference.checkpoint(a);
             defer a.free(original);
-            var expected = try reference.publish(.{ .encoded = a }, .none, .{ .checkpoint = checkpoint_mode });
+            var expected = try reference.publish(
+                .{ .encoded = a },
+                .none,
+                .{ .checkpoint = checkpoint_mode },
+            );
             defer expected.deinit();
             const output = try a.alloc(u8, expected.outcome.encoded.len);
             defer a.free(output);
             var resident = try kosmos.Resident.restore(a, &prepared, original);
             defer release(&resident);
             var short = std.heap.FixedBufferAllocator.init(output[0 .. output.len - 1]);
-            try std.testing.expectError(error.OutOfMemory, resident.publish(.{ .encoded = short.allocator() }, .none, .{ .checkpoint = checkpoint_mode }));
+            try std.testing.expectError(error.OutOfMemory, resident.publish(
+                .{ .encoded = short.allocator() },
+                .none,
+                .{ .checkpoint = checkpoint_mode },
+            ));
             const unchanged = try resident.checkpoint(a);
             defer a.free(unchanged);
             try std.testing.expectEqualSlices(u8, original, unchanged);
             var exact = std.heap.FixedBufferAllocator.init(output);
-            var actual = try resident.publish(.{ .encoded = exact.allocator() }, .none, .{ .checkpoint = checkpoint_mode });
+            var actual = try resident.publish(
+                .{ .encoded = exact.allocator() },
+                .none,
+                .{ .checkpoint = checkpoint_mode },
+            );
             defer actual.deinit();
             try std.testing.expectEqualSlices(u8, expected.outcome.encoded, actual.outcome.encoded);
             if (expected.checkpoint) |checkpoint|
-                try std.testing.expectEqualSlices(u8, checkpoint.bytes(), actual.checkpoint.?.bytes());
+                try std.testing.expectEqualSlices(
+                    u8,
+                    checkpoint.bytes(),
+                    actual.checkpoint.?.bytes(),
+                );
         }
     }
 }
@@ -80,10 +108,18 @@ test "one receipt publication binds exact pending bytes and transfer performs no
     defer publication.deinit();
     try std.testing.expectEqual(1, statistics.state_projections);
     try std.testing.expectEqual(1, statistics.pending_bindings);
-    var outcome = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome.encoded);
+    var outcome = try data.invocation.decode(
+        data.invocation.Outcome,
+        a,
+        publication.outcome.encoded,
+    );
     defer outcome.deinit();
     try std.testing.expect(outcome.value.requested.state == null);
-    var request = try data.invocation.decode(data.invocation.Request, a, outcome.value.requested.request);
+    var request = try data.invocation.decode(
+        data.invocation.Request,
+        a,
+        outcome.value.requested.request,
+    );
     defer request.deinit();
     const receipt = publication.takeCheckpoint().?;
     defer receipt.deinit();
@@ -99,9 +135,16 @@ test "one receipt publication binds exact pending bytes and transfer performs no
     try std.testing.expectError(error.InvalidState, resident.transferCheckpoint(receipt));
     var restored = try kosmos.Resident.restore(a, &prepared, receipt.bytes());
     defer release(&restored);
-    const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = request.value.request_identity, .value = &.{} });
+    const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+        .request_identity = request.value.request_identity,
+        .value = &.{},
+    });
     defer a.free(reply);
-    var terminal = try restored.publish(.{ .record = a }, .{ .reply = reply }, .{ .checkpoint = .receipt });
+    var terminal = try restored.publish(
+        .{ .record = a },
+        .{ .reply = reply },
+        .{ .checkpoint = .receipt },
+    );
     defer terminal.deinit();
     try std.testing.expectEqualSlices(u8, &argument, terminal.outcome.record.record.completed);
     const terminal_bytes = try restored.checkpoint(a);
@@ -121,24 +164,45 @@ test "equal content cannot transfer a foreign stale consumed or prior-incarnatio
     defer first.deinit();
     var other = try kosmos.Resident.restore(a, &prepared, first.checkpoint.?.bytes());
     defer release(&other);
-    var foreign = try other.publish(.{ .record = a }, .none, .{ .quantum = 0, .checkpoint = .receipt });
+    var foreign = try other.publish(.{ .record = a }, .none, .{
+        .quantum = 0,
+        .checkpoint = .receipt,
+    });
     defer foreign.deinit();
     try std.testing.expectEqualSlices(u8, first.checkpoint.?.bytes(), foreign.checkpoint.?.bytes());
-    try std.testing.expectError(error.InvalidState, resident.transferCheckpoint(foreign.checkpoint.?));
-    var later = try resident.publish(.{ .record = a }, .none, .{ .quantum = 0, .checkpoint = .receipt });
+    try std.testing.expectError(
+        error.InvalidState,
+        resident.transferCheckpoint(foreign.checkpoint.?),
+    );
+    var later = try resident.publish(.{ .record = a }, .none, .{
+        .quantum = 0,
+        .checkpoint = .receipt,
+    });
     defer later.deinit();
     try std.testing.expectEqualSlices(u8, first.checkpoint.?.bytes(), later.checkpoint.?.bytes());
-    try std.testing.expectError(error.InvalidState, resident.transferCheckpoint(first.checkpoint.?));
+    try std.testing.expectError(
+        error.InvalidState,
+        resident.transferCheckpoint(first.checkpoint.?),
+    );
     const fallback = try resident.takeCheckpoint(a);
     defer a.free(fallback);
     // Reuse the exact native handle address while old receipts retain its cell.
     resident = try kosmos.Resident.restore(a, &prepared, fallback);
-    try std.testing.expectError(error.InvalidState, resident.transferCheckpoint(later.checkpoint.?));
-    var fresh = try resident.publish(.{ .record = a }, .none, .{ .quantum = 0, .checkpoint = .receipt });
+    try std.testing.expectError(
+        error.InvalidState,
+        resident.transferCheckpoint(later.checkpoint.?),
+    );
+    var fresh = try resident.publish(.{ .record = a }, .none, .{
+        .quantum = 0,
+        .checkpoint = .receipt,
+    });
     defer fresh.deinit();
     try resident.transferCheckpoint(fresh.checkpoint.?);
     resident = try kosmos.Resident.restore(a, &prepared, fresh.checkpoint.?.bytes());
-    try std.testing.expectError(error.InvalidState, resident.transferCheckpoint(fresh.checkpoint.?));
+    try std.testing.expectError(
+        error.InvalidState,
+        resident.transferCheckpoint(fresh.checkpoint.?),
+    );
 }
 
 test "buffer failure after receipt construction preserves state and prior receipt" {
@@ -151,7 +215,11 @@ test "buffer failure after receipt construction preserves state and prior receip
     var before = try resident.publish(.{ .record = a }, .none, .{ .checkpoint = .receipt });
     defer before.deinit();
     var buffer: [1]u8 = undefined;
-    try std.testing.expectError(error.Capacity, resident.publish(.{ .buffer = &buffer }, .resume_yield, .{ .checkpoint = .receipt }));
+    try std.testing.expectError(error.Capacity, resident.publish(
+        .{ .buffer = &buffer },
+        .resume_yield,
+        .{ .checkpoint = .receipt },
+    ));
     const unchanged = try resident.checkpoint(a);
     defer a.free(unchanged);
     try std.testing.expectEqualSlices(u8, before.checkpoint.?.bytes(), unchanged);
@@ -191,7 +259,11 @@ test "moved receipt outlives a temporary publication output allocator" {
     const receipt = blk: {
         var temporary = std.heap.ArenaAllocator.init(a);
         defer temporary.deinit();
-        var publication = try resident.publish(.{ .encoded = temporary.allocator() }, .none, .{ .checkpoint = .receipt });
+        var publication = try resident.publish(
+            .{ .encoded = temporary.allocator() },
+            .none,
+            .{ .checkpoint = .receipt },
+        );
         defer publication.deinit();
         break :blk publication.takeCheckpoint().?;
     };
@@ -209,8 +281,7 @@ test "receipt publication allocation failure rolls back and allows exact retry" 
     defer a.free(program);
     var prepared = try kosmos.Prepared.init(a, program);
     defer prepared.deinit();
-    var failures: usize = 0;
-    while (true) : (failures += 1) {
+    for (0..std.math.maxInt(usize)) |failures| {
         var failing = std.testing.FailingAllocator.init(a, .{});
         var resident = try kosmos.Resident.start(failing.allocator(), &prepared, &argument);
         defer release(&resident);
@@ -218,14 +289,22 @@ test "receipt publication allocation failure rolls back and allows exact retry" 
         defer before.deinit();
         failing.fail_index = failing.alloc_index + failures;
         failing.resize_fail_index = failing.resize_index;
-        var publication = resident.publish(.{ .encoded = failing.allocator() }, .resume_yield, .{ .checkpoint = .receipt }) catch |err| {
+        var publication = resident.publish(
+            .{ .encoded = failing.allocator() },
+            .resume_yield,
+            .{ .checkpoint = .receipt },
+        ) catch |err| {
             failing.fail_index = std.math.maxInt(usize);
             failing.resize_fail_index = std.math.maxInt(usize);
             try std.testing.expectEqual(error.OutOfMemory, err);
             const unchanged = try resident.checkpoint(a);
             defer a.free(unchanged);
             try std.testing.expectEqualSlices(u8, before.checkpoint.?.bytes(), unchanged);
-            var retry = try resident.publish(.{ .record = a }, .resume_yield, .{ .checkpoint = .receipt });
+            var retry = try resident.publish(
+                .{ .record = a },
+                .resume_yield,
+                .{ .checkpoint = .receipt },
+            );
             defer retry.deinit();
             try std.testing.expectEqualSlices(u8, &argument, retry.outcome.record.record.completed);
             try resident.transferCheckpoint(retry.checkpoint.?);
@@ -237,5 +316,5 @@ test "receipt publication allocation failure rolls back and allows exact retry" 
         try std.testing.expect(failures > 0);
         try resident.transferCheckpoint(publication.checkpoint.?);
         break;
-    }
+    } else return error.AllocationSweepExhausted;
 }

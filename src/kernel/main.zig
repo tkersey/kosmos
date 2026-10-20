@@ -121,10 +121,16 @@ fn publish(bytes: []u8) u32 {
     return 0;
 }
 
-pub fn kosmos_set_limits(identity: u64, input_limit: u64, working_limit: u64, output_limit: u64) callconv(.c) u32 {
+pub fn kosmos_set_limits(
+    identity: u64,
+    input_limit: u64,
+    working_limit: u64,
+    output_limit: u64,
+) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
-    if (input_limit > std.math.maxInt(usize) or working_limit > std.math.maxInt(usize) or output_limit > std.math.maxInt(usize) or
+    if (input_limit > std.math.maxInt(usize) or
+        working_limit > std.math.maxInt(usize) or output_limit > std.math.maxInt(usize) or
         working_limit < working_budget.live) return reject("InvalidCapacity");
     input_budget.allocator().free(input);
     input = &.{};
@@ -151,7 +157,11 @@ pub fn kosmos_invoke(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     const bytes = takeInput(length) catch |err| return failed(err);
-    return publish(runtime.invocation.invokeBytesWith(working_budget.allocator(), output_budget.allocator(), bytes) catch |err| return failed(err));
+    return publish(runtime.invocation.invokeBytesWith(
+        working_budget.allocator(),
+        output_budget.allocator(),
+        bytes,
+    ) catch |err| return failed(err));
 }
 pub fn kosmos_prepare(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
@@ -159,14 +169,18 @@ pub fn kosmos_prepare(identity: u64, length: u64) callconv(.c) u32 {
     if (prepared != null) return reject("PreparedAlreadyPresent");
     const bytes = takeInput(length) catch |err| return failed(err);
     const handle = issueHandle() catch |err| return failed(err);
-    prepared = runtime.Prepared.init(working_budget.allocator(), bytes) catch |err| return failed(err);
+    prepared = runtime.Prepared.init(
+        working_budget.allocator(),
+        bytes,
+    ) catch |err| return failed(err);
     prepared_handle = handle;
     return 0;
 }
 pub fn kosmos_release_prepared(identity: u64, handle: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
-    if (prepared == null or handle == 0 or handle != prepared_handle) return reject("InvalidHandle");
+    if (prepared == null or handle == 0 or
+        handle != prepared_handle) return reject("InvalidHandle");
     prepared.?.deinit();
     prepared = null;
     prepared_handle = 0;
@@ -174,13 +188,22 @@ pub fn kosmos_release_prepared(identity: u64, handle: u64) callconv(.c) u32 {
 }
 fn createSession(handle: u64, length: u64, restore: bool) u32 {
     if (resident != null) return reject("SessionAlreadyPresent");
-    if (prepared == null or handle == 0 or handle != prepared_handle) return reject("InvalidHandle");
+    if (prepared == null or handle == 0 or
+        handle != prepared_handle) return reject("InvalidHandle");
     const bytes = takeInput(length) catch |err| return failed(err);
     const token = issueHandle() catch |err| return failed(err);
     resident = if (restore)
-        runtime.Resident.restore(working_budget.allocator(), &prepared.?, bytes) catch |err| return failed(err)
+        runtime.Resident.restore(
+            working_budget.allocator(),
+            &prepared.?,
+            bytes,
+        ) catch |err| return failed(err)
     else
-        runtime.Resident.start(working_budget.allocator(), &prepared.?, bytes) catch |err| return failed(err);
+        runtime.Resident.start(
+            working_budget.allocator(),
+            &prepared.?,
+            bytes,
+        ) catch |err| return failed(err);
     resident_handle = token;
     return 0;
 }
@@ -194,11 +217,21 @@ pub fn kosmos_restore(identity: u64, handle: u64, length: u64) callconv(.c) u32 
     defer busy = false;
     return createSession(handle, length, true);
 }
-pub fn kosmos_drive(identity: u64, handle: u64, control: u32, quantum_present: u32, quantum: u64, checkpoint: u32, length: u64) callconv(.c) u32 {
+pub fn kosmos_drive(
+    identity: u64,
+    handle: u64,
+    control: u32,
+    quantum_present: u32,
+    quantum: u64,
+    checkpoint: u32,
+    length: u64,
+) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
-    if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
-    if (quantum_present > 1 or checkpoint > 1 or (quantum_present == 0 and quantum != 0)) return reject("InvalidControl");
+    if (resident == null or handle == 0 or
+        handle != resident_handle) return reject("InvalidHandle");
+    if (quantum_present > 1 or checkpoint > 1 or
+        (quantum_present == 0 and quantum != 0)) return reject("InvalidControl");
     const bytes = takeInput(length) catch |err| return failed(err);
     const command: protocol.Control = switch (control) {
         0 => if (bytes.len == 0) .none else return reject("InvalidControl"),
@@ -216,7 +249,8 @@ pub fn kosmos_drive(identity: u64, handle: u64, control: u32, quantum_present: u
 pub fn kosmos_checkpoint(identity: u64, handle: u64, transfer: u32) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
-    if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
+    if (resident == null or handle == 0 or
+        handle != resident_handle) return reject("InvalidHandle");
     if (transfer > 1) return reject("InvalidControl");
     const bytes = if (transfer == 1)
         resident.?.takeCheckpoint(output_budget.allocator()) catch |err| return failed(err)
@@ -231,7 +265,8 @@ pub fn kosmos_checkpoint(identity: u64, handle: u64, transfer: u32) callconv(.c)
 pub fn kosmos_close(identity: u64, handle: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
-    if (resident == null or handle == 0 or handle != resident_handle) return reject("InvalidHandle");
+    if (resident == null or handle == 0 or
+        handle != resident_handle) return reject("InvalidHandle");
     resident.?.close() catch |err| return failed(err);
     resident = null;
     resident_handle = 0;
@@ -257,11 +292,19 @@ fn failed(err: anyerror) u32 {
         .output = .{ .bytes = output_budget.required, .provenance = .exact },
     } else .{
         .arena = .working,
-        .working = if (working_budget.failed) .{ .bytes = working_budget.required, .provenance = .lower_bound } else .{},
+        .working = if (working_budget.failed) .{
+            .bytes = working_budget.required,
+            .provenance = .lower_bound,
+        } else .{},
     };
     var empty: [0]u8 = .{};
     var allocator = std.heap.FixedBufferAllocator.init(&empty);
-    output = protocol.encode(protocol.Outcome, allocator.allocator(), .{ .needs_capacity = capacity }, &envelope) catch return reject("CapacityEnvelopeUnavailable");
+    output = protocol.encode(
+        protocol.Outcome,
+        allocator.allocator(),
+        .{ .needs_capacity = capacity },
+        &envelope,
+    ) catch return reject("CapacityEnvelopeUnavailable");
     return 1;
 }
 
@@ -276,7 +319,10 @@ const Pages = struct {
         const end = start + length;
         const pages = (end + 65535) / 65536;
         self.required_pages = @max(self.required_pages, pages);
-        if (end > std.math.maxInt(usize) or (pages > @wasmMemorySize(0) and @wasmMemoryGrow(0, @intCast(pages - @wasmMemorySize(0))) == -1)) {
+        if (end > std.math.maxInt(usize) or (pages > @wasmMemorySize(0) and @wasmMemoryGrow(
+            0,
+            @intCast(pages - @wasmMemorySize(0)),
+        ) == -1)) {
             self.failed = true;
             return null;
         }

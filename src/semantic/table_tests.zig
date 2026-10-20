@@ -21,11 +21,16 @@ test "authored table mapping preserves chronological order across forest boundar
     const pair = try projection.schema(Pair, &b);
     const convert = try b.declare(&.{e.integer}, pair, &.{}, &.{});
     const value = try e.param(convert, 0);
-    try b.define(convert, try b.pure(try e.tuple(pair, &.{ value, try e.binary(.integer_add, value, e.one) })));
+    try b.define(convert, try b.pure(try e.tuple(pair, &.{
+        value, try e.binary(.integer_add, value, e.one),
+    })));
     const mapped = try table.mapToSequence(&b, d, pair, convert);
     const main = try b.declare(&.{d.sequence}, try projection.schema([]const Pair, &b), &.{}, &.{});
     const saved = try b.variable(d.table);
-    try b.define(main, try b.bind(saved, try e.call(d.from_sequence, &.{try e.param(main, 0)}), try e.call(mapped, &.{try b.reference(saved)})));
+    try b.define(main, try b.bind(saved, try e.call(
+        d.from_sequence,
+        &.{try e.param(main, 0)},
+    ), try e.call(mapped, &.{try b.reference(saved)})));
     const image = try support.encode(b.module(main, e.unit));
     defer a.free(image);
     var inputs: [65]u64 = undefined;
@@ -41,7 +46,10 @@ test "authored table mapping preserves chronological order across forest boundar
         defer output.deinit();
         try std.testing.expectEqual(count, output.value.len);
         for (output.value, inputs[0..count]) |item, original|
-            try std.testing.expectEqualDeep(Pair{ .original = original, .successor = original + 1 }, item);
+            try std.testing.expectEqualDeep(
+                Pair{ .original = original, .successor = original + 1 },
+                item,
+            );
     }
 }
 
@@ -52,21 +60,7 @@ fn fixture(b: *source.Builder) !source.Module {
     const output = try projection.schema(Result, b);
     const fill = try b.declare(&.{ sequence, e.integer, d.table }, d.table, &.{}, &.{});
     const main = try b.declare(&.{ sequence, e.integer, e.integer }, output, &.{}, &.{});
-    {
-        const values = try e.param(fill, 0);
-        const offset = try e.param(fill, 1);
-        const prior = try e.param(fill, 2);
-        const missing = try b.variable(e.unit);
-        const element = try b.variable(e.integer);
-        const next = try b.variable(d.table);
-        try b.define(fill, try b.term(.{ .match_sum = .{
-            .value = try b.primitive(d.optional, .sequence_get, &.{ values, offset }, 0),
-            .cases = &.{
-                .{ .variable = missing, .body = try b.pure(prior) },
-                .{ .variable = element, .body = try b.bind(next, try e.call(d.append, &.{ prior, try b.reference(element) }), try e.call(fill, &.{ values, try e.binary(.integer_add, offset, e.one), try b.reference(next) })) },
-            },
-        } }));
-    }
+    try defineFill(b, e, d, fill);
     const original = try b.variable(d.table);
     const changed = try b.variable(d.table);
     const before = try b.variable(d.optional);
@@ -74,21 +68,34 @@ fn fixture(b: *source.Builder) !source.Module {
     const unchanged = try b.variable(d.optional);
     const original_ref = try b.reference(original);
     const index = try e.param(main, 1);
-    const result = try b.pure(try e.tuple(output, &.{ try e.field(original_ref, 0), try b.reference(before), try b.reference(after), try b.reference(unchanged) }));
-    const read_original_again = try b.bind(unchanged, try e.call(d.get, &.{ original_ref, index }), result);
-    const read_changed = try b.bind(after, try e.call(d.get, &.{ try b.reference(changed), index }), read_original_again);
-    const update = try b.bind(changed, try e.call(d.set, &.{ original_ref, index, try e.param(main, 2) }), read_changed);
-    // Empty/out-of-range lookup is legitimate; no update is attempted there.
-    const missing = try b.variable(e.unit);
-    const found = try b.variable(e.integer);
-    const missing_result = try b.pure(try e.tuple(output, &.{ try e.field(original_ref, 0), try b.reference(before), try b.reference(before), try b.reference(before) }));
-    const inspect = try b.bind(before, try e.call(d.get, &.{ original_ref, index }), try b.term(.{ .match_sum = .{
-        .value = try b.reference(before),
-        .cases = &.{ .{ .variable = missing, .body = missing_result }, .{ .variable = found, .body = update } },
-    } }));
+    const result = try b.pure(try e.tuple(output, &.{
+        try e.field(original_ref, 0),
+        try b.reference(before),
+        try b.reference(after),
+        try b.reference(unchanged),
+    }));
+    const read_original_again = try b.bind(
+        unchanged,
+        try e.call(d.get, &.{ original_ref, index }),
+        result,
+    );
+    const read_changed = try b.bind(after, try e.call(
+        d.get,
+        &.{ try b.reference(changed), index },
+    ), read_original_again);
+    const update = try b.bind(changed, try e.call(d.set, &.{
+        original_ref, index, try e.param(main, 2),
+    }), read_changed);
+    const inspect = try inspectUpdate(e, d, original_ref, before, index, update, output);
     const valid = try b.variable(e.boolean);
-    const validated = try b.bind(valid, try e.call(d.valid, &.{original_ref}), try e.when(try b.reference(valid), inspect, try e.fail()));
-    try b.define(main, try b.bind(original, try e.call(fill, &.{ try e.param(main, 0), e.zero, try d.empty(b) }), try b.term(.{ .yield_then = validated })));
+    const validated = try b.bind(valid, try e.call(d.valid, &.{original_ref}), try e.when(
+        try b.reference(valid),
+        inspect,
+        try e.fail(),
+    ));
+    try b.define(main, try b.bind(original, try e.call(fill, &.{
+        try e.param(main, 0), e.zero, try d.empty(b),
+    }), try b.term(.{ .yield_then = validated })));
     return b.module(main, e.unit);
 }
 
@@ -109,11 +116,21 @@ fn forged(comptime Engine: type, image: []const u8) !void {
     const Leaf = union(enum) { leaf: u64 };
     const Tree = union(enum) { leaf: u64, branch: struct { left: Leaf, right: Leaf, size: u64 } };
     const Nil = union(enum) { nil: void };
-    const Value = struct { count: u64, forest: union(enum) { nil: void, cons: struct { head: Tree, tail: Nil } } };
+    const Value = struct {
+        count: u64,
+        forest: union(enum) { nil: void, cons: struct {
+            head: Tree,
+            tail: Nil,
+        } },
+    };
     for ([_]u64{ 0, 1, 2, 3, 4, std.math.maxInt(u64) }) |count| {
         for ([_]u64{ 0, 1, 2, 3, 4, std.math.maxInt(u64) }) |size| {
             const bytes = try projection.encode(Value, a, .{ .count = count, .forest = .{ .cons = .{
-                .head = .{ .branch = .{ .left = .{ .leaf = 10 }, .right = .{ .leaf = 20 }, .size = size } },
+                .head = .{ .branch = .{
+                    .left = .{ .leaf = 10 },
+                    .right = .{ .leaf = 20 },
+                    .size = size,
+                } },
                 .tail = .nil,
             } } });
             defer a.free(bytes);
@@ -121,7 +138,9 @@ fn forged(comptime Engine: type, image: []const u8) !void {
             defer session.deinit();
             const result = try session.run(null);
             try std.testing.expect(result == .completed);
-            try std.testing.expectEqualSlices(u8, &.{@intFromBool(count == 2 and size == 2)}, try session.bytes(&result.completed));
+            try std.testing.expectEqualSlices(u8, &.{
+                @intFromBool(count == 2 and size == 2),
+            }, try session.bytes(&result.completed));
         }
     }
     // Correct total cardinality cannot justify duplicate adjacent chunk sizes.
@@ -162,7 +181,11 @@ fn persistence(comptime Engine: type, image: []const u8) !void {
     for ([_]usize{ 0, 1, 2, 3, 7, 8, 9, 31, 32, 33, 64, 65 }) |count| {
         const indices = if (count == 33 or count == 65) count + 1 else @min(count + 1, 3);
         for (0..indices) |index| {
-            const input = try projection.encode(Input, a, .{ .values = values[0..count], .index = index, .replacement = 987654321 });
+            const input = try projection.encode(Input, a, .{
+                .values = values[0..count],
+                .index = index,
+                .replacement = 987654321,
+            });
             defer a.free(input);
             var session = try Engine.initImage(a, image, input);
             defer session.deinit();
@@ -192,7 +215,11 @@ const Base = struct {
     fn initImage(allocator: std.mem.Allocator, image: []const u8, input: []const u8) !Session {
         return Session.initImage(allocator, image, input, .{});
     }
-    fn restoreImage(allocator: std.mem.Allocator, image: []const u8, checkpoint: []const u8) !Session {
+    fn restoreImage(
+        allocator: std.mem.Allocator,
+        image: []const u8,
+        checkpoint: []const u8,
+    ) !Session {
         return Session.restoreImage(allocator, image, checkpoint, .{});
     }
 };
@@ -205,7 +232,12 @@ test "base table update copies a logarithmic path without encoding the table" {
     const d = try table.define(&b, e.integer);
     const main = try b.declare(&.{d.sequence}, d.table, &.{}, &.{});
     const saved = try b.variable(d.table);
-    try b.define(main, try b.bind(saved, try e.call(d.from_sequence, &.{try e.param(main, 0)}), try b.term(.{ .yield_then = try e.call(d.set, &.{ try b.reference(saved), e.zero, try b.constant(u64, 12345) }) })));
+    try b.define(main, try b.bind(saved, try e.call(
+        d.from_sequence,
+        &.{try e.param(main, 0)},
+    ), try b.term(.{ .yield_then = try e.call(d.set, &.{
+        try b.reference(saved), e.zero, try b.constant(u64, 12345),
+    }) })));
     const image = try support.encode(b.module(main, e.unit));
     defer a.free(image);
     var inputs: [1024]u64 = undefined;
@@ -221,7 +253,77 @@ test "base table update copies a logarithmic path without encoding the table" {
         try session.resumeYield();
         try std.testing.expect(try session.run(null) == .completed);
         try std.testing.expectEqual(@as(u64, 0), stats.owned_blob_bytes);
-        try std.testing.expect(stats.aggregate_field_copies <= 8 * @as(usize, std.math.log2_int(usize, count)) + 16);
-        std.debug.print("base authored table count={d} update_field_copies={d} encoded_bytes={d}\n", .{ count, stats.aggregate_field_copies, stats.owned_blob_bytes });
+        try std.testing.expect(stats.aggregate_field_copies <= 8 * @as(
+            usize,
+            std.math.log2_int(usize, count),
+        ) + 16);
+        std.debug.print(
+            "base authored table count={d} update_field_copies={d} encoded_bytes={d}\n",
+            .{ count, stats.aggregate_field_copies, stats.owned_blob_bytes },
+        );
     }
+}
+
+fn defineFill(
+    b: *source.Builder,
+    e: Author,
+    d: table.Definition,
+    fill: data.program.Id,
+) !void {
+    const values = try e.param(fill, 0);
+    const offset = try e.param(fill, 1);
+    const prior = try e.param(fill, 2);
+    const missing = try b.variable(e.unit);
+    const element = try b.variable(e.integer);
+    const next = try b.variable(d.table);
+    try b.define(fill, try b.term(.{ .match_sum = .{
+        .value = try b.primitive(d.optional, .sequence_get, &.{ values, offset }, 0),
+        .cases = &.{
+            .{ .variable = missing, .body = try b.pure(prior) },
+            .{ .variable = element, .body = try b.bind(next, try e.call(
+                d.append,
+                &.{ prior, try b.reference(element) },
+            ), try e.call(fill, &.{
+                values, try e.binary(.integer_add, offset, e.one), try b.reference(next),
+            })) },
+        },
+    } }));
+}
+
+fn inspectUpdate(
+    e: Author,
+    d: table.Definition,
+    original_ref: data.program.Id,
+    before: data.program.Id,
+    index: data.program.Id,
+    update: data.program.Id,
+    output: data.program.Id,
+) !data.program.Id {
+    const b = e.b;
+    const missing = try b.variable(e.unit);
+    const found = try b.variable(e.integer);
+    const missing_result = try b.pure(try e.tuple(output, &.{
+        try e.field(original_ref, 0),
+        try b.reference(before),
+        try b.reference(before),
+        try b.reference(before),
+    }));
+    return b.bind(
+        before,
+        try e.call(d.get, &.{
+            original_ref,
+            index,
+        }),
+        try b.term(
+            .{
+                .match_sum = .{
+                    .value = try b.reference(before),
+                    .cases = &.{ .{ .variable = missing, .body = missing_result }, .{
+                        .variable = found,
+                        .body = update,
+                    } },
+                },
+            },
+        ),
+    );
 }

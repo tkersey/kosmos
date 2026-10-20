@@ -24,10 +24,15 @@ pub const Core = opaque {
         // The caller holds a live lease and synchronizes its transfer. Retain
         // changes only the count; checked CAS cannot transiently wrap it to zero.
         var current = owner.references.load(.monotonic);
-        while (true) {
+        while (true) { // tiger: event-loop
             std.debug.assert(current != 0);
             const next = std.math.add(usize, current, 1) catch return error.InvalidState;
-            current = owner.references.cmpxchgWeak(current, next, .monotonic, .monotonic) orelse return;
+            current = owner.references.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            ) orelse return;
         }
     }
     pub fn release(self: *Core) void {
@@ -56,7 +61,8 @@ pub const Core = opaque {
     }
     pub fn storageBytes(self: *Core) usize {
         const owner = self.storage();
-        return @sizeOf(Storage) + owner.arena.queryCapacity() + owner.admitted.storageBytes() + owner.layouts.storageBytes();
+        return @sizeOf(Storage) + owner.arena.queryCapacity() +
+            owner.admitted.storageBytes() + owner.layouts.storageBytes();
     }
 };
 
@@ -84,7 +90,13 @@ pub const Prepared = struct {
             };
         };
         const core = try allocator.create(Storage);
-        core.* = .{ .allocator = allocator, .admitted = admitted, .arena = arena, .contracts = contracts, .layouts = layouts };
+        core.* = .{
+            .allocator = allocator,
+            .admitted = admitted,
+            .arena = arena,
+            .contracts = contracts,
+            .layouts = layouts,
+        };
         return .{ .core = @ptrCast(core) };
     }
 
@@ -107,7 +119,12 @@ pub const Prepared = struct {
     }
 };
 
-fn encodeContract(scratch: std.mem.Allocator, retained: std.mem.Allocator, schemas: []const data.program.Schema, root: u64) Error![]const u8 {
+fn encodeContract(
+    scratch: std.mem.Allocator,
+    retained: std.mem.Allocator,
+    schemas: []const data.program.Schema,
+    root: u64,
+) Error![]const u8 {
     // Canonicalization owns temporary graphs. Allocating those through the
     // retained arena would keep their slabs after the encoder frees them.
     const bytes = try data.schema.encodeOwned(scratch, schemas, root);

@@ -49,14 +49,22 @@ pub fn programBytes(a: std.mem.Allocator, admitted: *const data.program_image.Ad
     });
 }
 
-pub fn stateBytes(a: std.mem.Allocator, admitted: *const data.program_image.Admitted, state: State) ![]u8 {
+pub fn stateBytes(
+    a: std.mem.Allocator,
+    admitted: *const data.program_image.Admitted,
+    state: State,
+) ![]u8 {
     try data.state_admission.validateAdmitted(a, admitted, state);
     return encode(State, a, state);
 }
 
 /// Ordinary data admission is followed by guest program-relative admission.
 /// Neither establishes execution history, semantic correspondence, or custody.
-pub fn readState(a: std.mem.Allocator, admitted: *const data.program_image.Admitted, bytes: []const u8) !data.state_image.Owned {
+pub fn readState(
+    a: std.mem.Allocator,
+    admitted: *const data.program_image.Admitted,
+    bytes: []const u8,
+) !data.state_image.Owned {
     var decoded = try decode(State, a, bytes);
     defer decoded.deinit();
     var canonical = try data.state_image.canonicalize(a, decoded.value);
@@ -67,17 +75,17 @@ pub fn readState(a: std.mem.Allocator, admitted: *const data.program_image.Admit
 
 pub fn encode(comptime T: type, a: std.mem.Allocator, value: T) Error![]u8 {
     var measure: wire.Writer = .{};
-    try write(T, value, &measure);
+    try Writer(T).write(value, &measure);
     const bytes = try a.alloc(u8, measure.position);
     errdefer a.free(bytes);
     var output: wire.Writer = .{ .output = bytes };
-    try write(T, value, &output);
+    try Writer(T).write(value, &output);
     return bytes;
 }
 
 pub fn encodeInto(comptime T: type, buffer: []u8, value: T) Error![]const u8 {
     var writer: wire.Writer = .{ .output = buffer };
-    try write(T, value, &writer);
+    try Writer(T).write(value, &writer);
     return buffer[0..writer.position];
 }
 
@@ -96,44 +104,64 @@ pub fn decode(comptime T: type, a: std.mem.Allocator, bytes: []const u8) Error!O
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     var input: wire.Reader = .{ .input = bytes };
-    const value = try read(T, arena.allocator(), &input);
+    const value = try Reader(T).read(arena.allocator(), &input);
     try input.finish();
     return .{ .arena = arena, .value = value };
 }
 
 // This is the existing schema-directed value encoding, with no new envelope.
 // Reflection follows record fields, so record additions cannot be silently lost.
-fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
-    _ = comptime native.info(T);
+fn Writer(comptime T: type) type {
+    _ = native.info(T);
+    return struct {
+        fn write(value: T, output: *wire.Writer) Error!void {
+            return writeValue(T, value, output);
+        }
+    };
+}
+
+fn writeValue(comptime T: type, value: T, output: *wire.Writer) Error!void {
     switch (@typeInfo(T)) {
         .void => {},
         .bool => try output.byte(@intFromBool(value)),
         .int => try output.fixed(T, value),
         .@"enum" => try output.fixed(u32, @intCast(@backingInt(value))),
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Child|
-            try write(Child, @field(value, name), output),
-        .@"union" => |info| inline for (info.field_names, info.field_types, 0..) |name, Child, index| {
+            try Writer(Child).write(@field(value, name), output),
+        .@"union" => |info| inline for (
+            info.field_names,
+            info.field_types,
+            0..,
+        ) |name, Child, index| {
             if (std.meta.activeTag(value) == @field(info.tag_type.?, name)) {
                 try output.natural(index);
-                return write(Child, @field(value, name), output);
+                return Writer(Child).write(@field(value, name), output);
             }
         },
         .optional => |info| {
             try output.natural(if (value == null) 0 else 1);
-            if (value) |present| try write(info.child, present, output);
+            if (value) |present| try Writer(info.child).write(present, output);
         },
-        .array => |info| for (value) |element| try write(info.child, element, output),
+        .array => |info| for (value) |element|
+            try Writer(info.child).write(element, output),
         .pointer => |info| {
             try output.natural(value.len);
             if (info.child == u8) return output.put(value);
-            if (comptime minimum(info.child) == 0) return;
-            for (value) |element| try write(info.child, element, output);
+            if (comptime Minimum(info.child).value == 0) return;
+            for (value) |element|
+                try Writer(info.child).write(element, output);
         },
         else => @compileError("unsupported guest projection field " ++ @typeName(T)),
     }
 }
 
-fn minimum(comptime T: type) usize {
+fn Minimum(comptime T: type) type {
+    return struct {
+        const value = minimumBytes(T);
+    };
+}
+
+fn minimumBytes(comptime T: type) usize {
     return switch (@typeInfo(T)) {
         .void => 0,
         .bool => 1,
@@ -141,17 +169,25 @@ fn minimum(comptime T: type) usize {
         .@"enum" => 4,
         .@"struct" => |info| blk: {
             var size: usize = 0;
-            for (info.field_types) |Child| size += minimum(Child);
+            for (info.field_types) |Child| size += Minimum(Child).value;
             break :blk size;
         },
-        .array => |info| info.len * minimum(info.child),
+        .array => |info| info.len * Minimum(info.child).value,
         .@"union", .optional, .pointer => 1,
         else => @compileError("unsupported guest projection field " ++ @typeName(T)),
     };
 }
 
-fn read(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Error!T {
-    _ = comptime native.info(T);
+fn Reader(comptime T: type) type {
+    _ = native.info(T);
+    return struct {
+        fn read(a: std.mem.Allocator, input: *wire.Reader) Error!T {
+            return readValue(T, a, input);
+        }
+    };
+}
+
+fn readValue(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Error!T {
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => switch (try input.byte()) {
@@ -169,40 +205,31 @@ fn read(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Error!T {
         .@"struct" => |info| blk: {
             var result: T = undefined;
             inline for (info.field_names, info.field_types) |name, Child|
-                @field(result, name) = try read(Child, a, input);
+                @field(result, name) = try Reader(Child).read(a, input);
             break :blk result;
         },
         .@"union" => |info| blk: {
             const tag = try input.natural();
             inline for (info.field_names, info.field_types, 0..) |name, Child, index|
-                if (tag == index) break :blk @unionInit(T, name, try read(Child, a, input));
+                if (tag == index) break :blk @unionInit(
+                    T,
+                    name,
+                    try Reader(Child).read(a, input),
+                );
             break :blk error.InvalidValue;
         },
         .optional => |info| switch (try input.natural()) {
             0 => null,
-            1 => try read(info.child, a, input),
+            1 => try Reader(info.child).read(a, input),
             else => error.InvalidValue,
         },
         .array => |info| blk: {
             var result: T = undefined;
-            for (&result) |*element| element.* = try read(info.child, a, input);
+            for (&result) |*element|
+                element.* = try Reader(info.child).read(a, input);
             break :blk result;
         },
-        .pointer => |info| blk: {
-            const count = try input.count();
-            const size = comptime minimum(info.child);
-            if (size != 0 and count > (input.input.len - input.position) / size) return error.Truncated;
-            _ = std.math.mul(usize, count, @sizeOf(info.child)) catch return error.Capacity;
-            const result = try a.alloc(info.child, count);
-            if (info.child == u8) {
-                @memcpy(result, try input.take(count));
-            } else if (comptime minimum(info.child) == 0) {
-                // A zero-byte contract has exactly one value. Avoid a loop
-                // proportional to a compressed unit count.
-                if (count != 0) @memset(result, try read(info.child, a, input));
-            } else for (result) |*element| element.* = try read(info.child, a, input);
-            break :blk result;
-        },
+        .pointer => |info| readSlice(info.child, a, input),
         else => @compileError("unsupported guest projection field " ++ @typeName(T)),
     };
 }
@@ -214,7 +241,9 @@ test "actual guest program and state records derive only ordinary outer schemas"
     _ = try schema(Program, &b);
     _ = try schema(State, &b);
     for (b.schemas.items) |shape|
-        try std.testing.expect(@import("../base/profile.zig").permitsSchema(std.meta.activeTag(shape)));
+        try std.testing.expect(
+            @import("../base/profile.zig").permitsSchema(std.meta.activeTag(shape)),
+        );
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     _ = try data.admission.schemas(arena.allocator(), b.schemas.items);
@@ -231,8 +260,16 @@ test "projection preserves aliases cycles owners and dormant control as data" {
                 .{ .schema = 1, .body = .{ .reference = .{ .id = 1 } } },
                 .{ .schema = 1, .body = .{ .owned = .{ .node = .{ .id = 2 } } } },
             }, .tail = .{ .id = 0 } } } },
-            .{ .record = .{ .obligation = .{ .source_block = 3, .cleanup = null, .status = .pending } } },
-            .{ .record = .{ .obligation = .{ .source_block = 3, .cleanup = null, .status = .pending } } },
+            .{ .record = .{ .obligation = .{
+                .source_block = 3,
+                .cleanup = null,
+                .status = .pending,
+            } } },
+            .{ .record = .{ .obligation = .{
+                .source_block = 3,
+                .cleanup = null,
+                .status = .pending,
+            } } },
         },
     };
     // This deliberately cyclic record tests projection, not guest admission.
@@ -250,7 +287,10 @@ test "projection preserves aliases cycles owners and dormant control as data" {
 
 test "projection distinguishes enum values from union case positions" {
     const Record = struct { tag: data.program.TerminatorTag, term: data.activation.Terminator };
-    const record: Record = .{ .tag = .dispose, .term = .{ .dispose = .{ .owned = 0, .next = .{ .block = 1 } } } };
+    const record: Record = .{ .tag = .dispose, .term = .{ .dispose = .{
+        .owned = 0,
+        .next = .{ .block = 1 },
+    } } };
     const a = std.testing.allocator;
     const bytes = try encode(Record, a, record);
     defer a.free(bytes);
@@ -267,7 +307,30 @@ test "projection distinguishes enum values from union case positions" {
 
 test "projection rejects hostile counts before container allocation" {
     const a = std.testing.allocator;
-    try std.testing.expectError(error.Truncated, decode([]const State, a, &.{ 255, 255, 255, 255, 15 }));
+    try std.testing.expectError(error.Truncated, decode(
+        []const State,
+        a,
+        &.{ 255, 255, 255, 255, 15 },
+    ));
     try std.testing.expectError(error.InvalidValue, decode(bool, a, &.{2}));
     try std.testing.expectError(error.InvalidValue, decode(?u64, a, &.{2}));
+}
+
+fn readSlice(comptime Child: type, a: std.mem.Allocator, input: *wire.Reader) Error![]Child {
+    const count = try input.count();
+    const size = comptime Minimum(Child).value;
+    if (size != 0 and count > (input.input.len - input.position) / size)
+        return error.Truncated;
+    _ = std.math.mul(usize, count, @sizeOf(Child)) catch return error.Capacity;
+    const result = try a.alloc(Child, count);
+    if (Child == u8) {
+        @memcpy(result, try input.take(count));
+    } else if (comptime Minimum(Child).value == 0) {
+        // A zero-byte contract has exactly one value. Avoid a loop
+        // proportional to a compressed unit count.
+        if (count != 0)
+            @memset(result, try Reader(Child).read(a, input));
+    } else for (result) |*element|
+        element.* = try Reader(Child).read(a, input);
+    return result;
 }

@@ -10,7 +10,12 @@ const Injection = struct {
     armed: bool = false,
 
     fn allocator(self: *Injection) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
     }
     fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *Injection = @ptrCast(@alignCast(context));
@@ -20,7 +25,10 @@ const Injection = struct {
             switch (self.mode) {
                 .grow => {
                     std.debug.print("Z17 injected grow before invalidation\n", .{});
-                    slots.views.ensureTotalCapacity(self.allocator(), slots.views.capacity + 1) catch return null;
+                    slots.views.ensureTotalCapacity(
+                        self.allocator(),
+                        slots.views.capacity + 1,
+                    ) catch return null;
                     std.debug.print("Z17 invalidation escaped\n", .{});
                 },
                 .shift => {
@@ -34,11 +42,23 @@ const Injection = struct {
         }
         return self.parent.rawAlloc(len, alignment, ra);
     }
-    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        len: usize,
+        ra: usize,
+    ) bool {
         const self: *Injection = @ptrCast(@alignCast(context));
         return self.parent.rawResize(memory, alignment, len, ra);
     }
-    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        len: usize,
+        ra: usize,
+    ) ?[*]u8 {
         const self: *Injection = @ptrCast(@alignCast(context));
         return self.parent.rawRemap(memory, alignment, len, ra);
     }
@@ -56,11 +76,24 @@ fn check(allocator: std.mem.Allocator, mode: Mode) !void {
     injection.slots = &slots;
     const first = try slots.create(8);
     _ = try slots.create(8);
-    const value = @import("horos_data").graph.Value{ .schema = 0, .body = .{ .scalar = .{ 7, 0, 0, 0, 0, 0, 0, 0 } } };
+    const value = @import("horos_data").graph.Value{ .schema = 0, .body = .{
+        .scalar = .{ 7, 0, 0, 0, 0, 0, 0, 0 },
+    } };
     injection.armed = true;
     if (mode == .oom) {
-        if (slots.set(first, 0, value)) |_| return error.MissingAllocationFailure else |err| if (err != error.OutOfMemory) return err;
-        if (slots.get(first, 0)) |_| return error.PartialPublication else |err| if (err != error.UninitializedSlot) return err;
+        if (slots.set(
+            first,
+            0,
+            value,
+        )) |_| {
+            return error.MissingAllocationFailure;
+        } else |err| if (err != error.OutOfMemory) return err;
+        if (slots.get(
+            first,
+            0,
+        )) |_| {
+            return error.PartialPublication;
+        } else |err| if (err != error.UninitializedSlot) return err;
     } else try slots.set(first, 0, value);
     if (mode == .grow or mode == .shift) return error.MissingPointerDiagnostic;
     // Growth after both successful and failed writes is legal: no lock escapes.
@@ -72,9 +105,15 @@ fn check(allocator: std.mem.Allocator, mode: Mode) !void {
         const address = &slots.views.items[first.index];
         try slots.release(first);
         const successor = try slots.create(8);
-        if (address != &slots.views.items[successor.index] or first.generation == successor.generation)
+        if (address != &slots.views.items[successor.index] or
+            first.generation == successor.generation)
             return error.InvalidGenerationWitness;
-        if (slots.get(first, 0)) |_| return error.AcceptedRetiredHandle else |err| if (err != error.InvalidHandle) return err;
+        if (slots.get(
+            first,
+            0,
+        )) |_| {
+            return error.AcceptedRetiredHandle;
+        } else |err| if (err != error.InvalidHandle) return err;
         try slots.set(successor, 0, value);
     }
     if (mode == .owner_move) {
@@ -98,16 +137,42 @@ pub fn main(init: std.process.Init) !void {
         const executable = args.next() orelse return error.MissingExecutable;
         if (args.next() != null) return error.UnexpectedArgument;
         for (std.enums.values(Mode)) |mode| {
-            const result = try std.process.run(init.gpa, init.io, .{ .argv = &.{ executable, @tagName(mode) }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20), .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } } });
+            const result = try std.process.run(
+                init.gpa,
+                init.io,
+                .{
+                    .argv = &.{ executable, @tagName(
+                        mode,
+                    ) },
+                    .stdout_limit = .limited(1 << 20),
+                    .stderr_limit = .limited(1 << 20),
+                    .timeout = .{ .duration = .{
+                        .raw = .fromSeconds(30),
+                        .clock = .awake,
+                    } },
+                },
+            );
             defer init.gpa.free(result.stdout);
             defer init.gpa.free(result.stderr);
             const fault = mode == .grow or mode == .shift;
-            const message = try std.fmt.allocPrint(init.gpa, "Z17 {s} {s}{s}", .{ if (fault) "injected" else "valid", @tagName(mode), if (fault) " before invalidation" else "; leaks=0" });
+            const message = try std.fmt.allocPrint(init.gpa, "Z17 {s} {s}{s}", .{
+                if (fault) "injected" else "valid",
+                @tagName(mode),
+                if (fault) " before invalidation" else "; leaks=0",
+            });
             defer init.gpa.free(message);
             const valid = std.mem.indexOf(u8, result.stderr, message) != null and
                 (if (fault) !result.term.success() and
-                    (std.mem.indexOf(u8, result.stderr, "SafetyLock") != null or std.mem.indexOf(u8, result.stderr, "assertUnlocked") != null) and
-                    std.mem.indexOf(u8, result.stderr, "Z17 invalidation escaped") == null else result.term.success());
+                    (std.mem.indexOf(u8, result.stderr, "SafetyLock") != null or std.mem.indexOf(
+                        u8,
+                        result.stderr,
+                        "assertUnlocked",
+                    ) != null) and
+                    std.mem.indexOf(
+                        u8,
+                        result.stderr,
+                        "Z17 invalidation escaped",
+                    ) == null else result.term.success());
             if (!valid) {
                 std.debug.print("{s}\n", .{result.stderr});
                 return error.DiagnosticMismatch;

@@ -17,16 +17,24 @@ pub fn build(b: *source.Builder) !source.Module {
     const accumulated = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ sum, try b.reference(head) },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
     const next = try b.term(.{ .unpack_product = .{
         .value = try b.reference(present),
         .variables = &.{ head, tail },
-        .body = try b.term(.{ .call = .{ .function = entry, .arguments = &.{ try b.reference(tail), accumulated } } }),
+        .body = try b.term(.{ .call = .{ .function = entry, .arguments = &.{
+            try b.reference(tail), accumulated,
+        } } }),
     } });
     try b.define(entry, try b.term(.{ .match_sum = .{
         .value = try b.primitive(optional, .sequence_pop, &.{items}, 0),
-        .cases = &.{ .{ .variable = empty, .body = try b.pure(sum) }, .{ .variable = present, .body = next } },
+        .cases = &.{ .{ .variable = empty, .body = try b.pure(sum) }, .{
+            .variable = present,
+            .body = next,
+        } },
     } }));
     return b.module(entry, unit);
 }

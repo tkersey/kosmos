@@ -16,7 +16,11 @@ fn image(comptime zero_width: bool) ![]u8 {
     const popped_pair = try b.schema(.{ .product = &.{ element, sequence } });
     const popped = try b.schema(.{ .sum = &.{ e.unit, popped_pair } });
     const last = try b.schema(.{ .product = &.{ sequence, optional } });
-    const output = if (zero_width) try b.schema(.{ .product = &.{ e.integer, optional, sequence, popped, last } }) else try b.schema(.{ .product = &.{ e.integer, optional, sequence, sequence, sequence, sequence, popped, last } });
+    const output = if (zero_width) try b.schema(.{ .product = &.{
+        e.integer, optional, sequence, popped, last,
+    } }) else try b.schema(.{ .product = &.{
+        e.integer, optional, sequence, sequence, sequence, sequence, popped, last,
+    } });
     const entry = try b.declare(&.{ sequence, e.integer }, output, &.{}, &.{});
     const input = try e.param(entry, 0);
     const index = try e.param(entry, 1);
@@ -26,13 +30,25 @@ fn image(comptime zero_width: bool) ![]u8 {
     const pop_last = try b.primitive(last, .sequence_pop_last, &.{input}, 0);
     if (zero_width) {
         const take = try b.primitive(sequence, .sequence_take, &.{ input, index }, 0);
-        try b.define(entry, try b.pure(try e.tuple(output, &.{ length, get, take, pop, pop_last })));
+        try b.define(entry, try b.pure(try e.tuple(
+            output,
+            &.{ length, get, take, pop, pop_last },
+        )));
     } else {
-        const append = try b.primitive(sequence, .sequence_append, &.{ input, try b.constant(u64, 99) }, 0);
+        const append = try b.primitive(
+            sequence,
+            .sequence_append,
+            &.{ input, try b.constant(u64, 99) },
+            0,
+        );
         const concat = try b.primitive(sequence, .sequence_concat, &.{ append, input }, 0);
-        const set = try e.checked(sequence, .sequence_set, &.{ concat, e.zero, try b.constant(u64, 41) }, &.{.invalid_index});
+        const set = try e.checked(sequence, .sequence_set, &.{
+            concat, e.zero, try b.constant(u64, 41),
+        }, &.{.invalid_index});
         const take = try b.primitive(sequence, .sequence_take, &.{ set, index }, 0);
-        try b.define(entry, try b.pure(try e.tuple(output, &.{ length, get, append, concat, set, take, pop, pop_last })));
+        try b.define(entry, try b.pure(try e.tuple(output, &.{
+            length, get, append, concat, set, take, pop, pop_last,
+        })));
     }
     return support.encode(b.module(entry, e.unit));
 }

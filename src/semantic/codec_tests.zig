@@ -8,8 +8,18 @@ const Author = @import("author.zig").Author;
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
-const NaturalOutput = struct { read: codecs.Read, bytes: []const u8, fixed: u64, fixed_bytes: [8]u8 };
-const SkipInput = struct { program: projection.Program, schema: u64, bytes: []const u8, offset: u64 };
+const NaturalOutput = struct {
+    read: codecs.Read,
+    bytes: []const u8,
+    fixed: u64,
+    fixed_bytes: [8]u8,
+};
+const SkipInput = struct {
+    program: projection.Program,
+    schema: u64,
+    bytes: []const u8,
+    offset: u64,
+};
 
 fn prepare(comptime natural: bool) !base.Prepared {
     var b = source.Builder.init(a);
@@ -26,8 +36,41 @@ fn prepare(comptime natural: bool) !base.Prepared {
         const decoded = try b.variable(try projection.schema(codecs.Read, &b));
         const fixed_bytes = try b.variable(try projection.schema([8]u8, &b));
         const fixed = try b.variable(e.integer);
-        try b.define(entry, try b.bind(encoded, try e.call(codec.natural, &.{argument}), try b.bind(decoded, try e.call(codec.read, &.{ try b.reference(encoded), e.zero }), try b.bind(fixed_bytes, try e.call(codec.fixed_bytes, &.{argument}), try b.bind(fixed, try e.call(codec.fixed, &.{try b.reference(fixed_bytes)}), try b.pure(try e.tuple(output, &.{ try b.reference(decoded), try b.reference(encoded), try b.reference(fixed), try b.reference(fixed_bytes) })))))));
-    } else try b.define(entry, try e.call(codec.skip, &.{ try e.field(argument, 0), try e.field(argument, 1), try e.field(argument, 2), try e.field(argument, 3) }));
+        try b.define(
+            entry,
+            try b.bind(
+                encoded,
+                try e.call(codec.natural, &.{
+                    argument,
+                }),
+                try b.bind(
+                    decoded,
+                    try e.call(codec.read, &.{ try b.reference(encoded), e.zero }),
+                    try b.bind(
+                        fixed_bytes,
+                        try e.call(codec.fixed_bytes, &.{
+                            argument,
+                        }),
+                        try b.bind(
+                            fixed,
+                            try e.call(codec.fixed, &.{try b.reference(fixed_bytes)}),
+                            try b.pure(try e.tuple(output, &.{
+                                try b.reference(decoded),
+                                try b.reference(encoded),
+                                try b.reference(fixed),
+                                try b.reference(fixed_bytes),
+                            })),
+                        ),
+                    ),
+                ),
+            ),
+        );
+    } else try b.define(entry, try e.call(codec.skip, &.{
+        try e.field(argument, 0),
+        try e.field(argument, 1),
+        try e.field(argument, 2),
+        try e.field(argument, 3),
+    }));
     return support.prepare(b.module(entry, e.unit));
 }
 
@@ -55,17 +98,10 @@ test "authored canonical naturals and fixed integers include u64 maximum" {
 test "authored schema traversal handles recursion and enormous zero width cardinality" {
     var core = try prepare(false);
     defer core.deinit();
-    const program: data.activation.Program = .{
-        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = &.{ .unit, .u64, .bytes, .{ .product = &.{ 1, 2 } }, .{ .sum = &.{ 0, 3 } }, .{ .seq = 4 }, .{ .array = .{ .element = 0, .length = std.math.maxInt(u64) } }, .{ .vector = .{ .element = 0, .maximum = std.math.maxInt(u64) } }, .{ .sum = &.{ 0, 8 } } },
-        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
-        .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } }},
-    };
-    const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+
+    const image = try a.alloc(u8, try data.program_image.encodedLength(traversal_program));
     defer a.free(image);
-    _ = try data.program_image.encode(a, program, image);
+    _ = try data.program_image.encode(a, traversal_program, image);
     const admitted = try data.program_image.Admitted.decode(a, image);
     defer admitted.deinit();
     const projection_bytes = try projection.programBytes(a, admitted);
@@ -85,15 +121,64 @@ test "authored schema traversal handles recursion and enormous zero width cardin
         .{ .schema = 8, .bytes = &.{ 1, 1, 1, 1, 1, 1, 0 } },
     };
     for (cases) |case| {
-        try data.admission.value(a, program.schemas, admitted.schemaFacts(), .{ .schema = case.schema, .bytes = case.bytes });
+        try data.admission.value(a, traversal_program.schemas, admitted.schemaFacts(), .{
+            .schema = case.schema,
+            .bytes = case.bytes,
+        });
         const padded = try std.mem.concat(a, u8, &.{ &.{ 99, 98 }, case.bytes, &.{97} });
         defer a.free(padded);
-        const input = try projection.encode(SkipInput, a, .{ .program = program_value.value, .schema = case.schema, .bytes = padded, .offset = 2 });
+        const input = try projection.encode(SkipInput, a, .{
+            .program = program_value.value,
+            .schema = case.schema,
+            .bytes = padded,
+            .offset = 2,
+        });
         defer a.free(input);
         var session = try base.Session.start(a, &core, input, .{});
         defer session.deinit();
         const outcome = try session.run(null);
         try std.testing.expect(outcome == .completed);
-        try std.testing.expectEqual(2 + case.bytes.len, std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
+        try std.testing.expectEqual(2 + case.bytes.len, std.mem.readInt(
+            u64,
+            (try session.bytes(&outcome.completed))[0..8],
+            .little,
+        ));
     }
 }
+
+const traversal_program: data.activation.Program = .{
+    .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+    .schemas = &.{
+        .unit,                  .u64, .bytes,
+        .{ .product = &.{
+            1,
+            2,
+        } },
+        .{ .sum = &.{
+            0,
+            3,
+        } },
+        .{ .seq = 4 },
+        .{ .array = .{
+            .element = 0,
+            .length = std.math.maxInt(u64),
+        } },
+        .{ .vector = .{
+            .element = 0,
+            .maximum = std.math.maxInt(u64),
+        } },
+        .{ .sum = &.{ 0, 8 } },
+    },
+    .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+    .effects = &.{},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{},
+        .layout = .{ .slots = &.{0} },
+        .result = 0,
+    }},
+    .blocks = &.{.{ .function = 0, .instructions = &.{.{
+        .destination = 0,
+        .opcode = .constant,
+    }}, .terminator = .{ .return_value = 0 } }},
+};

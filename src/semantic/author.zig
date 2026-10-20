@@ -54,12 +54,24 @@ pub const Author = struct {
     /// is an outer implementation fault, never a fabricated guest exception.
     pub fn payload(self: Author, value: Id, tag: usize) Error!Id {
         const schema = self.b.values.items[@intCast(value)].schema;
-        return self.b.value(.{ .schema = self.b.schemas.items[@intCast(schema)].sum[tag], .expression = .{ .primitive = .{
-            .opcode = .variant_payload,
-            .operands = &.{value},
-            .immediate = tag,
-            .failures = &.{.{ .kind = .invalid_variant, .value = self.failure_literal }},
-        } } });
+        return self.b.value(
+            .{
+                .schema = self.b.schemas.items[
+                    @intCast(schema)
+                ].sum[tag],
+                .expression = .{
+                    .primitive = .{
+                        .opcode = .variant_payload,
+                        .operands = &.{value},
+                        .immediate = tag,
+                        .failures = &.{.{
+                            .kind = .invalid_variant,
+                            .value = self.failure_literal,
+                        }},
+                    },
+                },
+            },
+        );
     }
     pub fn required(self: Author, sequence: Id, index: Id) Error!Id {
         const schema = self.b.values.items[@intCast(sequence)].schema;
@@ -70,7 +82,12 @@ pub const Author = struct {
             else => return error.InvalidSource,
         };
         const optional = try self.b.schema(.{ .sum = &.{ self.unit, element } });
-        return self.payload(try self.b.primitive(optional, .sequence_get, &.{ sequence, index }, 0), 1);
+        return self.payload(try self.b.primitive(
+            optional,
+            .sequence_get,
+            &.{ sequence, index },
+            0,
+        ), 1);
     }
     pub fn tuple(self: Author, schema: Id, values: []const Id) Error!Id {
         return self.b.primitive(schema, .product, values, 0);
@@ -89,32 +106,67 @@ pub const Author = struct {
             else => &.{},
         };
         var failures: [2]data.program.InstructionFailure = undefined;
-        for (faults, 0..) |fault, i| failures[i] = .{ .kind = fault, .value = self.failure_literal };
+        for (faults, 0..) |fault, i| failures[i] = .{
+            .kind = fault,
+            .value = self.failure_literal,
+        };
         return self.b.value(.{ .schema = schema, .expression = .{ .primitive = .{
             .opcode = op,
             .operands = &.{ left, right },
             .failures = failures[0..faults.len],
         } } });
     }
-    pub fn checked(self: Author, schema: Id, op: data.program.Opcode, operands: []const Id, faults: []const data.program.Fault) Error!Id {
+    pub fn checked(
+        self: Author,
+        schema: Id,
+        op: data.program.Opcode,
+        operands: []const Id,
+        faults: []const data.program.Fault,
+    ) Error!Id {
         const failures = try self.b.allocator().alloc(data.program.InstructionFailure, faults.len);
-        for (failures, faults) |*failure, fault| failure.* = .{ .kind = fault, .value = self.failure_literal };
-        return self.b.value(.{ .schema = schema, .expression = .{ .primitive = .{ .opcode = op, .operands = operands, .failures = failures } } });
+        for (failures, faults) |*failure, fault| failure.* = .{
+            .kind = fault,
+            .value = self.failure_literal,
+        };
+        return self.b.value(.{ .schema = schema, .expression = .{ .primitive = .{
+            .opcode = op,
+            .operands = operands,
+            .failures = failures,
+        } } });
     }
     pub fn concat(self: Author, left: Id, right: Id) Error!Id {
-        return self.checked(try self.b.schema(.bytes), .blob_concat, &.{ left, right }, &.{.capacity_exceeded});
+        return self.checked(
+            try self.b.schema(.bytes),
+            .blob_concat,
+            &.{ left, right },
+            &.{.capacity_exceeded},
+        );
     }
     pub fn slice(self: Author, bytes: Id, start: Id, end: Id) Error!Id {
-        return self.checked(try self.b.schema(.bytes), .blob_slice, &.{ bytes, start, end }, &.{.capacity_exceeded});
+        return self.checked(
+            try self.b.schema(.bytes),
+            .blob_slice,
+            &.{ bytes, start, end },
+            &.{.capacity_exceeded},
+        );
     }
     pub fn convert(self: Author, value: Id, target: Id, fallible: bool) Error!Id {
-        return self.checked(target, .integer_convert, &.{value}, if (fallible) &.{.arithmetic_overflow} else &.{});
+        return self.checked(
+            target,
+            .integer_convert,
+            &.{value},
+            if (fallible) &.{.arithmetic_overflow} else &.{},
+        );
     }
     pub fn call(self: Author, function: Id, arguments: []const Id) Error!Id {
         return self.b.term(.{ .call = .{ .function = function, .arguments = arguments } });
     }
     pub fn when(self: Author, condition: Id, yes: Id, no: Id) Error!Id {
-        return self.b.term(.{ .conditional = .{ .condition = condition, .when_true = yes, .when_false = no } });
+        return self.b.term(.{ .conditional = .{
+            .condition = condition,
+            .when_true = yes,
+            .when_false = no,
+        } });
     }
     pub fn fail(self: Author) Error!Id {
         return self.b.term(.{ .fail = self.unit_value });

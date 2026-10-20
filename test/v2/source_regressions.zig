@@ -14,12 +14,21 @@ fn programBytes(program: data.activation.Program) ![]u8 {
     return bytes;
 }
 
-fn rejectState(program: data.activation.Program, image: []const u8, state: data.process_state.State, expected: anyerror) !void {
+fn rejectState(
+    program: data.activation.Program,
+    image: []const u8,
+    state: data.process_state.State,
+    expected: anyerror,
+) !void {
     const bytes = try data.state_image.emit(allocator, state);
     defer allocator.free(bytes);
     var canonical = try data.state_image.decodeGraph(allocator, bytes);
     defer canonical.deinit();
-    try testing.expectError(expected, data.state_admission.validateStable(allocator, program, canonical.state));
+    try testing.expectError(expected, data.state_admission.validateStable(
+        allocator,
+        program,
+        canonical.state,
+    ));
     try testing.expectError(expected, Session.restoreImage(allocator, image, bytes));
 }
 
@@ -81,13 +90,20 @@ test "current duplicate one-shot custody rejects while distinct tokens still res
     try restored.resumeYield();
     const result = try restored.run(null);
     try testing.expect(result == .completed);
-    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, try restored.bytes(&result.completed));
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 1, 0, 0, 0, 0, 0, 0, 0 },
+        try restored.bytes(&result.completed),
+    );
 }
 
 test "current cleanup rejects duplicate obligations and a forged running continuation" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
-    var compiled = try horos.program.compile(allocator, try horos.source.examples.yieldingCleanup(&b));
+    var compiled = try horos.program.compile(
+        allocator,
+        try horos.source.examples.yieldingCleanup(&b),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer allocator.free(image);
@@ -139,10 +155,23 @@ test "current cleanup rejects duplicate obligations and a forged running continu
 
 test "current yielded cleanup preserves binary and text first cancellation through restore" {
     for ([_]u8{ 0, 1 }) |primary| {
-        for ([_]data.invocation.Reason{ .{ .text = "stop" }, .{ .bytes = &.{ 0xff, 0 } } }) |reason| {
+        for ([_]data.invocation.Reason{
+            .{
+                .text = "stop",
+            },
+            .{
+                .bytes = &.{
+                    0xff,
+                    0,
+                },
+            },
+        }) |reason| {
             var b = horos.source.Builder.init(allocator);
             defer b.deinit();
-            var compiled = try horos.program.compile(allocator, try horos.source.examples.yieldingCleanup(&b));
+            var compiled = try horos.program.compile(
+                allocator,
+                try horos.source.examples.yieldingCleanup(&b),
+            );
             defer compiled.deinit();
             const image = try programBytes(compiled.program);
             defer allocator.free(image);
@@ -163,12 +192,17 @@ test "current yielded cleanup preserves binary and text first cancellation throu
                 try testing.expectEqualStrings(if (round == 0)
                     "example/middle-cleanup"
                 else
-                    "example/outer-cleanup", compiled.program.effects[@intCast(request.requested.effect)].identity);
+                    "example/outer-cleanup", compiled.program.effects[
+                    @intCast(request.requested.effect)
+                ].identity);
                 try answerUnit(&session);
             }
             const result = try session.run(null);
             try testing.expect(result == .failed);
-            try testing.expectEqual(if (primary == 0) @as(u8, 7) else 9, (try session.bytes(&result.failed))[0]);
+            try testing.expectEqual(
+                if (primary == 0) @as(u8, 7) else 9,
+                (try session.bytes(&result.failed))[0],
+            );
             try testing.expectEqualDeep(reason, (try session.terminalExit()).cancellation.?);
         }
     }
@@ -225,7 +259,12 @@ test "current suspended delimiters cannot terminate a live return spine" {
                         node.attachment.return_to = null;
                         for ([_]data.process_state.Status{ .active, .yielded }) |status| {
                             saved.state.status = status;
-                            try rejectState(compiled.program, image, saved.state, error.InvalidState);
+                            try rejectState(
+                                compiled.program,
+                                image,
+                                saved.state,
+                                error.InvalidState,
+                            );
                         }
                         checked = true;
                     }
@@ -238,15 +277,22 @@ test "current suspended delimiters cannot terminate a live return spine" {
     try testing.expect(checked);
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqualSlices(u8, &.{ 9, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 9, 0, 0, 0, 0, 0, 0, 0 },
+        try session.bytes(&result.completed),
+    );
 }
 
-fn rejectMalformedState(program: data.activation.Program, image: []const u8, state: data.process_state.State) !void {
+fn rejectMalformedState(
+    program: data.activation.Program,
+    image: []const u8,
+    state: data.process_state.State,
+) !void {
     if (data.state_admission.validateStable(allocator, program, state)) |_| {
         return error.AcceptedMalformedState;
     } else |err| try testing.expect(err != error.OutOfMemory and err != error.Capacity);
     const bytes = data.state_image.emit(allocator, state) catch |err| {
-        // Graph encoding itself refuses dangling references before producing bytes.
         try testing.expect(err != error.OutOfMemory and err != error.Capacity);
         return;
     };
@@ -263,7 +309,11 @@ test "current pending contracts blobs and identity reject before publishing a re
     defer b.deinit();
     const bytes_type = try b.schema(.bytes);
     const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "admission/blob", .payload = bytes_type, .result = unit });
+    const effect = try b.effect(.{
+        .identity = "admission/blob",
+        .payload = bytes_type,
+        .result = unit,
+    });
     const entry = try b.declare(&.{bytes_type}, unit, &.{effect}, &.{});
     try b.define(entry, try b.term(.{ .perform = .{
         .effect = effect,
@@ -282,7 +332,9 @@ test "current pending contracts blobs and identity reject before publishing a re
     var saved = try data.state_image.decodeGraph(allocator, checkpoint);
     defer saved.deinit();
     try data.state_admission.validateStable(allocator, program, saved.state);
-    const pending = &@constCast(saved.state.nodes)[@intCast(saved.state.roots.pending.?.id)].record.pending;
+    const pending = &@constCast(saved.state.nodes)[
+        @intCast(saved.state.roots.pending.?.id)
+    ].record.pending;
     const original = pending.*;
     const blobs = @constCast(saved.state.blobs);
     try testing.expectEqual(1, blobs.len);
@@ -319,7 +371,11 @@ test "current captured delimiters and branch-local region aliases reject corrupt
     var one_shot = false;
     var multi = false;
     var local_alias = false;
-    inline for (.{ horos.source.examples.deep, horos.source.examples.choicesAll, horos.source.examples.stateLocal }) |example| {
+    inline for (.{
+        horos.source.examples.deep,
+        horos.source.examples.choicesAll,
+        horos.source.examples.stateLocal,
+    }) |example| {
         var b = horos.source.Builder.init(allocator);
         defer b.deinit();
         var compiled = try horos.program.compile(allocator, try example(&b));
@@ -338,7 +394,10 @@ test "current captured delimiters and branch-local region aliases reject corrupt
                 const original = node.*;
                 const record = node.record;
                 if ((record == .one_shot and !one_shot) or (record == .multi_template and !multi)) {
-                    const token = if (record == .one_shot) record.one_shot else record.multi_template;
+                    const token = if (record == .one_shot)
+                        record.one_shot
+                    else
+                        record.multi_template;
                     const delimiter = &nodes[@intCast(token.delimiter.id)].record.attachment;
                     try testing.expect(delimiter.phase == .suspended);
                     delimiter.phase = .active;
@@ -368,7 +427,11 @@ test "current captured delimiters and branch-local region aliases reject corrupt
     try testing.expect(one_shot and multi and local_alias);
 }
 
-fn substituteSuccessorBorrow(program: data.activation.Program, state: data.process_state.State, from: borrow_returns.ResultFrom) !void {
+fn substituteSuccessorBorrow(
+    program: data.activation.Program,
+    state: data.process_state.State,
+    from: borrow_returns.ResultFrom,
+) !void {
     const nodes = @constCast(state.nodes);
     const current = &nodes[@intCast(state.roots.current.?.id)];
     const resumed = program.blocks[@intCast(current.record.control.block)].terminator.resume_with;
@@ -396,10 +459,18 @@ fn substituteSuccessorBorrow(program: data.activation.Program, state: data.proce
 }
 
 test "current successor State and body results retain return-clause borrow constraints" {
-    for (std.enums.values(borrow_returns.ResultFrom)) |from| for ([_]bool{ false, true }) |delegated| {
+    for (std.enums.values(
+        borrow_returns.ResultFrom,
+    )) |from| for ([_]bool{
+        false,
+        true,
+    }) |delegated| {
         var b = horos.source.Builder.init(allocator);
         defer b.deinit();
-        var compiled = try horos.program.compile(allocator, try borrow_returns.scenario(&b, from, false, false, delegated));
+        var compiled = try horos.program.compile(
+            allocator,
+            try borrow_returns.scenario(&b, from, false, false, delegated),
+        );
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer allocator.free(image);
@@ -451,7 +522,10 @@ test "current restored region frames retain their saved invocation effect contra
         const schema = function.layout.slots[@intCast(block.terminator.with_region.body)];
         if (program.schemas[@intCast(schema)].internal.computation.effects.len == 0) continue;
         for (program.constructors) |constructor| if (constructor.schema == schema) {
-            wider = .{ .scope = id, .body = program.functions[@intCast(constructor.function)].entry };
+            wider = .{
+                .scope = id,
+                .body = program.functions[@intCast(constructor.function)].entry,
+            };
             break;
         };
     }
@@ -480,7 +554,12 @@ test "current restored region frames retain their saved invocation effect contra
                     var restored = try Session.restoreImage(allocator, image, checkpoint);
                     defer restored.deinit();
                     try testing.expect(try restored.run(null) == .completed);
-                } else try rejectState(program, image, saved.state, if (mask == 1) error.InvalidEffect else error.InvalidScope);
+                } else try rejectState(
+                    program,
+                    image,
+                    saved.state,
+                    if (mask == 1) error.InvalidEffect else error.InvalidScope,
+                );
             }
             return;
         }
@@ -500,7 +579,9 @@ test "current full-width zero-size cardinalities survive yield and PST3 restore"
     const tuple = try b.schema(.{ .product = &.{ integer, integer, integer } });
     const entry = try b.declare(&.{ sequence, vector, array }, tuple, &.{}, &.{});
     var lengths: [3]u64 = undefined;
-    for (&lengths, 0..) |*length, i| length.* = try b.primitive(integer, .sequence_length, &.{try b.reference(b.parameter(entry, i))}, 0);
+    for (&lengths, 0..) |*length, i| length.* = try b.primitive(integer, .sequence_length, &.{
+        try b.reference(b.parameter(entry, i)),
+    }, 0);
     const result = try b.pure(try b.primitive(tuple, .product, &lengths, 0));
     try b.define(entry, try b.term(.{ .yield_then = result }));
     const module = b.module(entry, unit);
@@ -513,7 +594,11 @@ test "current full-width zero-size cardinalities survive yield and PST3 restore"
         std.mem.writeInt(u64, expected[0..8], count, .little);
         std.mem.writeInt(u64, expected[8..16], count, .little);
         std.mem.writeInt(u64, expected[16..24], maximum, .little);
-        try expectBindingExecution(module, initial[0..writer.position], .{ .completed = &expected });
+        try expectBindingExecution(
+            module,
+            initial[0..writer.position],
+            .{ .completed = &expected },
+        );
     }
 }
 
@@ -550,7 +635,6 @@ test "current restored token interfaces bound actual captured continuation effec
             nodes[@intCast(delimiter.handler.id)].record.handler.definition = replacement;
             const current = &nodes[@intCast(saved.state.roots.current.?.id)];
             current.record.control.block = function.entry;
-            // Both clauses have the same two source parameters and custody shape.
             const frame = &current.activation.?;
             frame.position = 0;
             for (@constCast(frame.bindings)) |*binding| {
@@ -561,7 +645,10 @@ test "current restored token interfaces bound actual captured continuation effec
             defer original.deinit();
             const pending = try original.run(null);
             try testing.expect(pending == .requested);
-            try testing.expectEqualStrings("restore/B", program.effects[@intCast(pending.requested.effect)].identity);
+            try testing.expectEqualStrings(
+                "restore/B",
+                program.effects[@intCast(pending.requested.effect)].identity,
+            );
             return;
         }
     }
@@ -591,10 +678,7 @@ fn bindingBody(
         .result = integer,
         .capture_bound = &.{integer},
     } } });
-    return .{
-        .term = try b.pure(try b.lambda(helper, computation)),
-        .schema = computation,
-    };
+    return .{ .term = try b.pure(try b.lambda(helper, computation)), .schema = computation };
 }
 
 fn introduceBinding(
@@ -654,7 +738,11 @@ fn shadowedBindingExample(
 
 const BindingExit = union(enum) { completed: []const u8, failed: []const u8 };
 
-fn expectBindingExecution(module: horos.source.Module, initial: []const u8, expected: BindingExit) !void {
+fn expectBindingExecution(
+    module: horos.source.Module,
+    initial: []const u8,
+    expected: BindingExit,
+) !void {
     var compiled = try horos.program.compile(allocator, module);
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
@@ -668,7 +756,11 @@ fn expectBindingExecution(module: horos.source.Module, initial: []const u8, expe
                 switch (expected) {
                     .completed => |value| {
                         try testing.expect(result == .completed);
-                        try testing.expectEqualSlices(u8, value, try session.bytes(&result.completed));
+                        try testing.expectEqualSlices(
+                            u8,
+                            value,
+                            try session.bytes(&result.completed),
+                        );
                     },
                     .failed => |value| {
                         try testing.expect(result == .failed);
@@ -781,30 +873,37 @@ test "lexical shadowing preserves distinct owned values on consumption and failu
 fn restoredEffectExample(b: *horos.source.Builder) !horos.source.Module {
     const unit = try b.scalar(void);
     const boolean = try b.scalar(bool);
-    const a = try b.effect(.{ .identity = "restore/A", .payload = unit, .result = unit, .external = false });
-    const residual = try b.effect(.{ .identity = "restore/B", .payload = unit, .result = unit, .external = true });
+    const a = try b.effect(.{
+        .identity = "restore/A",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const residual = try b.effect(.{
+        .identity = "restore/B",
+        .payload = unit,
+        .result = unit,
+        .external = true,
+    });
     const cap = try b.schema(.{ .internal = .{ .capability = a } });
     const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
     try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
     var branches: [2]data.program.Id = undefined;
-    for (&branches, 0..) |*branch, index| {
-        const row: []const data.program.Id = if (index == 0) &.{} else &.{residual};
-        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = a, .input = unit, .answer = unit, .mode = .deep, .use = .linear, .handled = &.{a}, .effects = row, .capture_bound = &.{ unit, cap } } } });
-        const clause = try b.declare(&.{ unit, token }, unit, row, &.{});
-        const resume_term = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } });
-        const yield = try b.term(.{ .yield_then = try b.pure(try b.constant(void, {})) });
-        try b.define(clause, try b.bind(try b.variable(unit), resume_term, yield));
-        const handler = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .effects = row, .return_function = returns, .clauses = &.{.{ .effect = a, .function = clause, .resumption = token }} });
-        const body_row: []const data.program.Id = if (index == 0) &.{a} else &.{ a, residual };
-        const body = try b.declare(&.{cap}, unit, body_row, &.{});
-        const first = try b.term(.{ .perform = .{ .effect = a, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
-        const last = if (index == 0) try b.pure(try b.constant(void, {})) else try b.term(.{ .perform = .{ .effect = residual, .payload = try b.constant(void, {}) } });
-        try b.define(body, try b.bind(try b.variable(unit), first, last));
-        const signature = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = body_row } } });
-        branch.* = try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, signature) } });
-    }
+    branches = try restoredEffectBranches(.{
+        .b = b,
+        .branches = branches,
+        .unit = unit,
+        .residual = residual,
+        .a = a,
+        .cap = cap,
+        .returns = returns,
+    });
     const entry = try b.declare(&.{boolean}, unit, &.{residual}, &.{});
-    try b.define(entry, try b.term(.{ .conditional = .{ .condition = try b.reference(b.parameter(entry, 0)), .when_true = branches[1], .when_false = branches[0] } }));
+    try b.define(entry, try b.term(.{ .conditional = .{
+        .condition = try b.reference(b.parameter(entry, 0)),
+        .when_true = branches[1],
+        .when_false = branches[0],
+    } }));
     return b.module(entry, unit);
 }
 
@@ -814,36 +913,64 @@ fn capabilityExample(b: *horos.source.Builder, through_pair: bool) !struct {
     pair: u64,
 } {
     const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "saved-capability", .payload = unit, .result = unit, .external = false });
+    const effect = try b.effect(.{
+        .identity = "saved-capability",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
     const cap = try b.schema(.{ .internal = .{ .capability = effect } });
     const pair = try b.schema(.{ .product = &.{ cap, cap } });
     var handlers: [2]data.program.Id = undefined;
-    for (&handlers, [_]data.program.Id{ unit, cap }) |*handler, result| {
-        const returns = try b.declare(&.{result}, result, &.{}, &.{});
-        try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
-        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = result, .capture_bound = &.{ unit, cap, pair }, .handled = &.{effect}, .mode = .deep, .use = .linear } } });
-        const clause = try b.declare(&.{ unit, token }, result, &.{}, &.{});
-        try b.define(clause, try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } }));
-        handler.* = try b.handler(.{ .mode = .deep, .input = result, .answer = result, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
-    }
+    handlers = try capabilityHandlers(.{
+        .b = b,
+        .unit = unit,
+        .cap = cap,
+        .pair = pair,
+        .effect = effect,
+    });
     const inner = try b.declare(&.{ cap, cap }, cap, &.{}, &.{});
     const fresh = try b.reference(b.parameter(inner, 0));
     const older = try b.reference(b.parameter(inner, 1));
-    const body = if (through_pair) blk: {
-        const helper = try b.declare(&.{ cap, cap }, pair, &.{}, &.{});
-        try b.define(helper, try b.pure(try b.primitive(pair, .product, &.{ try b.reference(b.parameter(helper, 0)), try b.reference(b.parameter(helper, 1)) }, 0)));
-        const answer = try b.variable(pair);
-        break :blk try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{ fresh, older } } }), try b.pure(try b.primitive(cap, .field, &.{try b.reference(answer)}, 1)));
-    } else try b.pure(older);
-    try b.define(inner, body);
-    const inner_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ cap, cap }, .result = cap } } });
+    try defineCapabilityHelper(.{
+        .b = b,
+        .through_pair = through_pair,
+        .cap = cap,
+        .pair = pair,
+        .fresh = fresh,
+        .older = older,
+        .inner = inner,
+    });
+    const inner_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{ cap, cap },
+        .result = cap,
+    } } });
     const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
     const answer = try b.variable(cap);
-    const installed = try b.term(.{ .handle = .{ .handler = handlers[1], .body = try b.lambda(inner, inner_type), .arguments = &.{try b.reference(b.parameter(outer, 0))} } });
-    try b.define(outer, try b.bind(answer, installed, try b.term(.{ .perform = .{ .effect = effect, .capability = try b.reference(answer), .payload = try b.constant(void, {}) } })));
-    const outer_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{effect} } } });
+    const installed = try b.term(
+        .{
+            .handle = .{
+                .handler = handlers[1],
+                .body = try b.lambda(inner, inner_type),
+                .arguments = &.{try b.reference(b.parameter(outer, 0))},
+            },
+        },
+    );
+    try b.define(outer, try b.bind(answer, installed, try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try b.reference(answer),
+        .payload = try b.constant(void, {}),
+    } })));
+    const outer_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = unit,
+        .effects = &.{effect},
+    } } });
     const main = try b.declare(&.{}, unit, &.{}, &.{});
-    try b.define(main, try b.term(.{ .handle = .{ .handler = handlers[0], .body = try b.lambda(outer, outer_type) } }));
+    try b.define(main, try b.term(.{ .handle = .{
+        .handler = handlers[0],
+        .body = try b.lambda(outer, outer_type),
+    } }));
     return .{ .module = b.module(main, unit), .cap = cap, .pair = pair };
 }
 
@@ -870,16 +997,25 @@ test "saved same-family capability substitution cannot escape through a helper r
             if (snapshot.state.roots.current) |current| {
                 const node = &@constCast(snapshot.state.nodes)[@intCast(current.id)];
                 if (node.record == .control) {
-                    const function = compiled.program.blocks[@intCast(node.record.control.block)].function;
+                    const function = compiled.program.blocks[
+                        @intCast(node.record.control.block)
+                    ].function;
                     const result = compiled.program.functions[@intCast(function)].result;
-                    if ((result == cap or result == pair) and node.record.control.evidence != null) {
+                    if ((result == cap or
+                        result == pair) and node.record.control.evidence != null)
+                    {
                         const younger = node.record.control.evidence.?;
                         for (@constCast(node.activation.?.bindings)) |*binding| {
                             const value = binding.value;
                             if (value.schema != cap or value.body != .reference or
                                 value.body.reference.id == younger.id) continue;
                             binding.value.body.reference = younger;
-                            try rejectState(compiled.program, image, snapshot.state, error.InvalidScope);
+                            try rejectState(
+                                compiled.program,
+                                image,
+                                snapshot.state,
+                                error.InvalidScope,
+                            );
                             binding.value = value;
                             rejected += 1;
                         }
@@ -937,7 +1073,6 @@ fn regionInvocationExample(b: *horos.source.Builder) !horos.source.Module {
         } }));
     }
     const entry = try b.declare(&.{}, unit, &.{}, &.{});
-    // Passing an unused computation retains its code without performing its effects.
     try b.define(entry, try b.term(.{ .call = .{
         .function = wrappers[0],
         .arguments = &.{try b.lambda(wrappers[1], wide_type)},
@@ -982,66 +1117,262 @@ test "tail indirect application retains its environment without accumulating ret
     for ([_]bool{ false, true }) |non_tail| {
         var b = source.Builder.init(allocator);
         defer b.deinit();
-        const integer = try b.scalar(u64);
-        const unit = try b.scalar(void);
-        const signature = try b.reserveSchema();
-        try b.defineSchema(signature, .{ .internal = .{ .computation = .{ .parameters = &.{ signature, integer }, .result = integer, .capture_bound = &.{integer} } } });
-        const entry = try b.declare(&.{ integer, integer }, integer, &.{}, &.{});
-        const loop = try b.declare(&.{ signature, integer }, integer, &.{}, &.{});
-        const count = try b.reference(b.parameter(loop, 1));
-        const decremented = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{ .opcode = .integer_sub, .operands = &.{ count, try b.constant(u64, 1) }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }} } } });
-        var next = try b.term(.{ .apply = .{ .computation = try b.reference(b.parameter(loop, 0)), .arguments = &.{ try b.reference(b.parameter(loop, 0)), decremented } } });
-        if (non_tail) {
-            const returned = try b.variable(integer);
-            const plus = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{ .opcode = .integer_add, .operands = &.{ try b.reference(returned), try b.constant(u64, 1) }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }} } } });
-            next = try b.bind(returned, next, try b.pure(plus));
-        }
-        try b.define(loop, try b.term(.{ .conditional = .{
-            .condition = try b.primitive(try b.scalar(bool), .equal, &.{ count, try b.constant(u64, 0) }, 0),
-            .when_true = try b.pure(try b.reference(b.parameter(entry, 1))),
-            .when_false = next,
-        } }));
-        const function = try b.lambda(loop, signature);
-        try b.define(entry, try b.term(.{ .apply = .{ .computation = function, .arguments = &.{ function, try b.reference(b.parameter(entry, 0)) } } }));
-        var compiled = try horos.program.compile(allocator, b.module(entry, unit));
+        const module = try indirectTailModule(.{ .b = &b, .non_tail = non_tail });
+        var compiled = try horos.program.compile(allocator, module);
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer allocator.free(image);
-        for ([_]u64{ 7, 127, 1024 }) |count_input| {
-            var input: [16]u8 = undefined;
-            std.mem.writeInt(u64, input[0..8], count_input, .little);
-            std.mem.writeInt(u64, input[8..16], 37, .little);
-            var session = try Session.initImage(allocator, image, &input);
-            defer session.deinit();
-            var rounds: usize = 0;
-            while (true) {
-                rounds += 1;
-                try testing.expect(rounds < 4096);
-                const outcome = try session.run(13);
-                if (outcome == .completed) {
-                    const result = try session.bytes(&outcome.completed);
-                    try testing.expectEqual(@as(u64, 37) + if (non_tail) count_input else 0, std.mem.readInt(u64, result[0..8], .little));
-                    break;
-                }
-                try testing.expect(outcome == .progressed);
-                // Tail space is checked at every cut. The non-tail control
-                // intentionally grows; export it only at the existing restore
-                // points instead of constructing six unused copies per seven.
-                if (non_tail and rounds % 7 != 0) continue;
-                const state = try session.checkpoint(allocator);
-                defer allocator.free(state);
-                if (!non_tail) {
-                    var decoded = try data.state_image.decodeGraph(allocator, state);
-                    defer decoded.deinit();
-                    try testing.expect(decoded.state.nodes.len <= 16);
-                }
-                // Use the restored state, including the closure's captured seed.
-                if (rounds % 7 == 0) {
-                    const restored = try Session.restoreImage(allocator, image, state);
-                    session.deinit();
-                    session = restored;
-                }
+        try expectIndirectTailInputs(.{ .image = image, .non_tail = non_tail });
+    }
+}
+
+fn restoredEffectBranches(c: anytype) ![2]data.program.Id {
+    var branches = c.branches;
+    for (&branches, 0..) |*branch, index| {
+        const row: []const data.program.Id = if (index == 0) &.{} else &.{c.residual};
+        const token = try c.b.schema(.{ .internal = .{ .resumption = .{
+            .effect = c.a,
+            .input = c.unit,
+            .answer = c.unit,
+            .mode = .deep,
+            .use = .linear,
+            .handled = &.{c.a},
+            .effects = row,
+            .capture_bound = &.{ c.unit, c.cap },
+        } } });
+        const clause = try c.b.declare(&.{ c.unit, token }, c.unit, row, &.{});
+        const resume_term = try c.b.term(.{ .resume_value = .{
+            .resumption = try c.b.reference(c.b.parameter(clause, 1)),
+            .argument = try c.b.constant(void, {}),
+        } });
+        const yield = try c.b.term(.{ .yield_then = try c.b.pure(try c.b.constant(void, {})) });
+        try c.b.define(clause, try c.b.bind(try c.b.variable(c.unit), resume_term, yield));
+        const handler = try c.b.handler(
+            .{
+                .mode = .deep,
+                .input = c.unit,
+                .answer = c.unit,
+                .effects = row,
+                .return_function = c.returns,
+                .clauses = &.{.{
+                    .effect = c.a,
+                    .function = clause,
+                    .resumption = token,
+                }},
+            },
+        );
+        const body_row: []const data.program.Id =
+            if (index == 0) &.{c.a} else &.{ c.a, c.residual };
+        const body = try c.b.declare(&.{c.cap}, c.unit, body_row, &.{});
+        const first = try c.b.term(.{ .perform = .{
+            .effect = c.a,
+            .capability = try c.b.reference(c.b.parameter(body, 0)),
+            .payload = try c.b.constant(void, {}),
+        } });
+        const last = if (index == 0) try c.b.pure(try c.b.constant(
+            void,
+            {},
+        )) else try c.b.term(
+            .{ .perform = .{
+                .effect = c.residual,
+                .payload = try c.b.constant(void, {}),
+            } },
+        );
+        try c.b.define(body, try c.b.bind(try c.b.variable(c.unit), first, last));
+        const signature = try c.b.schema(.{ .internal = .{ .computation = .{
+            .parameters = &.{c.cap},
+            .result = c.unit,
+            .effects = body_row,
+        } } });
+        branch.* = try c.b.term(.{ .handle = .{
+            .handler = handler,
+            .body = try c.b.lambda(body, signature),
+        } });
+    }
+    return branches;
+}
+
+fn capabilityHandlers(c: anytype) ![2]data.program.Id {
+    var handlers: [2]data.program.Id = undefined;
+    for (&handlers, [_]data.program.Id{ c.unit, c.cap }) |*handler, result| {
+        const returns = try c.b.declare(&.{result}, result, &.{}, &.{});
+        try c.b.define(returns, try c.b.pure(try c.b.reference(c.b.parameter(returns, 0))));
+        const token = try c.b.schema(.{ .internal = .{ .resumption = .{
+            .effect = c.effect,
+            .input = c.unit,
+            .answer = result,
+            .capture_bound = &.{ c.unit, c.cap, c.pair },
+            .handled = &.{c.effect},
+            .mode = .deep,
+            .use = .linear,
+        } } });
+        const clause = try c.b.declare(&.{ c.unit, token }, result, &.{}, &.{});
+        try c.b.define(clause, try c.b.term(.{ .resume_value = .{
+            .resumption = try c.b.reference(c.b.parameter(clause, 1)),
+            .argument = try c.b.constant(void, {}),
+        } }));
+        handler.* = try c.b.handler(
+            .{
+                .mode = .deep,
+                .input = result,
+                .answer = result,
+                .return_function = returns,
+                .clauses = &.{.{
+                    .effect = c.effect,
+                    .function = clause,
+                    .resumption = token,
+                }},
+            },
+        );
+    }
+    return handlers;
+}
+
+fn indirectTailModule(c: anytype) !horos.source.Module {
+    const integer = try c.b.scalar(u64);
+    const unit = try c.b.scalar(void);
+    const signature = try c.b.reserveSchema();
+    try c.b.defineSchema(signature, .{ .internal = .{ .computation = .{
+        .parameters = &.{ signature, integer },
+        .result = integer,
+        .capture_bound = &.{integer},
+    } } });
+    const entry = try c.b.declare(&.{ integer, integer }, integer, &.{}, &.{});
+    const loop = try c.b.declare(&.{ signature, integer }, integer, &.{}, &.{});
+    const count = try c.b.reference(c.b.parameter(loop, 1));
+    const next = try indirectTailNext(.{
+        .context = c,
+        .integer = integer,
+        .loop = loop,
+        .count = count,
+    });
+    try c.b.define(loop, try c.b.term(.{ .conditional = .{
+        .condition = try c.b.primitive(
+            try c.b.scalar(bool),
+            .equal,
+            &.{ count, try c.b.constant(u64, 0) },
+            0,
+        ),
+        .when_true = try c.b.pure(try c.b.reference(c.b.parameter(entry, 1))),
+        .when_false = next,
+    } }));
+    const function = try c.b.lambda(loop, signature);
+    try c.b.define(entry, try c.b.term(.{ .apply = .{ .computation = function, .arguments = &.{
+        function, try c.b.reference(c.b.parameter(entry, 0)),
+    } } }));
+    return c.b.module(entry, unit);
+}
+
+fn indirectTailNext(ids: anytype) !u64 {
+    const c = ids.context;
+    const decremented = try c.b.value(
+        .{
+            .schema = ids.integer,
+            .expression = .{
+                .primitive = .{
+                    .opcode = .integer_sub,
+                    .operands = &.{ ids.count, try c.b.constant(
+                        u64,
+                        1,
+                    ) },
+                    .failures = &.{
+                        .{
+                            .kind = .arithmetic_overflow,
+                            .value = try c.b.failureLiteral(try c.b.constant(void, {})),
+                        },
+                    },
+                },
+            },
+        },
+    );
+    var next = try c.b.term(
+        .{
+            .apply = .{
+                .computation = try c.b.reference(c.b.parameter(
+                    ids.loop,
+                    0,
+                )),
+                .arguments = &.{ try c.b.reference(c.b.parameter(ids.loop, 0)), decremented },
+            },
+        },
+    );
+    if (c.non_tail) {
+        const returned = try c.b.variable(ids.integer);
+        const plus = try c.b.value(
+            .{
+                .schema = ids.integer,
+                .expression = .{
+                    .primitive = .{
+                        .opcode = .integer_add,
+                        .operands = &.{ try c.b.reference(returned), try c.b.constant(u64, 1) },
+                        .failures = &.{.{
+                            .kind = .arithmetic_overflow,
+                            .value = try c.b.failureLiteral(try c.b.constant(void, {})),
+                        }},
+                    },
+                },
+            },
+        );
+        next = try c.b.bind(returned, next, try c.b.pure(plus));
+    }
+    return next;
+}
+
+fn expectIndirectTailInputs(c: anytype) !void {
+    for ([_]u64{ 7, 127, 1024 }) |count_input| {
+        var input: [16]u8 = undefined;
+        std.mem.writeInt(u64, input[0..8], count_input, .little);
+        std.mem.writeInt(u64, input[8..16], 37, .little);
+        var session = try Session.initImage(allocator, c.image, &input);
+        defer session.deinit();
+        var rounds: usize = 0;
+        while (rounds < 4096) {
+            rounds += 1;
+            try testing.expect(rounds < 4096);
+            const outcome = try session.run(13);
+            if (outcome == .completed) {
+                const result = try session.bytes(&outcome.completed);
+                try testing.expectEqual(
+                    @as(u64, 37) + if (c.non_tail) count_input else 0,
+                    std.mem.readInt(u64, result[0..8], .little),
+                );
+                break;
+            }
+            try testing.expect(outcome == .progressed);
+            if (c.non_tail and rounds % 7 != 0) continue;
+            const state = try session.checkpoint(allocator);
+            defer allocator.free(state);
+            if (!c.non_tail) {
+                var decoded = try data.state_image.decodeGraph(allocator, state);
+                defer decoded.deinit();
+                try testing.expect(decoded.state.nodes.len <= 16);
+            }
+            if (rounds % 7 == 0) {
+                const restored = try Session.restoreImage(allocator, c.image, state);
+                session.deinit();
+                session = restored;
             }
         }
     }
+}
+
+fn defineCapabilityHelper(c: anytype) !void {
+    const body = if (c.through_pair) blk: {
+        const helper = try c.b.declare(&.{ c.cap, c.cap }, c.pair, &.{}, &.{});
+        try c.b.define(helper, try c.b.pure(try c.b.primitive(c.pair, .product, &.{
+            try c.b.reference(c.b.parameter(helper, 0)),
+            try c.b.reference(c.b.parameter(helper, 1)),
+        }, 0)));
+        const answer = try c.b.variable(c.pair);
+        break :blk try c.b.bind(answer, try c.b.term(.{ .call = .{
+            .function = helper,
+            .arguments = &.{ c.fresh, c.older },
+        } }), try c.b.pure(try c.b.primitive(
+            c.cap,
+            .field,
+            &.{try c.b.reference(answer)},
+            1,
+        )));
+    } else try c.b.pure(c.older);
+    try c.b.define(c.inner, body);
 }
