@@ -22,6 +22,8 @@ const Primitive = @FieldType(Expression, "primitive");
 const Definition = struct {
     input: Id,
     module: Id,
+    values: Id,
+    schemas: Id,
     proposal: Id,
     match: Id,
     matcher: Id,
@@ -45,12 +47,24 @@ pub fn scalar(b: *source.Builder) !source.ast.Module {
     try defineScan(e, d);
     const entry = try b.declare(&.{d.input}, d.proposal, &.{}, &.{});
     const input = try e.param(entry, 0);
-    try b.define(entry, try e.call(d.scan, &.{
-        try e.field(input, 0),
+    const module = try b.variable(d.module);
+    const values = try b.variable(d.values);
+    const schemas = try b.variable(d.schemas);
+    const scan = try e.call(d.scan, &.{
+        try b.reference(module),
+        try b.reference(values),
+        try b.reference(schemas),
         try e.field(input, 1),
         try e.field(input, 2),
         try e.literal([]const source.relation.RecordStep, &.{}),
-    }));
+    });
+    const schema_values = try field(e, source.ast.Module, try b.reference(module), "schemas");
+    const value_values = try field(e, source.ast.Module, try b.reference(module), "values");
+    try b.define(entry, try b.bind(module, try b.pure(try e.field(input, 0)), try b.bind(
+        values,
+        try b.pure(value_values),
+        try b.bind(schemas, try b.pure(schema_values), scan),
+    )));
     return b.module(entry, e.unit);
 }
 
@@ -62,19 +76,23 @@ fn definitions(e: Author) !Definition {
     const output_schema = try projection.schema(compiler.RecordProposal, b);
     const steps_schema = try projection.schema([]const source.relation.RecordStep, b);
     const ids = try projection.schema([]const Id, b);
+    const values = try projection.schema([]const source.ast.Value, b);
+    const schemas = try projection.schema([]const data.program.Schema, b);
     return .{
         .input = try projection.schema(Input, b),
         .module = module,
+        .values = values,
+        .schemas = schemas,
         .proposal = output_schema,
         .match = match,
-        .matcher = try b.declare(&.{ module, e.integer }, match, &.{}, &.{}),
-        .primitive = try b.declare(&.{ module, primitive }, match, &.{}, &.{}),
-        .projection = try b.declare(&.{ module, primitive }, match, &.{}, &.{}),
-        .leaves = try b.declare(&.{ module, ids, e.integer }, e.boolean, &.{}, &.{}),
-        .total = try b.declare(&.{ module, e.integer }, e.boolean, &.{}, &.{}),
-        .identity = try b.declare(&.{ module, primitive }, match, &.{}, &.{}),
+        .matcher = try b.declare(&.{ values, schemas, e.integer }, match, &.{}, &.{}),
+        .primitive = try b.declare(&.{ values, schemas, primitive }, match, &.{}, &.{}),
+        .projection = try b.declare(&.{ values, schemas, primitive }, match, &.{}, &.{}),
+        .leaves = try b.declare(&.{ values, schemas, ids, e.integer }, e.boolean, &.{}, &.{}),
+        .total = try b.declare(&.{ values, schemas, e.integer }, e.boolean, &.{}, &.{}),
+        .identity = try b.declare(&.{ values, schemas, primitive }, match, &.{}, &.{}),
         .scan = try b.declare(
-            &.{ module, e.integer, e.integer, steps_schema },
+            &.{ module, values, schemas, e.integer, e.integer, steps_schema },
             output_schema,
             &.{},
             &.{},
@@ -108,29 +126,29 @@ fn replacement(e: Author, d: Definition, value: Id, rule: ScalarRule) !Id {
 }
 
 fn defineMatcher(e: Author, d: Definition) !void {
-    const module = try e.param(d.matcher, 0);
-    const values = try field(e, source.ast.Module, module, "values");
-    const value = try e.required(values, try e.param(d.matcher, 1));
+    const values = try e.param(d.matcher, 0);
+    const schemas = try e.param(d.matcher, 1);
+    const value = try e.required(values, try e.param(d.matcher, 2));
     const expression = try e.field(value, 1);
     const primitive = try e.payload(expression, machines.index(Expression, "primitive"));
     try e.b.define(d.matcher, try e.when(
         try tag(e, expression, machines.index(Expression, "primitive")),
-        try e.call(d.primitive, &.{ module, primitive }),
+        try e.call(d.primitive, &.{ values, schemas, primitive }),
         try noMatch(e, d),
     ));
 }
 
 fn definePrimitive(e: Author, d: Definition) !void {
-    const module = try e.param(d.primitive, 0);
-    const op = try e.param(d.primitive, 1);
-    const values = try field(e, source.ast.Module, module, "values");
+    const values = try e.param(d.primitive, 0);
+    const schemas = try e.param(d.primitive, 1);
+    const op = try e.param(d.primitive, 2);
     const operands = try e.field(op, 1);
     const operand = try e.required(values, try e.required(operands, e.zero));
     const moved = try replacement(e, d, operand, .identity);
     var body = try e.when(
         try opcode(e, op, .field),
-        try e.call(d.projection, &.{ module, op }),
-        try e.call(d.identity, &.{ module, op }),
+        try e.call(d.projection, &.{ values, schemas, op }),
+        try e.call(d.identity, &.{ values, schemas, op }),
     );
     body = try e.when(try opcode(e, op, .move), moved, body);
     try e.b.define(d.primitive, body);
@@ -149,32 +167,35 @@ fn leaf(e: Author, value: Id) !Id {
 }
 
 fn defineLeaves(e: Author, d: Definition) !void {
-    const module = try e.param(d.leaves, 0);
-    const operands = try e.param(d.leaves, 1);
-    const index = try e.param(d.leaves, 2);
+    const values = try e.param(d.leaves, 0);
+    const schemas = try e.param(d.leaves, 1);
+    const operands = try e.param(d.leaves, 2);
+    const index = try e.param(d.leaves, 3);
     const count = try e.b.primitive(e.integer, .sequence_length, &.{operands}, 0);
     const total = try e.b.variable(e.boolean);
     const next = try e.call(d.leaves, &.{
-        module, operands, try e.binary(.integer_add, index, e.one),
+        values, schemas, operands, try e.binary(.integer_add, index, e.one),
     });
     const false_result = try e.b.pure(try e.b.constant(bool, false));
     const true_result = try e.b.pure(try e.b.constant(bool, true));
     const continue_total = try e.when(try e.b.reference(total), next, false_result);
     const advance = try e.b.bind(total, try e.call(d.total, &.{
-        module, try e.required(operands, index),
+        values, schemas, try e.required(operands, index),
     }), continue_total);
     try e.b.define(d.leaves, try e.when(try e.binary(.less, index, count), advance, true_result));
 }
 
 fn defineTotal(e: Author, d: Definition) !void {
-    const module = try e.param(d.total, 0);
-    const values = try field(e, source.ast.Module, module, "values");
-    const value = try e.required(values, try e.param(d.total, 1));
+    const values = try e.param(d.total, 0);
+    const schemas = try e.param(d.total, 1);
+    const value = try e.required(values, try e.param(d.total, 2));
     const expression = try e.field(value, 1);
     const primitive = try e.payload(expression, machines.index(Expression, "primitive"));
     const no = try e.b.pure(try e.b.constant(bool, false));
     const yes = try e.b.pure(try e.b.constant(bool, true));
-    const all_total = try e.call(d.leaves, &.{ module, try e.field(primitive, 1), e.zero });
+    const all_total = try e.call(d.leaves, &.{
+        values, schemas, try e.field(primitive, 1), e.zero,
+    });
     var accepted = no;
     inline for ([_]data.program.Opcode{
         .constant,
@@ -198,7 +219,6 @@ fn defineTotal(e: Author, d: Definition) !void {
     var body = try e.when(is_primitive, checked, no);
     inline for (.{ "literal", "variable" }) |name|
         body = try e.when(try tag(e, expression, machines.index(Expression, name)), yes, body);
-    const schemas = try field(e, source.ast.Module, module, "schemas");
     const schema = try e.required(schemas, try e.field(value, 0));
     try e.b.define(d.total, try e.when(
         try tag(e, schema, machines.index(data.program.Schema, "internal")),
@@ -208,9 +228,9 @@ fn defineTotal(e: Author, d: Definition) !void {
 }
 
 fn defineProjection(e: Author, d: Definition) !void {
-    const module = try e.param(d.projection, 0);
-    const op = try e.param(d.projection, 1);
-    const values = try field(e, source.ast.Module, module, "values");
+    const values = try e.param(d.projection, 0);
+    const schemas = try e.param(d.projection, 1);
+    const op = try e.param(d.projection, 2);
     const product = try e.required(values, try e.required(try e.field(op, 1), e.zero));
     const expression = try e.field(product, 1);
     const constructor = try e.payload(expression, machines.index(Expression, "primitive"));
@@ -219,7 +239,7 @@ fn defineProjection(e: Author, d: Definition) !void {
     const selected = try e.required(values, try e.required(operands, try e.field(op, 2)));
     const result = try replacement(e, d, selected, .projection);
     const leaf_result = try e.when(try e.b.reference(leaves), result, try noMatch(e, d));
-    const check_leaves = try e.call(d.leaves, &.{ module, operands, e.zero });
+    const check_leaves = try e.call(d.leaves, &.{ values, schemas, operands, e.zero });
     const yes = try e.b.bind(leaves, check_leaves, leaf_result);
     const constructed = try e.when(try opcode(e, constructor, .product), yes, try noMatch(e, d));
     try e.b.define(d.projection, try e.when(
@@ -230,9 +250,8 @@ fn defineProjection(e: Author, d: Definition) !void {
 }
 
 fn defineIdentity(e: Author, d: Definition) !void {
-    const module = try e.param(d.identity, 0);
-    const op = try e.param(d.identity, 1);
-    const values = try field(e, source.ast.Module, module, "values");
+    const values = try e.param(d.identity, 0);
+    const op = try e.param(d.identity, 2);
     const operands = try e.field(op, 1);
     const first_id = try e.required(operands, e.zero);
     const first = try e.required(values, first_id);
@@ -279,19 +298,20 @@ fn proposal(e: Author, d: Definition, module: Id, steps: Id) !Id {
 
 fn defineScan(e: Author, d: Definition) !void {
     const module = try e.param(d.scan, 0);
-    const index = try e.param(d.scan, 1);
-    const remaining = try e.param(d.scan, 2);
-    const steps = try e.param(d.scan, 3);
-    const values = try field(e, source.ast.Module, module, "values");
+    const values = try e.param(d.scan, 1);
+    const schemas = try e.param(d.scan, 2);
+    const index = try e.param(d.scan, 3);
+    const remaining = try e.param(d.scan, 4);
+    const steps = try e.param(d.scan, 5);
     const count = try e.b.primitive(e.integer, .sequence_length, &.{values}, 0);
     const matched = try e.b.variable(d.match);
     const result = try e.b.reference(matched);
     const next = try e.call(d.scan, &.{
-        module, try e.binary(.integer_add, index, e.one), remaining, steps,
+        module, values, schemas, try e.binary(.integer_add, index, e.one), remaining, steps,
     });
     const rewrite = try rewriteAndContinue(e, d, result);
     const choose = try e.when(try tag(e, result, 1), rewrite, next);
-    const scan = try e.b.bind(matched, try e.call(d.matcher, &.{ module, index }), choose);
+    const scan = try e.b.bind(matched, try e.call(d.matcher, &.{ values, schemas, index }), choose);
     const finish = try proposal(e, d, module, steps);
     try e.b.define(d.scan, try e.when(
         try e.binary(.less, e.zero, remaining),
@@ -302,16 +322,23 @@ fn defineScan(e: Author, d: Definition) !void {
 
 fn rewriteAndContinue(e: Author, d: Definition, matched: Id) !Id {
     const module = try e.param(d.scan, 0);
-    const index = try e.param(d.scan, 1);
+    const values = try e.param(d.scan, 1);
+    const schemas = try e.param(d.scan, 2);
+    const index = try e.param(d.scan, 3);
     const rewrite = try e.payload(matched, 1);
-    const values = try field(e, source.ast.Module, module, "values");
-    const changed = try e.checked(
-        try projection.schema([]const source.ast.Value, e.b),
+    const changed = try e.b.variable(d.values);
+    const selected = try e.b.variable(d.module);
+    const updated = try e.checked(
+        d.values,
         .sequence_set,
         &.{ values, index, try e.field(rewrite, 0) },
         &.{.invalid_index},
     );
-    const selected = try e.replace(module, machines.index(source.ast.Module, "values"), changed);
+    const replacement_module = try e.replace(
+        module,
+        machines.index(source.ast.Module, "values"),
+        try e.b.reference(changed),
+    );
     const scalar_rule = try e.tuple(try projection.schema(source.relation.Scalar, e.b), &.{
         index, try e.field(rewrite, 1),
     });
@@ -322,20 +349,27 @@ fn rewriteAndContinue(e: Author, d: Definition, matched: Id) !Id {
     );
     const step = try e.tuple(
         try projection.schema(source.relation.RecordStep, e.b),
-        &.{ selected, rule },
+        &.{ try e.b.reference(selected), rule },
     );
     const steps = try e.b.primitive(
         try projection.schema([]const source.relation.RecordStep, e.b),
         .sequence_append,
-        &.{ try e.param(d.scan, 3), step },
+        &.{ try e.param(d.scan, 5), step },
         0,
     );
-    return e.call(d.scan, &.{
-        selected,
+    const next = try e.call(d.scan, &.{
+        try e.b.reference(selected),
+        try e.b.reference(changed),
+        schemas,
         try e.binary(.integer_add, index, e.one),
-        try e.binary(.integer_sub, try e.param(d.scan, 2), e.one),
+        try e.binary(.integer_sub, try e.param(d.scan, 4), e.one),
         steps,
     });
+    return e.b.bind(changed, try e.b.pure(updated), try e.b.bind(
+        selected,
+        try e.b.pure(replacement_module),
+        next,
+    ));
 }
 
 fn enumTag(e: Author, value: Id) !Id {

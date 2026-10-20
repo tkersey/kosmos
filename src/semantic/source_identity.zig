@@ -32,6 +32,7 @@ pub fn digest() [32]u8 {
         .{ "memory_instructions.zig", @embedFile("memory_instructions.zig") },
         .{ "observe.zig", @embedFile("observe.zig") },
         .{ "projection.zig", @embedFile("projection.zig") },
+        .{ "projection_cache.zig", @embedFile("projection_cache.zig") },
         .{ "references.zig", @embedFile("references.zig") },
         .{ "record_equal.zig", @embedFile("record_equal.zig") },
         .{ "recovery.zig", @embedFile("recovery.zig") },

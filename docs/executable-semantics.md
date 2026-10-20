@@ -57,6 +57,12 @@ instead of eagerly serializing the entire tree. Exported bytes are materialized
 only when demanded. Stable guest IDs and canonical PST3 projection remain the
 public observation.
 
+Large encoded aggregates use a bounded cache of 256 projection ranges keyed by
+the exact source blob, schema, coordinate and operation. Hits still create the
+same guest values and allocations. Collection first establishes live blobs,
+then drops dead cache entries and remaps surviving keys. Public projection omits
+the cache and hydration starts it empty; exact outer execution retains it.
+
 After `blob_length` retires a backing of at least 64 KiB from the current frame,
 the authored transition runs ordinary reachability collection. A surviving direct
 alias avoids that trace; captured and indirect aliases remain tracing roots.
@@ -202,8 +208,8 @@ realization switch. Real guest cancellation remains the reference owner's duty.
 Guest views default to metadata. `RuntimeViews.captureDetailed` accepts explicit
 node, field and blob-range disclosure, reports value coverage, and includes the
 schema information needed to interpret authorized values. Borrowed PST3 decoding
-avoids copying an entire payload merely to inspect metadata. The input buffer
-must outlive the borrowed view. Outer-capsule inspection exposes the selected
+avoids copying an entire payload merely to inspect metadata; returned projections
+own their disclosed data. Outer-capsule inspection exposes the selected
 runtime's private execution state under a separate binding; it is not a
 committed guest cut.
 

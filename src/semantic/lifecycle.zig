@@ -85,7 +85,12 @@ fn emitInitialize(
         "identity",
     ), try e.literal(data.process_state.Status, .active), try e.literal(g.Roots, .{}) });
     const initial = try e.tuple(m.schema, &.{
-        program, header, try m.nodes.empty(e.b), try m.blobs.empty(e.b), e.zero,
+        program,
+        header,
+        try m.nodes.empty(e.b),
+        try m.blobs.empty(e.b),
+        e.zero,
+        try m.cache.entries.empty(e),
     });
     const vals = try projection.schema([]const g.Value, e.b);
     const loop = try e.b.declare(&.{

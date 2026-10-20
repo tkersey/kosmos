@@ -6,6 +6,267 @@ const Author = @import("author.zig").Author;
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
 
+const ProjectionCacheFixture = struct {
+    const Id = data.program.Id;
+    const Entry = struct {
+        slot: u64,
+        value: struct {
+            blob: u64,
+            schema: u64,
+            index: u64,
+            kind: u64,
+            range: @import("projection_cache.zig").Range,
+        },
+    };
+    const Result = struct {
+        values: [7][]const u8,
+        allocations: [7]u64,
+        warm: []const Entry,
+        collected: []const Entry,
+        hydrated: []const Entry,
+        before: data.process_state.State,
+        invisible: data.process_state.State,
+        after: data.process_state.State,
+        restored: data.process_state.State,
+    };
+
+    e: Author,
+    m: @import("machine.zig").Definition,
+    v: @import("values.zig").Definition,
+    read: Id,
+    hit: Id,
+
+    fn init(b: *source.Builder) !ProjectionCacheFixture {
+        const e = try Author.init(b);
+        const m = try @import("machine.zig").define(b);
+        const v = try @import("values.zig").define(b, m);
+        const c = try @import("collections.zig").define(b, m);
+        const read = try b.declare(&.{ m.schema, v.value, e.integer }, v.result, &.{}, &.{});
+        const hit = try b.declare(&.{ m.schema, v.value, e.integer }, v.result, &.{}, &.{});
+        const view = try b.variable(c.schema);
+        try b.define(read, try b.bind(view, try e.call(c.view, &.{
+            try e.param(read, 0), try e.param(read, 1),
+        }), try e.call(c.cached_item, &.{
+            try e.param(read, 0),  try e.param(read, 1),
+            try b.reference(view), try e.param(read, 2),
+        })));
+        try b.define(hit, try @import("projection_cache.zig").read(
+            e,
+            m,
+            try e.param(hit, 0),
+            try e.param(hit, 1),
+            try e.param(hit, 2),
+            .element,
+            try e.fail(),
+        ));
+        return .{ .e = e, .m = m, .v = v, .read = read, .hit = hit };
+    }
+
+    fn build(f: ProjectionCacheFixture) !source.Module {
+        const e = f.e;
+        const b = e.b;
+        const output = try projection.schema(Result, b);
+        const main = try b.declare(&.{ f.m.program, f.m.state, f.v.value }, output, &.{}, &.{});
+        const initial = try b.variable(f.m.schema);
+        var reads: [7]Id = undefined;
+        for (&reads) |*read| read.* = try b.variable(f.v.result);
+        const collected = try b.variable(f.m.schema);
+        const projected = try b.variable(f.m.state);
+        const hydrated = try b.variable(f.m.schema);
+        const live = try e.param(main, 2);
+        const dead = try e.replace(live, 1, try e.variant(
+            b.schemas.items[@intCast(f.v.value)].product[1],
+            @backingInt(data.graph.ValueTag.blob),
+            try e.literal(data.graph.BlobRef, .{ .id = 0 }),
+        ));
+        var body = try f.result(reads, collected, hydrated, output);
+        const sources = [_]Id{ live, live, live, live, dead, dead, dead };
+        const indices = [_]u64{ 0, 0, 256, 0, 10, 0, 0 };
+        var i: usize = reads.len;
+        while (i != 0) {
+            i -= 1;
+            const input = if (i == 0) try b.reference(initial) else if (i == 5)
+                try b.reference(collected)
+            else if (i == 6)
+                try b.reference(hydrated)
+            else
+                try e.field(try b.reference(reads[i - 1]), 0);
+            body = try b.bind(reads[i], try e.call(if (i == 1 or i == 5) f.hit else f.read, &.{
+                input, sources[i], try b.constant(u64, indices[i]),
+            }), body);
+            if (i == 1) body = try b.term(.{ .yield_then = body });
+            if (i == 5) {
+                body = try b.bind(hydrated, try e.call(f.m.hydrate, &.{
+                    try e.param(main, 0), try b.reference(projected),
+                }), body);
+                body = try b.bind(projected, try e.call(f.m.project, &.{
+                    try b.reference(collected),
+                }), body);
+                body = try b.bind(collected, try e.call(
+                    (try @import("collect.zig").define(b, f.m)).run,
+                    &.{try e.field(try b.reference(reads[4]), 0)},
+                ), body);
+            }
+        }
+        try b.define(main, try b.bind(initial, try e.call(f.m.hydrate, &.{
+            try e.param(main, 0), try e.param(main, 1),
+        }), body));
+        return b.module(main, e.unit);
+    }
+
+    fn result(f: ProjectionCacheFixture, reads: [7]Id, collected: Id, hydrated: Id, shape: Id) !Id {
+        const e = f.e;
+        const b = e.b;
+        var bytes: [7]Id = undefined;
+        var allocations: [7]Id = undefined;
+        var states: [7]Id = undefined;
+        for (reads, 0..) |read, i| {
+            bytes[i] = try b.variable(try b.schema(.bytes));
+            states[i] = try e.field(try b.reference(read), 0);
+            allocations[i] = try e.field(try f.m.field(e, states[i], .blobs), 0);
+        }
+        const machines = [_]Id{ states[4], try b.reference(collected), try b.reference(hydrated) };
+        var entries: [3]Id = undefined;
+        for (&entries) |*entry| entry.* = try b.variable(f.m.cache.entries.entries);
+        var projected: [4]Id = undefined;
+        for (&projected) |*state| state.* = try b.variable(f.m.state);
+        const invisible = try e.replace(
+            states[4],
+            @backingInt(@import("machine.zig").Field.cache),
+            try f.m.cache.entries.empty(e),
+        );
+        const public = [_]Id{ states[4], invisible, states[5], states[6] };
+        var byte_values: [7]Id = undefined;
+        for (bytes, 0..) |value, i| byte_values[i] = try b.reference(value);
+        var body = try b.pure(try e.tuple(shape, &.{
+            try b.primitive(try projection.schema([7][]const u8, b), .sequence, &byte_values, 0),
+            try b.primitive(try projection.schema([7]u64, b), .sequence, &allocations, 0),
+            try b.reference(entries[0]),
+            try b.reference(entries[1]),
+            try b.reference(entries[2]),
+            try b.reference(projected[0]),
+            try b.reference(projected[1]),
+            try b.reference(projected[2]),
+            try b.reference(projected[3]),
+        }));
+        for (projected, public) |target, input|
+            body = try b.bind(target, try e.call(f.m.project, &.{input}), body);
+        for (entries, machines) |target, input| body = try b.bind(target, try e.call(
+            f.m.cache.entries.to_sequence,
+            &.{try f.m.field(e, input, .cache)},
+        ), body);
+        for (bytes, reads, states) |target, read, state| body = try b.bind(
+            target,
+            try e.call(f.v.bytes, &.{ state, try e.field(try b.reference(read), 1) }),
+            body,
+        );
+        return body;
+    }
+};
+
+test "projection cache preserves collisions allocation collection and restored machine cuts" {
+    const native = @import("native_baseline");
+    const base = @import("../base/session.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const bytes = try b.schema(.bytes);
+    const sequence = try b.schema(.{ .seq = bytes });
+    const main = try b.declare(&.{sequence}, sequence, &.{}, &.{});
+    const argument = try b.reference(b.functions.items[@intCast(main)].parameters[0]);
+    try b.define(main, try b.pure(argument));
+    const guest_image = try support.encode(b.module(main, try b.scalar(void)));
+    defer a.free(guest_image);
+    const admitted = try data.program_image.Admitted.decode(a, guest_image);
+    defer admitted.deinit();
+    const program = try projection.programBytes(a, admitted);
+    defer a.free(program);
+    var storage: [257][16]u8 = undefined;
+    var elements: [257][]const u8 = undefined;
+    for (&storage, &elements, 0..) |*element, *slice, i| {
+        @memset(element, @truncate(i));
+        element[1] = @truncate(i >> 8);
+        slice.* = element;
+    }
+    const input = try projection.encode([]const []const u8, a, &elements);
+    defer a.free(input);
+    var oracle = try native.Session.initImage(a, guest_image, input);
+    defer oracle.deinit();
+    try std.testing.expect(try oracle.run(null) == .completed);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    const value: data.graph.Value = .{ .schema = sequence, .body = .{ .blob = .{ .id = 1 } } };
+    const state = try projection.encode(data.process_state.State, a, .{
+        .program_identity = admitted.identity(),
+        .status = .completed,
+        .roots = .{ .exit = .{ .id = 0 } },
+        .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = value } } } }},
+        .blobs = &.{
+            .{ .schema = sequence, .bytes = input },
+            .{ .schema = sequence, .bytes = input },
+        },
+    });
+    defer a.free(state);
+    const encoded_value = try projection.encode(data.graph.Value, a, value);
+    defer a.free(encoded_value);
+    const arguments = try std.mem.concat(a, u8, &.{ program, state, encoded_value });
+    defer a.free(arguments);
+    var fixture = source.Builder.init(a);
+    defer fixture.deinit();
+    const image = try support.encode(try (try ProjectionCacheFixture.init(&fixture)).build());
+    defer a.free(image);
+    var session = try base.Session.initImage(a, image, arguments, .{});
+    defer session.deinit();
+    try std.testing.expect(try session.run(null) == .yielded);
+    const checkpoint = try session.checkpoint(a);
+    defer a.free(checkpoint);
+    var restored = try base.Session.restoreImage(a, image, checkpoint, .{});
+    defer restored.deinit();
+    try restored.resumeYield();
+    const outcome = try restored.run(null);
+    try std.testing.expect(outcome == .completed);
+    var result = try projection.decode(
+        ProjectionCacheFixture.Result,
+        a,
+        try restored.bytes(&outcome.completed),
+    );
+    defer result.deinit();
+    try checkProjectionCacheResult(result.value, &elements, expected, sequence);
+}
+
+fn checkProjectionCacheResult(
+    result: ProjectionCacheFixture.Result,
+    elements: []const []const u8,
+    expected: []const u8,
+    sequence: u64,
+) !void {
+    for (result.values, [_]usize{ 0, 0, 256, 0, 10, 0, 0 }) |actual, index| {
+        const encoded = try projection.encode([]const u8, a, elements[index]);
+        defer a.free(encoded);
+        try std.testing.expectEqualSlices(u8, encoded, actual);
+    }
+    try std.testing.expectEqualSlices(u64, &.{ 3, 4, 5, 6, 7, 2, 2 }, &result.allocations);
+    try std.testing.expectEqual(2, result.warm.len);
+    try std.testing.expectEqual(3, result.warm[0].slot);
+    try std.testing.expectEqual(1, result.warm[0].value.blob);
+    try std.testing.expectEqual(0, result.warm[0].value.index);
+    try std.testing.expectEqual(8, result.warm[1].slot);
+    try std.testing.expectEqual(0, result.warm[1].value.blob);
+    try std.testing.expectEqual(10, result.warm[1].value.index);
+    try std.testing.expectEqual(1, result.collected.len);
+    try std.testing.expectEqual(0, result.hydrated.len);
+    try std.testing.expectEqual(2, result.collected[0].slot);
+    try std.testing.expectEqual(0, result.collected[0].value.blob);
+    try std.testing.expectEqual(sequence, result.collected[0].value.schema);
+    try std.testing.expectEqual(0, result.collected[0].value.index);
+    try std.testing.expectEqualDeep(result.before, result.invisible);
+    try std.testing.expectEqualDeep(result.after, result.restored);
+    var canonical = try data.state_image.canonicalize(a, result.after);
+    defer canonical.deinit();
+    const actual = try data.state_image.emit(a, canonical.state);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
 test "authored lexical closures and bounded data preserve every native cut" {
     var core = try support.prepareCore();
     defer core.deinit();

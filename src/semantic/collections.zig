@@ -21,7 +21,14 @@ pub const Collection = struct {
     count: u64,
     storage: union(enum) { encoded: Encoded, fields: []const g.Value },
 };
-pub const Definition = struct { schema: Id, view: Id, range: Id, item: Id, rebuild: Id };
+pub const Definition = struct {
+    schema: Id,
+    view: Id,
+    range: Id,
+    item: Id,
+    cached_item: Id,
+    rebuild: Id,
+};
 
 pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     const cache = try b.specialization(Definition, "kosmos.semantic.collections/1", m.schema);
@@ -41,6 +48,9 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
         .view = try b.declare(&.{ m.schema, v.value }, schema, &.{}, &.{}),
         .range = try b.declare(&.{ m.program, schema, e.integer, e.integer }, schema, &.{}, &.{}),
         .item = try b.declare(&.{ m.schema, schema, e.integer }, v.result, &.{}, &.{}),
+        .cached_item = try b.declare(&.{
+            m.schema, v.value, schema, e.integer,
+        }, v.result, &.{}, &.{}),
         .rebuild = try b.declare(&.{
             m.schema, e.integer, e.integer, segments,
         }, v.result, &.{}, &.{}),
@@ -48,8 +58,85 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     try emitView(m, e, v, aggregate, codec, schema, encoded_type, storage_type, bytes, d);
     try emitDrop(e, v, codec, schema, encoded_type, storage_type, fields, d);
     try emitItem(m, e, v, schema, encoded_type, fields, d);
+    try emitCachedItem(m, e, codec, encoded_type, fields, d);
     try emitEntry(m, e, v, aggregate, codec, schema, encoded_type, fields, bytes, segments, d);
     return cache.finish(b, d);
+}
+
+fn emitCachedItem(
+    m: machines.Definition,
+    e: Author,
+    codec: codecs.Definition,
+    encoded_type: Id,
+    fields: Id,
+    d: Definition,
+) Error!void {
+    const input = try e.param(d.cached_item, 0);
+    const value = try e.param(d.cached_item, 1);
+    const collection = try e.param(d.cached_item, 2);
+    const index = try e.param(d.cached_item, 3);
+    const encoded_var = try e.b.variable(encoded_type);
+    const fields_var = try e.b.variable(fields);
+    const encoded = try e.b.reference(encoded_var);
+    const range = try cachedRange(m, e, codec, input, value, collection, index, encoded);
+    const cached = try @import("projection_cache.zig").read(
+        e,
+        m,
+        input,
+        value,
+        index,
+        .element,
+        range,
+    );
+    try e.b.define(d.cached_item, try e.b.term(.{ .match_sum = .{
+        .value = try e.field(collection, 2),
+        .cases = &.{
+            .{ .variable = encoded_var, .body = cached },
+            .{ .variable = fields_var, .body = try e.call(d.item, &.{
+                input, collection, index,
+            }) },
+        },
+    } }));
+}
+
+fn cachedRange(
+    m: machines.Definition,
+    e: Author,
+    codec: codecs.Definition,
+    input: Id,
+    value: Id,
+    collection: Id,
+    index: Id,
+    encoded: Id,
+) Error!Id {
+    const program = try m.field(e, input, .program);
+    const element = try e.field(collection, 0);
+    const bytes = try e.field(encoded, 0);
+    const begin = try e.b.variable(e.integer);
+    const end = try e.b.variable(e.integer);
+    const from_start = try e.call(codec.skip_many, &.{
+        program, element, bytes, try e.field(encoded, 1), index,
+    });
+    const optional = try e.b.schema(.{ .sum = &.{ e.unit, m.cache.range } });
+    const prior = try e.b.variable(optional);
+    const absent = try e.b.variable(e.unit);
+    const present = try e.b.variable(m.cache.range);
+    const seek = try e.b.bind(prior, try @import("projection_cache.zig").lookup(
+        e,
+        m,
+        input,
+        value,
+        try e.binary(.integer_sub, index, e.one),
+    ), try e.b.term(.{ .match_sum = .{ .value = try e.b.reference(prior), .cases = &.{
+        .{ .variable = absent, .body = from_start },
+        .{ .variable = present, .body = try e.b.pure(try e.field(try e.b.reference(present), 2)) },
+    } } }));
+    const start = try e.when(try e.binary(.equal, index, e.zero), from_start, seek);
+    return e.b.bind(begin, start, try e.b.bind(end, try e.call(codec.skip, &.{
+        program, element, bytes, try e.b.reference(begin),
+    }), try e.b.pure(try e.tuple(m.cache.range, &.{
+        element, try e.b.reference(begin), try e.b.reference(end),
+    }))));
 }
 
 fn emitView(

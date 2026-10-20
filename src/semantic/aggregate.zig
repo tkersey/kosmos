@@ -267,27 +267,14 @@ fn defineFromFields(
 
 fn defineRead(
     e: Author,
-    v: anytype,
-    input: Id,
+    m: machines.Definition,
     start: Id,
     end: Id,
     child_schema: Id,
-    bytes_value: Id,
-    literal_type: Id,
 ) Error!Id {
-    return try e.call(
-        v.literal,
-        &.{
-            input,
-            try e.tuple(
-                literal_type,
-                &.{
-                    try e.b.reference(child_schema),
-                    try e.slice(bytes_value, try e.b.reference(start), try e.b.reference(end)),
-                },
-            ),
-        },
-    );
+    return e.b.pure(try e.tuple(m.cache.range, &.{
+        try e.b.reference(child_schema), try e.b.reference(start), try e.b.reference(end),
+    }));
 }
 
 fn emitConstructOrdinary(
@@ -576,16 +563,12 @@ fn emitAccessors(
         const child_schema = try b.variable(e.integer);
         const decoded = try b.variable(try projection.schema(codecs.Read, b));
         const bytes_value = try b.reference(encoded);
-        const literal_type = try projection.schema(p.Literal, b);
         var read = try defineRead(
             e,
-            v,
-            input,
+            m,
             start,
             end,
             child_schema,
-            bytes_value,
-            literal_type,
         );
         read = try readChild(
             e,
@@ -602,6 +585,15 @@ fn emitAccessors(
             read,
         );
         read = try b.bind(encoded, try e.call(v.bytes, &.{ input, value }), read);
+        read = try @import("projection_cache.zig").read(
+            e,
+            m,
+            input,
+            value,
+            index,
+            if (variant) .payload else .field,
+            read,
+        );
         try b.define(entry, try e.when(try e.binary(.equal, try b.primitive(
             e.integer,
             .variant_tag,
