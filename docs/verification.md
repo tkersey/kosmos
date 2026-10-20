@@ -1,5 +1,10 @@
 # Verification boundaries
 
+[TigerStyle](https://github.com/tkersey/kosmos/blob/main/docs/tiger-style.md) adds a concurrent development-source gate. Its native
+auditor self-tests and committed-change ratchet must pass along with all existing
+runtime qualification lanes. `Complete qualification` requires both results and
+retains the 600-second complete-workflow limit.
+
 The native roots preserve the evaluator and language contracts:
 
 - `check-storage`: current base storage and allocation contracts.
