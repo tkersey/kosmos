@@ -75,17 +75,17 @@ pub fn readState(
 
 pub fn encode(comptime T: type, a: std.mem.Allocator, value: T) Error![]u8 {
     var measure: wire.Writer = .{};
-    try write(T, value, &measure);
+    try Writer(T).write(value, &measure);
     const bytes = try a.alloc(u8, measure.position);
     errdefer a.free(bytes);
     var output: wire.Writer = .{ .output = bytes };
-    try write(T, value, &output);
+    try Writer(T).write(value, &output);
     return bytes;
 }
 
 pub fn encodeInto(comptime T: type, buffer: []u8, value: T) Error![]const u8 {
     var writer: wire.Writer = .{ .output = buffer };
-    try write(T, value, &writer);
+    try Writer(T).write(value, &writer);
     return buffer[0..writer.position];
 }
 
@@ -104,23 +104,30 @@ pub fn decode(comptime T: type, a: std.mem.Allocator, bytes: []const u8) Error!O
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     var input: wire.Reader = .{ .input = bytes };
-    const value = try read(T, arena.allocator(), &input);
+    const value = try Reader(T).read(arena.allocator(), &input);
     try input.finish();
     return .{ .arena = arena, .value = value };
 }
 
 // This is the existing schema-directed value encoding, with no new envelope.
 // Reflection follows record fields, so record additions cannot be silently lost.
-inline fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
-    @setEvalBranchQuota(100_000);
-    _ = comptime native.info(T);
+fn Writer(comptime T: type) type {
+    _ = native.info(T);
+    return struct {
+        fn write(value: T, output: *wire.Writer) Error!void {
+            return writeValue(T, value, output);
+        }
+    };
+}
+
+fn writeValue(comptime T: type, value: T, output: *wire.Writer) Error!void {
     switch (@typeInfo(T)) {
         .void => {},
         .bool => try output.byte(@intFromBool(value)),
         .int => try output.fixed(T, value),
         .@"enum" => try output.fixed(u32, @intCast(@backingInt(value))),
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Child|
-            try @call(.always_inline, write, .{ Child, @field(value, name), output }),
+            try Writer(Child).write(@field(value, name), output),
         .@"union" => |info| inline for (
             info.field_names,
             info.field_types,
@@ -128,27 +135,33 @@ inline fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
         ) |name, Child, index| {
             if (std.meta.activeTag(value) == @field(info.tag_type.?, name)) {
                 try output.natural(index);
-                return @call(.always_inline, write, .{ Child, @field(value, name), output });
+                return Writer(Child).write(@field(value, name), output);
             }
         },
         .optional => |info| {
             try output.natural(if (value == null) 0 else 1);
-            if (value) |present| try @call(.always_inline, write, .{ info.child, present, output });
+            if (value) |present| try Writer(info.child).write(present, output);
         },
         .array => |info| for (value) |element|
-            try @call(.always_inline, write, .{ info.child, element, output }),
+            try Writer(info.child).write(element, output),
         .pointer => |info| {
             try output.natural(value.len);
             if (info.child == u8) return output.put(value);
-            if (comptime minimum(info.child) == 0) return;
+            if (comptime Minimum(info.child).value == 0) return;
             for (value) |element|
-                try @call(.always_inline, write, .{ info.child, element, output });
+                try Writer(info.child).write(element, output);
         },
         else => @compileError("unsupported guest projection field " ++ @typeName(T)),
     }
 }
 
-inline fn minimum(comptime T: type) usize {
+fn Minimum(comptime T: type) type {
+    return struct {
+        const value = minimumBytes(T);
+    };
+}
+
+fn minimumBytes(comptime T: type) usize {
     return switch (@typeInfo(T)) {
         .void => 0,
         .bool => 1,
@@ -156,18 +169,25 @@ inline fn minimum(comptime T: type) usize {
         .@"enum" => 4,
         .@"struct" => |info| blk: {
             var size: usize = 0;
-            for (info.field_types) |Child| size += @call(.always_inline, minimum, .{Child});
+            for (info.field_types) |Child| size += Minimum(Child).value;
             break :blk size;
         },
-        .array => |info| info.len * @call(.always_inline, minimum, .{info.child}),
+        .array => |info| info.len * Minimum(info.child).value,
         .@"union", .optional, .pointer => 1,
         else => @compileError("unsupported guest projection field " ++ @typeName(T)),
     };
 }
 
-inline fn read(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Error!T {
-    @setEvalBranchQuota(100_000);
-    _ = comptime native.info(T);
+fn Reader(comptime T: type) type {
+    _ = native.info(T);
+    return struct {
+        fn read(a: std.mem.Allocator, input: *wire.Reader) Error!T {
+            return readValue(T, a, input);
+        }
+    };
+}
+
+fn readValue(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Error!T {
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => switch (try input.byte()) {
@@ -185,7 +205,7 @@ inline fn read(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Erro
         .@"struct" => |info| blk: {
             var result: T = undefined;
             inline for (info.field_names, info.field_types) |name, Child|
-                @field(result, name) = try @call(.always_inline, read, .{ Child, a, input });
+                @field(result, name) = try Reader(Child).read(a, input);
             break :blk result;
         },
         .@"union" => |info| blk: {
@@ -194,19 +214,19 @@ inline fn read(comptime T: type, a: std.mem.Allocator, input: *wire.Reader) Erro
                 if (tag == index) break :blk @unionInit(
                     T,
                     name,
-                    try @call(.always_inline, read, .{ Child, a, input }),
+                    try Reader(Child).read(a, input),
                 );
             break :blk error.InvalidValue;
         },
         .optional => |info| switch (try input.natural()) {
             0 => null,
-            1 => try @call(.always_inline, read, .{ info.child, a, input }),
+            1 => try Reader(info.child).read(a, input),
             else => error.InvalidValue,
         },
         .array => |info| blk: {
             var result: T = undefined;
             for (&result) |*element|
-                element.* = try @call(.always_inline, read, .{ info.child, a, input });
+                element.* = try Reader(info.child).read(a, input);
             break :blk result;
         },
         .pointer => |info| readSlice(info.child, a, input),
@@ -296,21 +316,21 @@ test "projection rejects hostile counts before container allocation" {
     try std.testing.expectError(error.InvalidValue, decode(?u64, a, &.{2}));
 }
 
-inline fn readSlice(comptime Child: type, a: std.mem.Allocator, input: *wire.Reader) Error![]Child {
+fn readSlice(comptime Child: type, a: std.mem.Allocator, input: *wire.Reader) Error![]Child {
     const count = try input.count();
-    const size = comptime minimum(Child);
+    const size = comptime Minimum(Child).value;
     if (size != 0 and count > (input.input.len - input.position) / size)
         return error.Truncated;
     _ = std.math.mul(usize, count, @sizeOf(Child)) catch return error.Capacity;
     const result = try a.alloc(Child, count);
     if (Child == u8) {
         @memcpy(result, try input.take(count));
-    } else if (comptime minimum(Child) == 0) {
+    } else if (comptime Minimum(Child).value == 0) {
         // A zero-byte contract has exactly one value. Avoid a loop
         // proportional to a compressed unit count.
         if (count != 0)
-            @memset(result, try @call(.always_inline, read, .{ Child, a, input }));
+            @memset(result, try Reader(Child).read(a, input));
     } else for (result) |*element|
-        element.* = try @call(.always_inline, read, .{ Child, a, input });
+        element.* = try Reader(Child).read(a, input);
     return result;
 }

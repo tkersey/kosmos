@@ -7,42 +7,50 @@ const projection = @import("projection.zig");
 const Author = @import("author.zig").Author;
 const Id = data.program.Id;
 
-pub inline fn define(comptime T: type, b: *source.Builder) source.Error!Id {
-    @setEvalBranchQuota(100_000);
-    const schema = try projection.schema(T, b);
-    const cache = try b.specialization(
-        Id,
-        "kosmos.semantic.record-equal/1/" ++ @typeName(T),
-        schema,
-    );
-    if (cache.cached) |saved| return saved;
-    const e = try Author.init(b);
-    const entry = try b.declare(&.{ schema, schema }, e.boolean, &.{}, &.{});
-    const left = try e.param(entry, 0);
-    const right = try e.param(entry, 1);
-    const yes = try b.pure(try b.constant(bool, true));
-    const no = try b.pure(try b.constant(bool, false));
-    const body = switch (@typeInfo(T)) {
-        .void => yes,
-        .bool, .int => try b.pure(try e.binary(.equal, left, right)),
-        .@"enum" => try b.pure(try e.binary(.equal, try b.primitive(
-            try b.scalar(u32),
-            .enum_tag,
-            &.{left},
-            0,
-        ), try b.primitive(try b.scalar(u32), .enum_tag, &.{right}, 0))),
-        .@"struct" => |info| try structure(info, b, e, left, right, yes, no),
-        .@"union" => |info| try unionRecord(info, b, e, left, right, no),
-        .optional => |info| try optionalRecord(info, b, e, left, right, yes, no),
-        .array => |info| try arrayRecord(info, b, e, left, right, yes, no),
-        .pointer => |info| try sliceRecord(info, b, e, schema, entry, left, right, yes, no),
-        else => @compileError("not an ordinary record: " ++ @typeName(T)),
-    };
-    try b.define(entry, body);
-    return cache.finish(b, entry);
+pub fn define(comptime T: type, b: *source.Builder) source.Error!Id {
+    return Equality(T).define(b);
 }
 
-inline fn structure(
+fn Equality(comptime T: type) type {
+    _ = data.schema.native.info(T);
+    return struct {
+        fn define(b: *source.Builder) source.Error!Id {
+            const schema = try projection.schema(T, b);
+            const cache = try b.specialization(
+                Id,
+                "kosmos.semantic.record-equal/1/" ++ @typeName(T),
+                schema,
+            );
+            if (cache.cached) |saved| return saved;
+            const e = try Author.init(b);
+            const entry = try b.declare(&.{ schema, schema }, e.boolean, &.{}, &.{});
+            const left = try e.param(entry, 0);
+            const right = try e.param(entry, 1);
+            const yes = try b.pure(try b.constant(bool, true));
+            const no = try b.pure(try b.constant(bool, false));
+            const body = switch (@typeInfo(T)) {
+                .void => yes,
+                .bool, .int => try b.pure(try e.binary(.equal, left, right)),
+                .@"enum" => try b.pure(try e.binary(.equal, try b.primitive(
+                    try b.scalar(u32),
+                    .enum_tag,
+                    &.{left},
+                    0,
+                ), try b.primitive(try b.scalar(u32), .enum_tag, &.{right}, 0))),
+                .@"struct" => |info| try structure(info, b, e, left, right, yes, no),
+                .@"union" => |info| try unionRecord(info, b, e, left, right, no),
+                .optional => |info| try optionalRecord(info, b, e, left, right, yes, no),
+                .array => |info| try arrayRecord(info, b, e, left, right, yes, no),
+                .pointer => |info| try sliceRecord(info, b, e, schema, entry, left, right, yes, no),
+                else => @compileError("not an ordinary record: " ++ @typeName(T)),
+            };
+            try b.define(entry, body);
+            return cache.finish(b, entry);
+        }
+    };
+}
+
+fn structure(
     comptime info: anytype,
     b: *source.Builder,
     e: Author,
@@ -55,14 +63,14 @@ inline fn structure(
     inline for (0..info.field_types.len) |reverse| {
         const i = info.field_types.len - 1 - reverse;
         const same = try b.variable(e.boolean);
-        next = try b.bind(same, try e.call(try define(info.field_types[i], b), &.{
+        next = try b.bind(same, try e.call(try Equality(info.field_types[i]).define(b), &.{
             try e.field(left, i), try e.field(right, i),
         }), try e.when(try b.reference(same), next, no));
     }
     return next;
 }
 
-inline fn unionRecord(
+fn unionRecord(
     comptime info: anytype,
     b: *source.Builder,
     e: Author,
@@ -77,7 +85,7 @@ inline fn unionRecord(
     var cases: [info.field_types.len]Case = undefined;
     inline for (info.field_types, 0..) |Field, i| {
         const variable = try b.variable(try projection.schema(Field, b));
-        cases[i] = .{ .variable = variable, .body = try e.call(try define(Field, b), &.{
+        cases[i] = .{ .variable = variable, .body = try e.call(try Equality(Field).define(b), &.{
             try b.reference(variable), try e.payload(right, i),
         }) };
     }
@@ -92,7 +100,7 @@ inline fn unionRecord(
     }), no);
 }
 
-inline fn optionalRecord(
+fn optionalRecord(
     comptime info: anytype,
     b: *source.Builder,
     e: Author,
@@ -119,7 +127,7 @@ inline fn optionalRecord(
             empty,
             yes,
             try e.call(
-                try define(info.child, b),
+                try Equality(info.child).define(b),
                 &.{ try e.payload(left, 1), try e.payload(right, 1) },
             ),
         ),
@@ -127,7 +135,7 @@ inline fn optionalRecord(
     );
 }
 
-inline fn arrayRecord(
+fn arrayRecord(
     comptime info: anytype,
     b: *source.Builder,
     e: Author,
@@ -140,14 +148,14 @@ inline fn arrayRecord(
     for (0..info.len) |reverse| {
         const at = try b.constant(u64, info.len - 1 - reverse);
         const same = try b.variable(e.boolean);
-        next = try b.bind(same, try e.call(try define(info.child, b), &.{
+        next = try b.bind(same, try e.call(try Equality(info.child).define(b), &.{
             try e.required(left, at), try e.required(right, at),
         }), try e.when(try b.reference(same), next, no));
     }
     return next;
 }
 
-inline fn sliceRecord(
+fn sliceRecord(
     comptime info: anytype,
     b: *source.Builder,
     e: Author,
@@ -179,7 +187,7 @@ inline fn sliceRecord(
     const rp = try e.payload(r, 1);
     const same = try b.variable(e.boolean);
     const next = try e.call(entry, &.{ try e.field(lp, 1), try e.field(rp, 1) });
-    const elements = try b.bind(same, try e.call(try define(info.child, b), &.{
+    const elements = try b.bind(same, try e.call(try Equality(info.child).define(b), &.{
         try e.field(lp, 0), try e.field(rp, 0),
     }), try e.when(try b.reference(same), next, no));
     const same_tag = try e.binary(

@@ -47,51 +47,69 @@ fn contains(comptime T: type, comptime Ref: type) bool {
 }
 
 pub fn define(comptime T: type, b: *source.Builder) Error!Definition {
-    return defineDomain(T, g.NodeRef, b);
+    return ReferenceDomain(T, g.NodeRef).define(b);
 }
 pub fn defineBlobs(comptime T: type, b: *source.Builder) Error!Definition {
-    return defineDomain(T, g.BlobRef, b);
+    return ReferenceDomain(T, g.BlobRef).define(b);
 }
-inline fn defineDomain(comptime T: type, comptime Ref: type, b: *source.Builder) Error!Definition {
-    @setEvalBranchQuota(100_000);
-    const schema = try projection.schema(T, b);
-    // NodeRef and BlobRef have the same ordinary shape but different meaning.
-    const cache = try b.specialization(
-        Definition,
-        "kosmos.semantic.references/1/" ++ @typeName(Ref) ++ "/" ++ @typeName(T),
-        schema,
-    );
-    if (cache.cached) |saved| return saved;
-    const e = try Author.init(b);
-    const reference = try projection.schema(Ref, b);
-    const refs = try tables.define(b, reference);
-    const map = try maps.define(b, reference);
-    const d: Definition = .{
-        .walk = try b.declare(&.{ schema, refs.table }, refs.table, &.{}, &.{}),
-        .rebase = try b.declare(&.{ schema, map.tree }, schema, &.{}, &.{}),
-        .references = try b.declare(&.{schema}, refs.table, &.{}, &.{}),
-        .refs = refs,
-        .map = map,
+fn ReferenceDomain(comptime T: type, comptime Ref: type) type {
+    _ = data.schema.native.info(T);
+    return struct {
+        fn define(b: *source.Builder) Error!Definition {
+            const schema = try projection.schema(T, b);
+            // NodeRef and BlobRef have the same ordinary shape but different meaning.
+            const cache = try b.specialization(
+                Definition,
+                "kosmos.semantic.references/1/" ++ @typeName(Ref) ++ "/" ++ @typeName(T),
+                schema,
+            );
+            if (cache.cached) |saved| return saved;
+            const e = try Author.init(b);
+            const reference = try projection.schema(Ref, b);
+            const refs = try tables.define(b, reference);
+            const map = try maps.define(b, reference);
+            const d: Definition = .{
+                .walk = try b.declare(&.{ schema, refs.table }, refs.table, &.{}, &.{}),
+                .rebase = try b.declare(&.{ schema, map.tree }, schema, &.{}, &.{}),
+                .references = try b.declare(&.{schema}, refs.table, &.{}, &.{}),
+                .refs = refs,
+                .map = map,
+            };
+            try b.define(d.references, try e.call(d.walk, &.{
+                try e.param(d.references, 0), try refs.empty(b),
+            }));
+            const walk_input = try e.param(d.walk, 0);
+            const prior = try e.param(d.walk, 1);
+            const input = try e.param(d.rebase, 0);
+            const mapping = try e.param(d.rebase, 1);
+            const domain: Domain = .{
+                .b = b,
+                .e = e,
+                .schema = schema,
+                .d = d,
+                .refs = refs,
+                .map = map,
+                .walk_input = walk_input,
+                .prior = prior,
+                .input = input,
+                .mapping = mapping,
+            };
+            try emitDomain(T, Ref, domain, reference);
+            return cache.finish(b, d);
+        }
     };
-    try b.define(d.references, try e.call(d.walk, &.{
-        try e.param(d.references, 0), try refs.empty(b),
-    }));
-    const walk_input = try e.param(d.walk, 0);
-    const prior = try e.param(d.walk, 1);
-    const input = try e.param(d.rebase, 0);
-    const mapping = try e.param(d.rebase, 1);
-    const domain: Domain = .{
-        .b = b,
-        .e = e,
-        .schema = schema,
-        .d = d,
-        .refs = refs,
-        .map = map,
-        .walk_input = walk_input,
-        .prior = prior,
-        .input = input,
-        .mapping = mapping,
-    };
+}
+
+fn emitDomain(comptime T: type, comptime Ref: type, domain: Domain, reference: Id) Error!void {
+    const b = domain.b;
+    const e = domain.e;
+    const d = domain.d;
+    const refs = domain.refs;
+    const map = domain.map;
+    const prior = domain.prior;
+    const input = domain.input;
+    const mapping = domain.mapping;
+    const walk_input = domain.walk_input;
     if (!comptime contains(T, Ref)) {
         try b.define(d.walk, try b.pure(prior));
         try b.define(d.rebase, try b.pure(input));
@@ -114,7 +132,6 @@ inline fn defineDomain(comptime T: type, comptime Ref: type, b: *source.Builder)
         .pointer => |info| try emitSlice(info, Ref, domain),
         else => @compileError("unsupported reference-bearing guest record " ++ @typeName(T)),
     }
-    return cache.finish(b, d);
 }
 
 fn defineDomainRebaseDefinition(
@@ -215,7 +232,7 @@ fn defineDomainLoopDefinition(
     } } }));
 }
 
-inline fn emitStruct(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
+fn emitStruct(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
     const b = c.b;
     const e = c.e;
     const schema = c.schema;
@@ -244,7 +261,7 @@ inline fn emitStruct(comptime info: anytype, comptime Ref: type, c: Domain) Erro
         const i = info.field_types.len - 1 - reverse;
         const Field = info.field_types[i];
         if (comptime contains(Field, Ref)) {
-            const child = try defineDomain(Field, Ref, b);
+            const child = try ReferenceDomain(Field, Ref).define(b);
             var previous = prior;
             inline for (0..i) |j| if (accumulators[j]) |v| {
                 previous = try b.reference(v);
@@ -262,7 +279,7 @@ inline fn emitStruct(comptime info: anytype, comptime Ref: type, c: Domain) Erro
     try b.define(d.rebase, rebase);
 }
 
-inline fn emitUnion(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
+fn emitUnion(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
     const b = c.b;
     const e = c.e;
     const schema = c.schema;
@@ -281,7 +298,7 @@ inline fn emitUnion(comptime info: anytype, comptime Ref: type, c: Domain) Error
     inline for (info.field_types, 0..) |Field, i| {
         const variable = try b.variable(try projection.schema(Field, b));
         const value = try b.reference(variable);
-        const child = try defineDomain(Field, Ref, b);
+        const child = try ReferenceDomain(Field, Ref).define(b);
         const changed = try b.variable(try projection.schema(Field, b));
         walk_cases[i] = .{
             .variable = variable,
@@ -313,7 +330,7 @@ inline fn emitUnion(comptime info: anytype, comptime Ref: type, c: Domain) Error
     } }));
 }
 
-inline fn emitOptional(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
+fn emitOptional(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
     const b = c.b;
     const e = c.e;
     const schema = c.schema;
@@ -323,7 +340,7 @@ inline fn emitOptional(comptime info: anytype, comptime Ref: type, c: Domain) Er
     const input = c.input;
     const mapping = c.mapping;
 
-    const child = try defineDomain(info.child, Ref, b);
+    const child = try ReferenceDomain(info.child, Ref).define(b);
     const nil = try b.variable(e.unit);
     const present = try b.variable(try projection.schema(info.child, b));
     const value = try b.reference(present);
@@ -346,7 +363,7 @@ inline fn emitOptional(comptime info: anytype, comptime Ref: type, c: Domain) Er
     );
 }
 
-inline fn emitSlice(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
+fn emitSlice(comptime info: anytype, comptime Ref: type, c: Domain) Error!void {
     const b = c.b;
     const e = c.e;
     const schema = c.schema;
@@ -358,7 +375,7 @@ inline fn emitSlice(comptime info: anytype, comptime Ref: type, c: Domain) Error
     const input = c.input;
     const mapping = c.mapping;
 
-    const child = try defineDomain(info.child, Ref, b);
+    const child = try ReferenceDomain(info.child, Ref).define(b);
     const child_type = try projection.schema(info.child, b);
     const output = try tables.define(b, child_type);
     const pair_type = try b.schema(.{ .product = &.{ child_type, schema } });
