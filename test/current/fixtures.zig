@@ -1,4 +1,3 @@
-//! Explicit compiler-dependent fixture builder and independent native byte peer.
 const std = @import("std");
 const horos = @import("horos");
 const runtime = @import("kosmos");
@@ -12,33 +11,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "prepared-invoke-stream")) {
         try preparedStream(init.gpa, init.io, &output.interface);
     } else if (std.mem.eql(u8, mode, "specialized-invoke")) {
-        const data = horos.data;
-        var buffer: [4096]u8 = undefined;
-        var input = std.Io.File.stdin().reader(init.io, &buffer);
-        const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);
-        defer init.gpa.free(bytes);
-        var command = try data.invocation.decode(data.invocation.Input, init.gpa, bytes);
-        defer command.deinit();
-        const guest = try data.program_image.Admitted.decode(init.gpa, command.value.image);
-        defer guest.deinit();
-        const artifact = try runtime.RuntimeCompiler.compile(init.gpa, .{ .guest = guest, .horos_package = "qualified-kernel-fixture" });
-        defer init.gpa.free(artifact);
-        var selected = try runtime.RuntimeArtifact.init(init.gpa, artifact, runtime.RuntimeCapsule.reference(artifact).digest);
-        defer selected.deinit();
-        try runtime.RuntimeCompiler.validate(init.gpa, &selected);
-        var prepared = try runtime.Prepared.initWithRuntime(init.gpa, command.value.image, &selected);
-        defer prepared.deinit();
-        var session = switch (command.value.instance) {
-            .initial_args => |args| try runtime.Session.start(init.gpa, &prepared, args),
-            .state => |state| try runtime.Session.restore(init.gpa, &prepared, state),
-        };
-        defer session.deinit();
-        _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);
-        var outcome = try runtime.invocation.finish(init.gpa, &session, true);
-        defer outcome.deinit();
-        const result = try data.invocation.encodeOwned(data.invocation.Outcome, init.gpa, outcome.record);
-        defer init.gpa.free(result);
-        try output.interface.writeAll(result);
+        try specializedInvoke(init.gpa, init.io, &output.interface);
     } else if (std.mem.eql(u8, mode, "invoke")) {
         var buffer: [4096]u8 = undefined;
         var input = std.Io.File.stdin().reader(init.io, &buffer);
@@ -49,60 +22,11 @@ pub fn main(init: std.process.Init) !void {
         try output.interface.writeAll(result);
     } else if (std.mem.eql(u8, mode, "image")) {
         const name = arguments.next() orelse return error.MissingName;
-        if (std.mem.eql(u8, name, "components") or std.mem.eql(u8, name, "componentsDouble") or std.mem.eql(u8, name, "componentsRecursive")) {
-            const bytes = try linkedImage(init.gpa, name);
-            defer init.gpa.free(bytes);
-            try output.interface.writeAll(bytes);
-            try output.interface.flush();
-            return;
-        }
-        var builder = horos.source.Builder.init(init.gpa);
-        defer builder.deinit();
-        const module = blk: {
-            if (std.mem.eql(u8, name, "largeRequest")) break :blk try largeRequest(&builder);
-            if (std.mem.eql(u8, name, "retainedScopeGeneral"))
-                break :blk try horos.source.examples.retainedScope(&builder);
-            if (std.mem.eql(u8, name, "install")) break :blk try horos.source.examples.installations(&builder, 64);
-            if (std.mem.eql(u8, name, "resource")) break :blk try horos.source.examples.resourceScalar(&builder);
-            if (std.mem.eql(u8, name, "custody")) break :blk try horos.source.examples.custodyOrder(&builder, 0);
-            inline for (.{ "retainedScope", "branchingTail", "branchingTailProtected", "deep", "recursive", "reentrant", "generator", "shallow", "scalarContracts" }) |candidate| {
-                if (std.mem.eql(u8, name, candidate)) break :blk try @field(horos.source.examples, candidate)(&builder);
-            }
-            return error.InvalidName;
-        };
-        // The general reference fixture rewrites clause functions by source ID.
-        // A component retains those declarations; encoding still admits a closed Program.
-        var compiled = if (std.mem.eql(u8, name, "retainedScopeGeneral"))
-            (try horos.source.component.compile(init.gpa, module, .{ .exports = &.{} })).construction
-        else
-            try horos.program.compile(init.gpa, module);
-        defer compiled.deinit();
-        if (std.mem.eql(u8, name, "retainedScopeGeneral")) {
-            const ir = horos.data.activation;
-            const a = builder.allocator();
-            const handlers = try a.dupe(ir.Handler, compiled.program.handlers);
-            for (handlers, builder.handlers.items) |*handler, original| {
-                const clauses = try a.dupe(ir.Clause, handler.clauses);
-                for (clauses, original.clauses) |*clause, source_clause| {
-                    clause.strategy = .general;
-                    clause.function = source_clause.function;
-                }
-                handler.clauses = clauses;
-            }
-            compiled.program.handlers = handlers;
-        }
-        const bytes = try init.gpa.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
-        defer init.gpa.free(bytes);
-        _ = try compiled.encode(init.gpa, bytes);
-        try output.interface.writeAll(bytes);
+        try writeImage(init.gpa, name, &output.interface);
     } else return error.InvalidMode;
     try output.interface.flush();
 }
 
-// Source agreement restores a fresh session at every cut. Share only admitted
-// immutable code across those cuts; every command and PST3 still crosses its
-// real public admission boundary. The ordinary `invoke` mode qualifies the
-// combined fresh entry point independently in kernel.mjs.
 const PreparedPeer = struct {
     allocator: std.mem.Allocator,
     image: []u8 = &.{},
@@ -145,7 +69,7 @@ fn preparedStream(a: std.mem.Allocator, io: std.Io, output: *std.Io.Writer) !voi
     defer peer.deinit();
     var buffer: [4096]u8 = undefined;
     var input = std.Io.File.stdin().reader(io, &buffer);
-    while (true) {
+    while (true) { // tiger: event-loop
         const length = input.interface.takeInt(u32, .little) catch |err| switch (err) {
             error.EndOfStream => return,
             else => return err,
@@ -203,8 +127,12 @@ fn linkedImage(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     const data = horos.data;
     const doubled = std.mem.eql(u8, name, "componentsDouble");
     const recursive = std.mem.eql(u8, name, "componentsRecursive");
-    const kinds: []const examples.Kind = if (recursive) &.{ .even, .odd } else &.{ .call, .state, .suspended, .double };
-    const keys: []const []const u8 = if (recursive) &.{ "even", "odd" } else &.{ "call", "state", "suspend", "double" };
+    const kinds: []const examples.Kind = if (recursive) &.{ .even, .odd } else &.{
+        .call, .state, .suspended, .double,
+    };
+    const keys: []const []const u8 = if (recursive) &.{ "even", "odd" } else &.{
+        "call", "state", "suspend", "double",
+    };
     var instances: [4]data.linker.Instance = undefined;
     var initialized: usize = 0;
     defer for (instances[0..initialized]) |instance| allocator.free(instance.object);
@@ -212,8 +140,11 @@ fn linkedImage(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
         instance.* = .{ .key = key, .object = try examples.emit(allocator, kind) };
         initialized += 1;
     }
-    // Each emitter has already destroyed its source and construction owners.
-    var linked = try data.linker.link(allocator, instances[0..@as(usize, if (recursive) 2 else if (doubled) 4 else 3)], if (recursive) &examples.recursive_bindings else if (doubled) &examples.double_bindings else &examples.bindings, .{
+    const instance_count: usize = if (recursive) 2 else if (doubled) 4 else 3;
+    const bindings = if (recursive) blk: {
+        break :blk &examples.recursive_bindings;
+    } else if (doubled) &examples.double_bindings else &examples.bindings;
+    var linked = try data.linker.link(allocator, instances[0..instance_count], bindings, .{
         .instance = if (recursive) "even" else if (doubled) "double" else "suspend",
         .symbol = "main",
     });
@@ -222,4 +153,135 @@ fn linkedImage(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     errdefer allocator.free(bytes);
     _ = try linked.encode(allocator, bytes);
     return bytes;
+}
+
+fn specializedInvoke(a: std.mem.Allocator, io: std.Io, output: *std.Io.Writer) !void {
+    const data = horos.data;
+    var buffer: [4096]u8 = undefined;
+    var input = std.Io.File.stdin().reader(io, &buffer);
+    const bytes = try input.interface.allocRemaining(a, .unlimited);
+    defer a.free(bytes);
+    var command = try data.invocation.decode(data.invocation.Input, a, bytes);
+    defer command.deinit();
+    const guest = try data.program_image.Admitted.decode(a, command.value.image);
+    defer guest.deinit();
+    const artifact = try runtime.RuntimeCompiler.compile(a, .{
+        .guest = guest,
+        .horos_package = "qualified-kernel-fixture",
+    });
+    defer a.free(artifact);
+    var selected = try runtime.RuntimeArtifact.init(
+        a,
+        artifact,
+        runtime.RuntimeCapsule.reference(artifact).digest,
+    );
+    defer selected.deinit();
+    try runtime.RuntimeCompiler.validate(a, &selected);
+    var prepared = try runtime.Prepared.initWithRuntime(
+        a,
+        command.value.image,
+        &selected,
+    );
+    defer prepared.deinit();
+    var session = switch (command.value.instance) {
+        .initial_args => |args| try runtime.Session.start(a, &prepared, args),
+        .state => |state| try runtime.Session.restore(a, &prepared, state),
+    };
+    defer session.deinit();
+    _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);
+    var outcome = try runtime.invocation.finish(a, &session, true);
+    defer outcome.deinit();
+    const result = try data.invocation.encodeOwned(
+        data.invocation.Outcome,
+        a,
+        outcome.record,
+    );
+    defer a.free(result);
+    try output.writeAll(result);
+}
+
+fn writeImage(a: std.mem.Allocator, name: []const u8, output: *std.Io.Writer) !void {
+    if (std.mem.eql(u8, name, "components") or
+        std.mem.eql(u8, name, "componentsDouble") or
+        std.mem.eql(u8, name, "componentsRecursive"))
+    {
+        const bytes = try linkedImage(a, name);
+        defer a.free(bytes);
+        try output.writeAll(bytes);
+        return;
+    }
+    var builder = horos.source.Builder.init(a);
+    defer builder.deinit();
+    const module = try sourceModule(&builder, name);
+    var compiled = if (std.mem.eql(u8, name, "retainedScopeGeneral"))
+        (try horos.source.component.compile(
+            a,
+            module,
+            .{ .exports = &.{} },
+        )).construction
+    else
+        try horos.program.compile(a, module);
+    defer compiled.deinit();
+    if (std.mem.eql(u8, name, "retainedScopeGeneral")) {
+        const ir = horos.data.activation;
+        const scratch = builder.allocator();
+        const handlers = try scratch.dupe(ir.Handler, compiled.program.handlers);
+        for (handlers, builder.handlers.items) |*handler, original| {
+            const clauses = try scratch.dupe(ir.Clause, handler.clauses);
+            for (clauses, original.clauses) |*clause, source_clause| {
+                clause.strategy = .general;
+                clause.function = source_clause.function;
+            }
+            handler.clauses = clauses;
+        }
+        compiled.program.handlers = handlers;
+    }
+    const bytes = try a.alloc(
+        u8,
+        try horos.data.program_image.encodedLength(compiled.program),
+    );
+    defer a.free(bytes);
+    _ = try compiled.encode(a, bytes);
+    try output.writeAll(bytes);
+}
+
+fn sourceModule(builder: *horos.source.Builder, name: []const u8) !horos.source.Module {
+    return blk: {
+        if (std.mem.eql(u8, name, "largeRequest")) break :blk try largeRequest(builder);
+        if (std.mem.eql(u8, name, "retainedScopeGeneral"))
+            break :blk try horos.source.examples.retainedScope(builder);
+        if (std.mem.eql(
+            u8,
+            name,
+            "install",
+        )) break :blk try horos.source.examples.installations(builder, 64);
+        if (std.mem.eql(
+            u8,
+            name,
+            "resource",
+        )) break :blk try horos.source.examples.resourceScalar(builder);
+        if (std.mem.eql(
+            u8,
+            name,
+            "custody",
+        )) break :blk try horos.source.examples.custodyOrder(builder, 0);
+        inline for (.{
+            "retainedScope",
+            "branchingTail",
+            "branchingTailProtected",
+            "deep",
+            "recursive",
+            "reentrant",
+            "generator",
+            "shallow",
+            "scalarContracts",
+        }) |candidate| {
+            if (std.mem.eql(
+                u8,
+                name,
+                candidate,
+            )) break :blk try @field(horos.source.examples, candidate)(builder);
+        }
+        return error.InvalidName;
+    };
 }

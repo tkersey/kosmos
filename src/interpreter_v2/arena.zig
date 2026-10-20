@@ -57,6 +57,23 @@ pub const Arena = struct {
         const demand = @as(u64, self.live_payload) +| length +| live_metadata;
         self.required = @max(self.required, demand);
         const requested_alignment = @max(alignment.toByteUnits(), @alignOf(usize));
+        const search = self.allocateAvailable(length, requested_alignment) orelse return null;
+        if (search.result) |result| return result;
+        if (!self.growAvailable(length, requested_alignment, search)) return null;
+        return (self.allocateAvailable(length, requested_alignment) orelse return null).result;
+    }
+
+    const AllocationSearch = struct {
+        result: ?[*]u8 = null,
+        last: ?*Block = null,
+        first_available: ?*Block = null,
+    };
+
+    fn allocateAvailable(
+        self: *Arena,
+        length: usize,
+        requested_alignment: usize,
+    ) ?AllocationSearch {
         var cursor = self.search orelse self.first;
         var last: ?*Block = null;
         var first_available: ?*Block = null;
@@ -65,16 +82,30 @@ pub const Arena = struct {
             if (!block.available) continue;
             if (first_available == null) first_available = block;
             const start = @intFromPtr(block);
-            const header_end = std.math.add(usize, start, @sizeOf(Block) + @sizeOf(usize)) catch return null;
+            const header_end = std.math.add(
+                usize,
+                start,
+                @sizeOf(Block) + @sizeOf(usize),
+            ) catch return null;
             const padding = (0 -% header_end) & (requested_alignment - 1);
             const address = std.math.add(usize, header_end, padding) catch return null;
             const end = std.math.add(usize, address, length) catch return null;
             const used = end - start;
             if (used > block.length) continue;
-            const padded = std.math.add(usize, used, (0 -% end) & (block_alignment - 1)) catch return null;
-            if (padded <= block.length and block.length - padded >= @sizeOf(Block) + @sizeOf(usize) + 1) {
+            const padded = std.math.add(
+                usize,
+                used,
+                (0 -% end) & (block_alignment - 1),
+            ) catch return null;
+            if (padded <= block.length and
+                block.length - padded >= @sizeOf(Block) + @sizeOf(usize) + 1)
+            {
                 const successor: *Block = @ptrFromInt(start + padded);
-                successor.* = .{ .length = block.length - padded, .previous = block, .next = block.next };
+                successor.* = .{
+                    .length = block.length - padded,
+                    .previous = block,
+                    .next = block.next,
+                };
                 if (block.next) |next| next.previous = successor;
                 block.next = successor;
                 block.length = padded;
@@ -87,16 +118,31 @@ pub const Arena = struct {
             self.live_payload += length;
             self.live_blocks += 1;
             self.peak_payload = @max(self.peak_payload, self.live_payload);
-            return @ptrFromInt(address);
+            return .{ .result = @ptrFromInt(address) };
         }
-        if (self.grow) |grow| {
-            const metadata = std.math.add(usize, @sizeOf(Block) + @sizeOf(usize), requested_alignment) catch return null;
-            const needed = std.math.add(usize, length, metadata) catch return null;
-            const segment = grow(self.grow_context.?, needed) orelse return null;
+        return .{ .last = last, .first_available = first_available };
+    }
+
+    fn growAvailable(
+        self: *Arena,
+        length: usize,
+        requested_alignment: usize,
+        search: AllocationSearch,
+    ) bool {
+        const grow = self.grow orelse return false;
+        {
+            const metadata = std.math.add(
+                usize,
+                @sizeOf(Block) + @sizeOf(usize),
+                requested_alignment,
+            ) catch return false;
+            const needed = std.math.add(usize, length, metadata) catch return false;
+            const segment = grow(self.grow_context.?, needed) orelse return false;
             const added = Arena.init(segment);
-            const first = added.first orelse return null;
-            if (last) |tail| self.address_ordered = self.address_ordered and @intFromPtr(tail) < @intFromPtr(first);
-            if (last) |tail| {
+            const first = added.first orelse return false;
+            if (search.last) |tail| self.address_ordered = self.address_ordered and
+                @intFromPtr(tail) < @intFromPtr(first);
+            if (search.last) |tail| {
                 if (tail.available and @intFromPtr(tail) + tail.length == @intFromPtr(first)) {
                     tail.length += first.length;
                 } else {
@@ -104,17 +150,18 @@ pub const Arena = struct {
                     first.previous = tail;
                 }
             } else self.first = first;
-            self.search = first_available orelse first;
-            // The new segment was requested with sufficient alignment and metadata.
-            const saved_grow = self.grow;
-            self.grow = null;
-            defer self.grow = saved_grow;
-            return allocate(context, length, alignment, 0);
+            self.search = search.first_available orelse first;
+            return true;
         }
-        return null;
     }
 
-    fn remap(context: *anyopaque, bytes: []u8, _: std.mem.Alignment, length: usize, _: usize) ?[*]u8 {
+    fn remap(
+        context: *anyopaque,
+        bytes: []u8,
+        _: std.mem.Alignment,
+        length: usize,
+        _: usize,
+    ) ?[*]u8 {
         const self: *Arena = @ptrCast(@alignCast(context));
         const address = @intFromPtr(bytes.ptr);
         const saved: *const usize = @ptrFromInt(address - @sizeOf(usize));
@@ -177,12 +224,16 @@ pub const Arena = struct {
         self.live_blocks -= 1;
         block.available = true;
         var merged = block;
-        if (block.next) |next| if (next.available and @intFromPtr(block) + block.length == @intFromPtr(next)) {
+        if (block.next) |next| if (next.available and
+            @intFromPtr(block) + block.length == @intFromPtr(next))
+        {
             block.length += next.length;
             block.next = next.next;
             if (next.next) |after| after.previous = block;
         };
-        if (block.previous) |previous| if (previous.available and @intFromPtr(previous) + previous.length == @intFromPtr(block)) {
+        if (block.previous) |previous| if (previous.available and
+            @intFromPtr(previous) + previous.length == @intFromPtr(block))
+        {
             previous.length += block.length;
             previous.next = block.next;
             if (block.next) |after| after.previous = previous;
@@ -342,7 +393,9 @@ test "remap preserves aligned prefixes and reclaims a released tail" {
     try std.testing.expect(tryRemap(a, first, 16));
     first = first.ptr[0..16];
     const reused = try a.alloc(u8, 48);
-    try std.testing.expect(@intFromPtr(reused.ptr) > address and @intFromPtr(reused.ptr) < @intFromPtr(last.ptr));
+    try std.testing.expect(
+        @intFromPtr(reused.ptr) > address and @intFromPtr(reused.ptr) < @intFromPtr(last.ptr),
+    );
     try std.testing.expect(std.mem.allEqual(u8, first, 0xa7));
     try std.testing.expect(std.mem.allEqual(u8, last, 0xb7));
     a.free(reused);
@@ -411,7 +464,11 @@ test "random allocation free and remap preserve contents and the block partition
                 const length = rng.uintLessThan(usize, 2048) + 1;
                 if (tryRemap(a, old, length)) {
                     const changed = old.ptr[0..length];
-                    try std.testing.expect(std.mem.allEqual(u8, changed[0..@min(old.len, length)], @intCast(index)));
+                    try std.testing.expect(std.mem.allEqual(
+                        u8,
+                        changed[0..@min(old.len, length)],
+                        @intCast(index),
+                    ));
                     @memset(changed, @intCast(index));
                     values[index] = changed;
                 }

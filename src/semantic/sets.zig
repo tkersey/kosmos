@@ -18,7 +18,14 @@ pub fn define(b: *source.Builder) source.Error!Definition {
         .contains = try b.declare(&.{ map.tree, e.integer }, e.boolean, &.{}, &.{}),
     };
     const found = try b.variable(map.optional);
-    try b.define(d.contains, try b.bind(found, try e.call(map.get, &.{ try e.param(d.contains, 0), try e.param(d.contains, 1) }), try b.pure(try e.binary(.equal, try b.primitive(e.integer, .variant_tag, &.{try b.reference(found)}, 0), e.one))));
+    try b.define(d.contains, try b.bind(found, try e.call(map.get, &.{
+        try e.param(d.contains, 0), try e.param(d.contains, 1),
+    }), try b.pure(try e.binary(.equal, try b.primitive(
+        e.integer,
+        .variant_tag,
+        &.{try b.reference(found)},
+        0,
+    ), e.one))));
     const loop = try b.declare(&.{ ids, map.tree }, map.tree, &.{}, &.{});
     const parts = try b.schema(.{ .product = &.{ e.integer, ids } });
     const popped = try b.schema(.{ .sum = &.{ e.unit, parts } });
@@ -31,9 +38,13 @@ pub fn define(b: *source.Builder) source.Error!Definition {
         .value = try b.primitive(popped, .sequence_pop, &.{try e.param(loop, 0)}, 0),
         .cases = &.{
             .{ .variable = nil, .body = try b.pure(prior) },
-            .{ .variable = pair_var, .body = try b.bind(next, try e.call(map.set, &.{ prior, try e.field(pair, 0), e.unit_value }), try e.call(loop, &.{ try e.field(pair, 1), try b.reference(next) })) },
+            .{ .variable = pair_var, .body = try b.bind(next, try e.call(map.set, &.{
+                prior, try e.field(pair, 0), e.unit_value,
+            }), try e.call(loop, &.{ try e.field(pair, 1), try b.reference(next) })) },
         },
     } }));
-    try b.define(d.from_sequence, try e.call(loop, &.{ try e.param(d.from_sequence, 0), try map.empty(e) }));
+    try b.define(d.from_sequence, try e.call(loop, &.{
+        try e.param(d.from_sequence, 0), try map.empty(e),
+    }));
     return cache.finish(b, d);
 }

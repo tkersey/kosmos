@@ -44,13 +44,24 @@ pub fn define(b: *source.Builder) Error!Definition {
     const state = try projection.schema(projection.State, b);
     const frame = try frames.define(b);
     const optional_frame = try b.schema(.{ .sum = &.{ e.unit, frame.schema } });
-    const node = try b.schema(.{ .product = &.{ try projection.schema(data.graph.Node, b), optional_frame } });
+    const node = try b.schema(.{ .product = &.{
+        try projection.schema(data.graph.Node, b), optional_frame,
+    } });
     const nodes = try table.define(b, node);
     const blobs = try table.define(b, try projection.schema(data.graph.Blob, b));
-    const schema = try b.schema(.{ .product = &.{ program, header, nodes.table, blobs.table, e.integer } });
+    const schema = try b.schema(.{ .product = &.{
+        program, header, nodes.table, blobs.table, e.integer,
+    } });
     const d: Definition = .{
-        .node_from_public = try b.declare(&.{try projection.schema(data.process_state.Node, b)}, node, &.{}, &.{}),
-        .node_to_public = try b.declare(&.{node}, try projection.schema(data.process_state.Node, b), &.{}, &.{}),
+        .node_from_public = try b.declare(&.{
+            try projection.schema(data.process_state.Node, b),
+        }, node, &.{}, &.{}),
+        .node_to_public = try b.declare(
+            &.{node},
+            try projection.schema(data.process_state.Node, b),
+            &.{},
+            &.{},
+        ),
         .schema = schema,
         .program = program,
         .header = header,
@@ -62,44 +73,14 @@ pub fn define(b: *source.Builder) Error!Definition {
         .project = try b.declare(&.{schema}, state, &.{}, &.{}),
     };
     const conversions = try nodeConversions(e, d);
-    {
-        const input = try e.param(d.hydrate, 1);
-        const saved_nodes = try b.variable(nodes.table);
-        const saved_blobs = try b.variable(blobs.table);
-        const fields = @typeInfo(Header).@"struct";
-        var header_values: [fields.field_names.len]Id = undefined;
-        inline for (fields.field_names, 0..) |name, i|
-            header_values[i] = try e.field(input, index(projection.State, name));
-        const result = try b.pure(try e.tuple(schema, &.{
-            try e.param(d.hydrate, 0),    try e.tuple(header, &header_values),
-            try b.reference(saved_nodes), try b.reference(saved_blobs),
-            e.zero,
-        }));
-        const fill_blobs = try b.bind(saved_blobs, try e.call(blobs.from_sequence, &.{try e.field(input, index(projection.State, "blobs"))}), result);
-        try b.define(d.hydrate, try b.bind(saved_nodes, try e.call(conversions.hydrate, &.{try e.field(input, index(projection.State, "nodes"))}), fill_blobs));
-    }
-    {
-        const machine = try e.param(d.project, 0);
-        const saved_nodes = try b.variable(try projection.schema([]const data.process_state.Node, b));
-        const saved_blobs = try b.variable(blobs.sequence);
-        const fields = @typeInfo(projection.State).@"struct";
-        var values: [fields.field_names.len]Id = undefined;
-        inline for (fields.field_names, 0..) |name, i| {
-            values[i] = if (comptime @import("std").mem.eql(u8, name, "nodes"))
-                try b.reference(saved_nodes)
-            else if (comptime @import("std").mem.eql(u8, name, "blobs"))
-                try b.reference(saved_blobs)
-            else
-                try e.field(try d.field(e, machine, .header), index(Header, name));
-        }
-        const result = try b.pure(try e.tuple(state, &values));
-        const collect_blobs = try b.bind(saved_blobs, try e.call(blobs.to_sequence, &.{try d.field(e, machine, .blobs)}), result);
-        try b.define(d.project, try b.bind(saved_nodes, try e.call(conversions.project, &.{try d.field(e, machine, .nodes)}), collect_blobs));
-    }
+    try emitHydrate(e, header, nodes, blobs, schema, d, conversions);
+    try emitProject(e, state, blobs, d, conversions);
     return cache.finish(b, d);
 }
 
-fn nodeConversions(e: Author, d: Definition) Error!struct { hydrate: Id, project: Id } {
+const NodeConversions = struct { hydrate: Id, project: Id };
+
+fn nodeConversions(e: Author, d: Definition) Error!NodeConversions {
     const b = e.b;
     const public_node = try projection.schema(data.process_state.Node, b);
     const public_nodes = try projection.schema([]const data.process_state.Node, b);
@@ -116,8 +97,17 @@ fn nodeConversions(e: Author, d: Definition) Error!struct { hydrate: Id, project
         try b.define(function, try b.term(.{ .match_sum = .{
             .value = try e.field(input, 1),
             .cases = &.{
-                .{ .variable = nil, .body = try b.pure(try e.tuple(output, &.{ try e.field(input, 0), try e.variant(optional, 0, e.unit_value) })) },
-                .{ .variable = present, .body = try b.bind(converted, try e.call(if (hydrate) d.frames.from_public else d.frames.to_public, &.{try b.reference(present)}), try b.pure(try e.tuple(output, &.{ try e.field(input, 0), try e.variant(optional, 1, try b.reference(converted)) }))) },
+                .{ .variable = nil, .body = try b.pure(try e.tuple(output, &.{
+                    try e.field(input, 0), try e.variant(optional, 0, e.unit_value),
+                })) },
+                .{ .variable = present, .body = try b.bind(converted, try e.call(
+                    if (hydrate) d.frames.from_public else d.frames.to_public,
+                    &.{try b.reference(present)},
+                ), try b.pure(try e.tuple(output, &.{ try e.field(input, 0), try e.variant(
+                    optional,
+                    1,
+                    try b.reference(converted),
+                ) }))) },
             },
         } }));
     }
@@ -137,10 +127,17 @@ fn nodeConversions(e: Author, d: Definition) Error!struct { hydrate: Id, project
             .value = try b.primitive(popped, .sequence_pop, &.{try e.param(loop, 0)}, 0),
             .cases = &.{
                 .{ .variable = nil, .body = try b.pure(prior) },
-                .{ .variable = present, .body = try b.bind(converted, try e.call(from_node, &.{try e.field(pair, 0)}), try b.bind(appended, try e.call(d.nodes.append, &.{ prior, try b.reference(converted) }), try e.call(loop, &.{ try e.field(pair, 1), try b.reference(appended) }))) },
+                .{ .variable = present, .body = try b.bind(converted, try e.call(
+                    from_node,
+                    &.{try e.field(pair, 0)},
+                ), try b.bind(appended, try e.call(d.nodes.append, &.{
+                    prior, try b.reference(converted),
+                }), try e.call(loop, &.{ try e.field(pair, 1), try b.reference(appended) }))) },
             },
         } }));
-        try b.define(hydrate, try e.call(loop, &.{ try e.param(hydrate, 0), try d.nodes.empty(b) }));
+        try b.define(hydrate, try e.call(loop, &.{
+            try e.param(hydrate, 0), try d.nodes.empty(b),
+        }));
     }
     {
         const mapped = try table.mapToSequence(b, d.nodes, public_node, to_node);
@@ -158,4 +155,78 @@ pub fn index(comptime T: type, comptime name: []const u8) usize {
     inline for (names, 0..) |field, i|
         if (comptime @import("std").mem.eql(u8, field, name)) return i;
     @compileError("missing projected field " ++ @typeName(T) ++ "." ++ name);
+}
+
+fn emitHydrate(
+    e: Author,
+    header: Id,
+    nodes: table.Definition,
+    blobs: table.Definition,
+    schema: Id,
+    d: Definition,
+    conversions: NodeConversions,
+) Error!void {
+    const input = try e.param(d.hydrate, 1);
+    const saved_nodes = try e.b.variable(nodes.table);
+    const saved_blobs = try e.b.variable(blobs.table);
+    const fields = @typeInfo(Header).@"struct";
+    var header_values: [fields.field_names.len]Id = undefined;
+    inline for (fields.field_names, 0..) |name, i|
+        header_values[i] = try e.field(input, index(projection.State, name));
+    const result = try e.b.pure(try e.tuple(schema, &.{
+        try e.param(d.hydrate, 0),      try e.tuple(header, &header_values),
+        try e.b.reference(saved_nodes), try e.b.reference(saved_blobs),
+        e.zero,
+    }));
+    const fill_blobs = try e.b.bind(saved_blobs, try e.call(blobs.from_sequence, &.{try e.field(
+        input,
+        index(projection.State, "blobs"),
+    )}), result);
+    try e.b.define(
+        d.hydrate,
+        try e.b.bind(
+            saved_nodes,
+            try e.call(
+                conversions.hydrate,
+                &.{try e.field(
+                    input,
+                    index(projection.State, "nodes"),
+                )},
+            ),
+            fill_blobs,
+        ),
+    );
+}
+
+fn emitProject(
+    e: Author,
+    state: Id,
+    blobs: table.Definition,
+    d: Definition,
+    conversions: NodeConversions,
+) Error!void {
+    const machine = try e.param(d.project, 0);
+    const saved_nodes = try e.b.variable(
+        try projection.schema([]const data.process_state.Node, e.b),
+    );
+    const saved_blobs = try e.b.variable(blobs.sequence);
+    const fields = @typeInfo(projection.State).@"struct";
+    var values: [fields.field_names.len]Id = undefined;
+    inline for (fields.field_names, 0..) |name, i| {
+        values[i] = if (comptime @import("std").mem.eql(u8, name, "nodes"))
+            try e.b.reference(saved_nodes)
+        else if (comptime @import("std").mem.eql(u8, name, "blobs"))
+            try e.b.reference(saved_blobs)
+        else
+            try e.field(try d.field(e, machine, .header), index(Header, name));
+    }
+    const result = try e.b.pure(try e.tuple(state, &values));
+    const collect_blobs = try e.b.bind(saved_blobs, try e.call(
+        blobs.to_sequence,
+        &.{try d.field(e, machine, .blobs)},
+    ), result);
+    try e.b.define(d.project, try e.b.bind(saved_nodes, try e.call(
+        conversions.project,
+        &.{try d.field(e, machine, .nodes)},
+    ), collect_blobs));
 }

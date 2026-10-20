@@ -6,11 +6,10 @@ const testing = std.testing;
 const Resident = @import("kosmos").Resident;
 
 test {
-    // Dependency-module tests are not collected by this root test artifact.
     _ = @import("source_regressions.zig");
 }
 
-test "ownership: encoded cursors export canonical immutable checkpoints and restore as ordinary values" {
+test "ownership: encoded cursors export canonical immutable checkpoints and restore as values" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
@@ -19,7 +18,9 @@ test "ownership: encoded cursors export canonical immutable checkpoints and rest
     const pair = try builder.schema(.{ .product = &.{ integer, sequence } });
     const optional = try builder.schema(.{ .sum = &.{ unit, pair } });
     const entry = try builder.declare(&.{sequence}, sequence, &.{}, &.{});
-    const popped = try builder.primitive(optional, .sequence_pop, &.{try builder.reference(builder.parameter(entry, 0))}, 0);
+    const popped = try builder.primitive(optional, .sequence_pop, &.{
+        try builder.reference(builder.parameter(entry, 0)),
+    }, 0);
     const empty = try builder.variable(unit);
     const present = try builder.variable(pair);
     const head = try builder.variable(integer);
@@ -32,7 +33,9 @@ test "ownership: encoded cursors export canonical immutable checkpoints and rest
     try builder.define(entry, try builder.term(.{ .match_sum = .{
         .value = popped,
         .cases = &.{
-            .{ .variable = empty, .body = try builder.pure(try builder.primitive(sequence, .sequence, &.{}, 0)) },
+            .{ .variable = empty, .body = try builder.pure(
+                try builder.primitive(sequence, .sequence, &.{}, 0),
+            ) },
             .{ .variable = present, .body = unpack },
         },
     } }));
@@ -90,7 +93,49 @@ test "behavior: owned FIFO package queues preserve scheduling through instructio
         const outcome = try drive(&session, 1);
         if (outcome == .progressed) continue;
         try testing.expect(outcome == .completed);
-        try testing.expectEqualSlices(u8, &.{ 30, 0, 0, 0, 0, 0, 0, 0, 4, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&outcome.completed));
+        try testing.expectEqualSlices(u8, &.{
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        }, try session.bytes(&outcome.completed));
         return;
     }
     return error.TestUnexpectedResult;
@@ -109,21 +154,37 @@ test "behavior: fast projections still reject malformed unselected input payload
         else
             .{ .product = &.{ integer, bytes } });
         const entry = try builder.declare(&.{input}, integer, &.{}, &.{});
-        const projected = try builder.primitive(integer, if (variant) .variant_tag else .field, &.{try builder.reference(builder.parameter(entry, 0))}, 0);
+        const projected = try builder.primitive(integer, if (variant) .variant_tag else .field, &.{
+            try builder.reference(builder.parameter(entry, 0)),
+        }, 0);
         try builder.define(entry, try builder.pure(projected));
         var compiled = try source.lower(testing.allocator, builder.module(entry, unit));
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        const truncated: []const u8 = if (variant) &.{ 0, 16 } else &.{ 42, 0, 0, 0, 0, 0, 0, 0, 16 };
-        try testing.expectError(error.Truncated, Session.initImage(testing.allocator, image, truncated));
-        if (mode == 2) try testing.expectError(error.InvalidUtf8, Session.initImage(testing.allocator, image, &.{ 0, 1, 0xff }));
+        const truncated: []const u8 = if (variant)
+            &.{ 0, 16 }
+        else
+            &.{ 42, 0, 0, 0, 0, 0, 0, 0, 16 };
+        try testing.expectError(error.Truncated, Session.initImage(
+            testing.allocator,
+            image,
+            truncated,
+        ));
+        if (mode == 2) try testing.expectError(error.InvalidUtf8, Session.initImage(
+            testing.allocator,
+            image,
+            &.{ 0, 1, 0xff },
+        ));
         const valid: []const u8 = if (variant) &.{ 0, 0 } else &.{ 42, 0, 0, 0, 0, 0, 0, 0, 0 };
         var session = try Session.initImage(testing.allocator, image, valid);
         defer session.deinit();
         const result = try session.run(null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(@as(u8, if (variant) 0 else 42), (try session.bytes(&result.completed))[0]);
+        try testing.expectEqual(
+            @as(u8, if (variant) 0 else 42),
+            (try session.bytes(&result.completed))[0],
+        );
     }
 }
 
@@ -146,7 +207,9 @@ test "behavior: higher-order scoped bodies retain definition and use capabilitie
         for (snapshot.state.nodes) |item| {
             const node = item.record;
             if (node != .computation) continue;
-            const captures = snapshot.state.nodes[@intCast(node.computation.environment.id)].record.environment.values;
+            const captures = snapshot.state.nodes[
+                @intCast(node.computation.environment.id)
+            ].record.environment.values;
             if (captures.len != 2) continue;
             if (captures[0].schema != captures[1].schema) continue;
             const schema = session.program.schemas[@intCast(captures[0].schema)];
@@ -164,7 +227,10 @@ test "behavior: higher-order scoped bodies retain definition and use capabilitie
         if (cancel) try restored.cancel(.{ .text = "stop" }) else try restored.resumeYield();
         const cleanup = try restored.run(null);
         try testing.expect(cleanup == .requested);
-        try testing.expectEqualStrings("retained-scope/release", restored.program.effects[@intCast(cleanup.requested.effect)].identity);
+        try testing.expectEqualStrings(
+            "retained-scope/release",
+            restored.program.effects[@intCast(cleanup.requested.effect)].identity,
+        );
         try testing.expectEqual(77, (try restored.bytes(&cleanup.requested.payload))[0]);
         const cleaning = try restored.checkpoint(testing.allocator);
         defer testing.allocator.free(cleaning);
@@ -176,15 +242,19 @@ test "behavior: higher-order scoped bodies retain definition and use capabilitie
             try testing.expect(result == .cancelled);
         } else {
             try testing.expect(result == .completed);
-            try testing.expectEqualSlices(u8, &.{ 0x61, 4, 0, 0, 0, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0 }, try finished.bytes(&result.completed));
+            try testing.expectEqualSlices(u8, &.{
+                0x61, 4, 0, 0, 0, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0,
+            }, try finished.bytes(&result.completed));
         }
     }
 }
 
-// Data-level mutation fixtures need declarations that a closed compiler can prune.
-// No imports are present; programBytes/initFromImage still perform closed admission.
 fn compileDeclarations(module: source.Module) !source.Compiled {
-    return (try source.component.compile(testing.allocator, module, .{ .exports = &.{} })).construction;
+    return (try source.component.compile(
+        testing.allocator,
+        module,
+        .{ .exports = &.{} },
+    )).construction;
 }
 
 test "behavior: retained scoped interaction agrees at every quantum with general resumptions" {
@@ -227,14 +297,19 @@ test "behavior: retained scoped interaction agrees at every quantum with general
                     try session.resumeYield();
                 },
                 .requested => |request| {
-                    try testing.expectEqualStrings("retained-scope/release", session.program.effects[@intCast(request.effect)].identity);
+                    try testing.expectEqualStrings(
+                        "retained-scope/release",
+                        session.program.effects[@intCast(request.effect)].identity,
+                    );
                     try testing.expectEqual(77, (try session.bytes(&request.payload))[0]);
                     releases += 1;
                     try answerWithValue(&session, &.{});
                 },
                 .completed => |value| {
                     var result = value;
-                    try testing.expectEqualSlices(u8, &.{ 0x61, 4, 0, 0, 0, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result));
+                    try testing.expectEqualSlices(u8, &.{
+                        0x61, 4, 0, 0, 0, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0,
+                    }, try session.bytes(&result));
                     completed = true;
                     break;
                 },
@@ -258,7 +333,10 @@ test "behavior: branching tail handlers preserve results through every instructi
             try compileDeclarations(module);
         defer compiled.deinit();
         const clause = compiled.program.handlers[0].clauses[0];
-        const clauses = try testing.allocator.dupe(horos.data.activation.Clause, compiled.program.handlers[0].clauses);
+        const clauses = try testing.allocator.dupe(
+            horos.data.activation.Clause,
+            compiled.program.handlers[0].clauses,
+        );
         defer testing.allocator.free(clauses);
         var handlers = [_]horos.data.activation.Handler{compiled.program.handlers[0]};
         handlers[0].clauses = clauses;
@@ -273,11 +351,17 @@ test "behavior: branching tail handlers preserve results through every instructi
         for ([_]u8{ 0, 1 }) |input| {
             var session = try Session.initImage(testing.allocator, image, &.{input});
             defer session.deinit();
-            var stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+            var stats: std.meta.Child(
+                @typeInfo(@FieldType(Session, "statistics")).optional.child,
+            ) = .{};
             session.setStatistics(&stats);
             const result = try session.run(null);
             try testing.expect(result == .completed);
-            try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+            try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(
+                u64,
+                (try session.bytes(&result.completed))[0..8],
+                .little,
+            ));
             try checkpointTail(image, input, clause.function, selected);
         }
     }
@@ -296,7 +380,11 @@ fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !
         defer snapshot.deinit();
         if (snapshot.state.roots.current) |current| {
             const control = snapshot.state.nodes[@intCast(current.id)].record.control;
-            if (session.program.blocks[@intCast(control.block)].function == function) saw_tail = true;
+            if (session.program.blocks[
+                @intCast(
+                    control.block,
+                )
+            ].function == function) saw_tail = true;
         }
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
@@ -307,13 +395,20 @@ fn checkpointTail(image: []const u8, input: u8, function: u64, selected: bool) !
     }
     try testing.expectEqual(selected, saw_tail);
     try testing.expect(outcome == .completed);
-    try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, if (input == 1) 60 else 100), std.mem.readInt(
+        u64,
+        (try session.bytes(&outcome.completed))[0..8],
+        .little,
+    ));
 }
 
 test "behavior: tail clause checkpoints retain body cleanup on cancellation" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.branchingTailProtected(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.branchingTailProtected(&builder),
+    );
     defer compiled.deinit();
     const selected = compiled.program.handlers[0].clauses[0];
     try testing.expect(selected.strategy == .tail);
@@ -325,7 +420,10 @@ test "behavior: tail clause checkpoints retain body cleanup on cancellation" {
     for (0..128) |_| {
         const outcome = try session.run(1);
         if (outcome == .requested) {
-            try testing.expectEqualStrings("example/tail-cleanup", session.program.effects[@intCast(outcome.requested.effect)].identity);
+            try testing.expectEqualStrings(
+                "example/tail-cleanup",
+                session.program.effects[@intCast(outcome.requested.effect)].identity,
+            );
             try answerWithValue(&session, &.{});
             const completed = try session.run(null);
             try testing.expect(completed == .completed);
@@ -347,7 +445,10 @@ test "behavior: tail clause checkpoints retain body cleanup on cancellation" {
         try cancelled.cancel(.{ .text = "stop" });
         const cleanup = try cancelled.run(null);
         try testing.expect(cleanup == .requested);
-        try testing.expectEqualStrings("example/tail-cleanup", cancelled.program.effects[@intCast(cleanup.requested.effect)].identity);
+        try testing.expectEqualStrings(
+            "example/tail-cleanup",
+            cancelled.program.effects[@intCast(cleanup.requested.effect)].identity,
+        );
         try answerWithValue(&cancelled, &.{});
         try testing.expect(try cancelled.run(null) == .cancelled);
         cancellation_points += 1;
@@ -368,64 +469,67 @@ test "behavior: immediate lexical calls preserve checked results and retained ca
             application.computation = builder.terms.items[@intCast(binding.value)].value;
             main.body = try builder.term(.{ .apply = application });
         }
-        var compiled = try source.lower(testing.allocator, builder.module(original.entry, original.failure));
+        var compiled = try source.lower(
+            testing.allocator,
+            builder.module(original.entry, original.failure),
+        );
         defer compiled.deinit();
-        var session = try initFromImage(testing.allocator, compiled.program, &.{ 40, 0, 0, 0, 0, 0, 0, 0 });
+        var session = try initFromImage(
+            testing.allocator,
+            compiled.program,
+            &.{ 40, 0, 0, 0, 0, 0, 0, 0 },
+        );
         defer session.deinit();
         const result = try session.run(null);
         try testing.expect(result == .completed);
-        try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
-        var overflow = try initFromImage(testing.allocator, compiled.program, &(@as([8]u8, @splat(0xff))));
+        try testing.expectEqualSlices(
+            u8,
+            &.{ 42, 0, 0, 0, 0, 0, 0, 0 },
+            try session.bytes(&result.completed),
+        );
+        var overflow = try initFromImage(
+            testing.allocator,
+            compiled.program,
+            &(@as([8]u8, @splat(0xff))),
+        );
         defer overflow.deinit();
         const failed = try overflow.run(null);
         try testing.expect(failed == .failed);
         try testing.expectEqual(0, (try overflow.bytes(&failed.failed)).len);
 
-        // An unfinished direct call keeps its capture through portable State.
-        const inner = &builder.functions.items[1];
-        inner.body = try builder.term(.{ .yield_then = inner.body.? });
-        var yielding = try source.lower(testing.allocator, builder.module(original.entry, original.failure));
-        defer yielding.deinit();
-        var paused = try initFromImage(testing.allocator, yielding.program, &.{ 40, 0, 0, 0, 0, 0, 0, 0 });
-        defer paused.deinit();
-        try testing.expect(try paused.run(null) == .yielded);
-        const checkpoint = try paused.checkpoint(testing.allocator);
-        defer testing.allocator.free(checkpoint);
-        const image = try programBytes(yielding.program);
-        defer testing.allocator.free(image);
-        var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
-        defer restored.deinit();
-        try restored.resumeYield();
-        const completed = try restored.run(null);
-        try testing.expect(completed == .completed);
-        try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try restored.bytes(&completed.completed));
+        try expectLexicalCapture(&builder, original);
     }
 }
 
 fn releaseResident(resident: *Resident) void {
     resident.close() catch |err| switch (err) {
         error.UnfinishedSession => {
-            const bytes = resident.takeCheckpoint(testing.allocator) catch unreachable;
-            testing.allocator.free(bytes); // Explicit fixture custody transfer.
+            const bytes = resident.takeCheckpoint(testing.allocator) catch |checkpoint_error|
+                std.debug.panic("{s}", .{@errorName(checkpoint_error)});
+            testing.allocator.free(bytes);
         },
         error.InvalidState => {},
         else => unreachable,
     };
 }
 
-// Regression transferred from PR #60, 750f8ec74f909735c96992eb05bfe0c22904526e.
-fn residentBeforeOwnedUnwind(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !Resident {
+fn residentBeforeOwnedUnwind(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+) !Resident {
     var resident = try Resident.start(allocator, prepared, &.{});
     errdefer releaseResident(&resident);
     var yielded = try resident.drive(allocator, .none, .{});
     defer yielded.deinit();
     try testing.expect(yielded.record == .yielded);
-    var cancelling = try resident.drive(allocator, .{ .cancel = .{ .text = "live-owned-unwind" } }, .{ .quantum = 0 });
+    var cancelling = try resident.drive(allocator, .{
+        .cancel = .{ .text = "live-owned-unwind" },
+    }, .{ .quantum = 0 });
     defer cancelling.deinit();
     return resident;
 }
 
-test "ownership: live owned unwind preserves physical ownership and retry at every allocation failure" {
+test "ownership: live owned unwind preserves physical ownership and retry under OOM" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.ownership(&builder));
@@ -434,12 +538,17 @@ test "ownership: live owned unwind preserves physical ownership and retry at eve
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    var reference = try residentBeforeOwnedUnwind(testing.allocator, &prepared);
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var reference = try residentBeforeOwnedUnwind(counting.allocator(), &prepared);
     defer releaseResident(&reference);
-    var expected = try reference.drive(testing.allocator, .none, .{ .quantum = 1 });
+    const reference_entry = try reference.checkpoint(testing.allocator);
+    defer testing.allocator.free(reference_entry);
+    const allocation_start = counting.alloc_index;
+    counting.resize_fail_index = counting.resize_index;
+    var expected = try reference.drive(counting.allocator(), .none, .{ .quantum = 1 });
     defer expected.deinit();
-    var index: usize = 0;
-    while (true) : (index += 1) {
+    const allocation_count = counting.alloc_index - allocation_start;
+    for (0..allocation_count + 1) |index| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
         var resident = try residentBeforeOwnedUnwind(failing.allocator(), &prepared);
         defer releaseResident(&resident);
@@ -464,15 +573,20 @@ test "ownership: live owned unwind preserves physical ownership and retry at eve
         failing.resize_fail_index = std.math.maxInt(usize);
         try testing.expectEqualDeep(expected.record, output.record);
         try testing.expect(index != 0);
-        break;
+        return;
     }
+    return error.MissingAllocationSweepSuccess;
 }
 
 const ResidentFixture = struct {
     checkpoint: []const u8,
     prefix_steps: u64 = 0,
 
-    fn restore(self: ResidentFixture, allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !Resident {
+    fn restore(
+        self: ResidentFixture,
+        allocator: std.mem.Allocator,
+        prepared: *const @import("kosmos").Prepared,
+    ) !Resident {
         var resident = try Resident.restore(allocator, prepared, self.checkpoint);
         errdefer releaseResident(&resident);
         if (self.prefix_steps != 0) {
@@ -484,37 +598,63 @@ const ResidentFixture = struct {
     }
 };
 
-fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
-    // Exhaust the native allocation sites of one selected guest transition and
-    // its publication. Whole-program behavior is checked separately.
+fn residentFailureSweep(
+    prepared: *const @import("kosmos").Prepared,
+    fixture: ResidentFixture,
+    control: horos.data.invocation.Control,
+    checkpoint_mode: bool,
+) !void {
     var reference = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&reference);
-    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(
+        testing.allocator,
+    );
     defer if (reconstructed) |bytes| testing.allocator.free(bytes);
     const checkpoint = reconstructed orelse fixture.checkpoint;
-    var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    var expected = try reference.drive(testing.allocator, control, .{
+        .quantum = 1,
+        .checkpoint = checkpoint_mode,
+    });
     defer expected.deinit();
-    var failures: usize = 0;
+    const allocation_count = try residentTransitionAllocations(
+        prepared,
+        fixture,
+        control,
+        checkpoint_mode,
+    );
     var failed_after_mutation = false;
-    while (true) : (failures += 1) {
+    for (0..allocation_count + 1) |failures| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
         var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
-        var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+        var statistics: std.meta.Child(
+            @typeInfo(@FieldType(Session, "statistics")).optional.child,
+        ) = .{};
         try resident.setStatistics(&statistics);
         const collection_cursors = (try resident.diagnostics()).collection_cursors;
         failing.fail_index = failing.alloc_index + failures;
         failing.resize_fail_index = failing.resize_index;
-        var output = resident.drive(failing.allocator(), control, .{ .quantum = 1, .checkpoint = checkpoint_mode }) catch |err| {
+        var output = resident.drive(failing.allocator(), control, .{
+            .quantum = 1,
+            .checkpoint = checkpoint_mode,
+        }) catch |err| {
             failing.fail_index = std.math.maxInt(usize);
             failing.resize_fail_index = std.math.maxInt(usize);
             try testing.expectEqual(error.OutOfMemory, err);
-            try testing.expectEqual(collection_cursors, (try resident.diagnostics()).collection_cursors);
-            failed_after_mutation = failed_after_mutation or statistics.transitions != 0 or statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0;
+            try testing.expectEqual(
+                collection_cursors,
+                (try resident.diagnostics()).collection_cursors,
+            );
+            failed_after_mutation = failed_after_mutation or
+                statistics.transitions != 0 or
+                statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0;
             const unchanged = try resident.checkpoint(testing.allocator);
             defer testing.allocator.free(unchanged);
             try testing.expectEqualSlices(u8, checkpoint, unchanged);
-            var retried = try resident.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+            var retried = try resident.drive(testing.allocator, control, .{
+                .quantum = 1,
+                .checkpoint = checkpoint_mode,
+            });
             defer retried.deinit();
             try testing.expectEqualDeep(expected.record, retried.record);
             continue;
@@ -524,42 +664,66 @@ fn residentFailureSweep(prepared: *const @import("kosmos").Prepared, fixture: Re
         failing.resize_fail_index = std.math.maxInt(usize);
         try testing.expectEqualDeep(expected.record, output.record);
         try testing.expect(failures != 0 and failed_after_mutation);
-        break;
+        return;
     }
+    return error.MissingAllocationSweepSuccess;
 }
 
-fn residentPublicationFailure(prepared: *const @import("kosmos").Prepared, fixture: ResidentFixture, control: horos.data.invocation.Control, checkpoint_mode: bool) !void {
+fn residentPublicationFailure(
+    prepared: *const @import("kosmos").Prepared,
+    fixture: ResidentFixture,
+    control: horos.data.invocation.Control,
+    checkpoint_mode: bool,
+) !void {
     var reference = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&reference);
-    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(testing.allocator);
+    const reconstructed = if (fixture.prefix_steps == 0) null else try reference.checkpoint(
+        testing.allocator,
+    );
     defer if (reconstructed) |bytes| testing.allocator.free(bytes);
     const checkpoint = reconstructed orelse fixture.checkpoint;
-    var expected = try reference.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    var expected = try reference.drive(testing.allocator, control, .{
+        .quantum = 1,
+        .checkpoint = checkpoint_mode,
+    });
     defer expected.deinit();
     var resident = try fixture.restore(testing.allocator, prepared);
     defer releaseResident(&resident);
-    var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+    var statistics: std.meta.Child(
+        @typeInfo(@FieldType(Session, "statistics")).optional.child,
+    ) = .{};
     try resident.setStatistics(&statistics);
     const cursors = (try resident.diagnostics()).collection_cursors;
-    // Encoded output is allocated after execution and all observation staging,
-    // immediately before the shared commit fence. Fail there for every real
-    // guest fixture, including both publication modes, then retry its command.
     var empty: [0]u8 = .{};
     var output = std.heap.FixedBufferAllocator.init(&empty);
-    try testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), control, .{ .quantum = 1, .checkpoint = checkpoint_mode }));
-    try testing.expect(statistics.transitions != 0 or statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0);
+    try testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), control, .{
+        .quantum = 1,
+        .checkpoint = checkpoint_mode,
+    }));
+    try testing.expect(
+        statistics.transitions != 0 or
+            statistics.storage.added_nodes != 0 or statistics.storage.journal_nodes != 0,
+    );
     try testing.expectEqual(cursors, (try resident.diagnostics()).collection_cursors);
     const unchanged = try resident.checkpoint(testing.allocator);
     defer testing.allocator.free(unchanged);
     try testing.expectEqualSlices(u8, checkpoint, unchanged);
-    var retried = try resident.drive(testing.allocator, control, .{ .quantum = 1, .checkpoint = checkpoint_mode });
+    var retried = try resident.drive(testing.allocator, control, .{
+        .quantum = 1,
+        .checkpoint = checkpoint_mode,
+    });
     defer retried.deinit();
     try testing.expectEqualDeep(expected.record, retried.record);
 }
 
-test "ownership: resident rollback preserves acquired replies, cleanup custody, and reentrant captures through failed publication" {
+test "ownership: rollback preserves replies cleanup and reentry on publication failure" {
     const protocol = horos.data.invocation;
-    inline for (.{ retainedInputExample, source.examples.unwind, source.examples.reentrant, source.examples.cloned }, 0..) |example, index| {
+    inline for (.{
+        retainedInputExample,
+        source.examples.unwind,
+        source.examples.reentrant,
+        source.examples.cloned,
+    }, 0..) |example, index| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
         var compiled = try source.lower(testing.allocator, try example(&builder));
@@ -575,44 +739,48 @@ test "ownership: resident rollback preserves acquired replies, cleanup custody, 
         };
         var session = try Session.start(testing.allocator, &prepared, arguments);
         defer session.deinit();
-        if (index == 3) {
-            // Roll back an actual clone, including all new guest identities.
-            var found = false;
-            for (0..256) |_| {
-                var snapshot = try guestState(&session);
-                defer snapshot.deinit();
-                const node = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
-                const block = session.program.blocks[@intCast(node.record.control.block)];
-                const position = node.activation.?.position;
-                if (position < block.instructions.len and block.instructions[@intCast(position)].opcode == .clone_resumption) {
-                    const before_clone = try session.checkpoint(testing.allocator);
-                    defer testing.allocator.free(before_clone);
-                    for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = before_clone }, .none, with_checkpoint);
-                    found = true;
-                    break;
-                }
-                try session.step();
-            }
-            try testing.expect(found);
-        }
+        if (index == 3) try expectClonePublicationFailure(&session, &prepared);
         const observation = try session.run(null);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
         if (index >= 2) {
             try testing.expect(observation == .yielded);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .resume_yield, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(
+                &prepared,
+                .{ .checkpoint = checkpoint },
+                .resume_yield,
+                with_checkpoint,
+            );
         } else {
             try testing.expect(observation == .requested);
             var pending = try session.pendingRequest(testing.allocator);
             defer pending.deinit();
-            const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = pending.request.request_identity, .value = &.{} });
+            const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+                .request_identity = pending.request.request_identity,
+                .value = &.{},
+            });
             defer testing.allocator.free(reply);
-            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, with_checkpoint);
-            // Exhaust the public reply/transaction/publication owner once.
-            // Guest cleanup, reentry and clone algorithms are ordinary data
-            // programs over the same native transaction and storage owners.
-            if (index == 0) try residentFailureSweep(&prepared, .{ .checkpoint = checkpoint }, .{ .reply = reply }, true);
-            if (index == 1) for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(&prepared, .{ .checkpoint = checkpoint }, .{ .cancel = .{ .text = "stop" } }, with_checkpoint);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(
+                &prepared,
+                .{ .checkpoint = checkpoint },
+                .{ .reply = reply },
+                with_checkpoint,
+            );
+            if (index == 0) try residentFailureSweep(
+                &prepared,
+                .{ .checkpoint = checkpoint },
+                .{ .reply = reply },
+                true,
+            );
+            if (index == 1) for ([_]bool{
+                false,
+                true,
+            }) |with_checkpoint| try residentPublicationFailure(
+                &prepared,
+                .{ .checkpoint = checkpoint },
+                .{ .cancel = .{ .text = "stop" } },
+                with_checkpoint,
+            );
         }
     }
 }
@@ -632,24 +800,24 @@ test "behavior: resident output capacity and checkpoint transfer preserve custod
     try testing.expectError(error.UnfinishedSession, resident.close());
     var pending = try resident.drive(testing.allocator, .none, .{ .checkpoint = true });
     defer pending.deinit();
-    // The separate low-level Session API retains direct transaction access.
-    var engine_storage = try Session.restore(testing.allocator, &prepared, pending.record.requested.state.?);
-    defer engine_storage.deinit();
-    const engine = &engine_storage;
-    const copies = engine.driver.outer.frames.slots.statistics.value_copies;
-    const custody_copies = engine.driver.outer.frames.custody.nodes.statistics.value_copies;
-    {
-        var transaction = try engine.begin();
-        defer transaction.rollback(engine);
-        try testing.expectEqual(copies, engine.driver.outer.frames.slots.statistics.value_copies);
-        try testing.expectEqual(custody_copies, engine.driver.outer.frames.custody.nodes.statistics.value_copies);
-    }
-    var request = try protocol.decode(protocol.Request, testing.allocator, pending.record.requested.request);
+    try expectResidentTransactionCopies(&prepared, pending.record.requested.state.?);
+    var request = try protocol.decode(
+        protocol.Request,
+        testing.allocator,
+        pending.record.requested.request,
+    );
     defer request.deinit();
-    const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = request.value.request_identity, .value = &.{} });
+    const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+        .request_identity = request.value.request_identity,
+        .value = &.{},
+    });
     defer testing.allocator.free(reply);
     var output = @as([512]u8, @splat(0xa5));
-    try testing.expectError(error.Capacity, resident.driveInto(.{ .reply = reply }, .{ .checkpoint = true }, output[0..1]));
+    try testing.expectError(error.Capacity, resident.driveInto(
+        .{ .reply = reply },
+        .{ .checkpoint = true },
+        output[0..1],
+    ));
     for (output) |byte| try testing.expectEqual(0xa5, byte);
     const unchanged = try resident.checkpoint(testing.allocator);
     defer testing.allocator.free(unchanged);
@@ -669,13 +837,20 @@ test "behavior: resident output capacity and checkpoint transfer preserve custod
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, decoded.value.completed);
     try restored.close();
     try testing.expectError(error.InvalidState, restored.close());
-    try testing.expectError(error.InvalidState, restored.drive(testing.allocator, .none, .{ .quantum = 0 }));
+    try testing.expectError(error.InvalidState, restored.drive(
+        testing.allocator,
+        .none,
+        .{ .quantum = 0 },
+    ));
 }
 
 test "ownership: shallow resumption preserves every resident boundary after failed publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.shallowResumptions(&builder),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -697,31 +872,30 @@ test "ownership: shallow resumption preserves every resident boundary after fail
             for (portable.state.nodes) |entry| {
                 const node = entry.record;
                 if (!resuming or node != .one_shot) continue;
-                const signature = compiled.program.schemas[@intCast(node.one_shot.schema)].internal.resumption;
+                const signature = compiled.program.schemas[
+                    @intCast(node.one_shot.schema)
+                ].internal.resumption;
                 if (signature.mode != .shallow) continue;
-                // Fail publication after token consumption at its exact resume.
                 for ([_]bool{ false, true }) |checkpoint_mode|
-                    try residentPublicationFailure(&prepared, .{ .checkpoint = before }, .none, checkpoint_mode);
+                    try residentPublicationFailure(
+                        &prepared,
+                        .{ .checkpoint = before },
+                        .none,
+                        checkpoint_mode,
+                    );
                 swept = true;
                 break;
             }
         }
-        var tiny = [_]u8{0xa5};
-        try testing.expectError(error.Capacity, resident.driveInto(.none, .{ .quantum = 1, .checkpoint = true }, &tiny));
-        try testing.expectEqual(0xa5, tiny[0]);
-        try expectResidentCheckpoint(&resident, before);
-        var empty: [0]u8 = .{};
-        var output = std.heap.FixedBufferAllocator.init(&empty);
-        try testing.expectError(error.OutOfMemory, resident.driveEncoded(output.allocator(), .none, .{ .quantum = 1, .checkpoint = true }));
-        try expectResidentCheckpoint(&resident, before);
-        try testing.expectError(error.OutOfMemory, resident.drive(output.allocator(), .none, .{ .quantum = 1, .checkpoint = true }));
-        try expectResidentCheckpoint(&resident, before);
-        var succeeded = try resident.drive(testing.allocator, .none, .{ .quantum = 1, .checkpoint = true });
+        try expectResidentOutputFailures(&resident, before);
+        var succeeded = try resident.drive(
+            testing.allocator,
+            .none,
+            .{ .quantum = 1, .checkpoint = true },
+        );
         defer succeeded.deinit();
         if (succeeded.record == .completed) {
             try testing.expect(swept);
-            // Independent source expectation: four shallow value answers and
-            // four shallow computation answers retain their distinct results.
             var expected: [64]u8 = undefined;
             for ([_]u64{ 99, 99, 99, 99, 42, 42, 42, 42 }, 0..) |value, i|
                 std.mem.writeInt(u64, expected[i * 8 ..][0..8], value, .little);
@@ -743,57 +917,31 @@ test "behavior: independent native residents release shared preparation exactly 
     if (@import("builtin").single_threaded) return error.SkipZigTest;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.installations(&builder, 1),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
     var memory: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer if (memory.deinit() != .ok) @panic("shared preparation leaked");
     const allocator = memory.allocator();
-    const Job = struct {
-        prepared: @import("kosmos").Prepared,
-        allocator: std.mem.Allocator,
-        ready: *std.atomic.Value(usize),
-        start: *std.atomic.Value(bool),
-        failure: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            _ = self.ready.fetchAdd(1, .release);
-            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
-            self.work() catch |err| {
-                self.failure = err;
-            };
-        }
-        fn work(self: *@This()) !void {
-            defer self.prepared.deinit();
-            for (0..32) |_| {
-                var resident = try Resident.start(self.allocator, &self.prepared, &.{});
-                defer releaseResident(&resident);
-                var result = try resident.drive(self.allocator, .none, .{});
-                defer result.deinit();
-                if (result.record != .completed or !std.mem.eql(u8, result.record.completed, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }))
-                    return error.UnexpectedResult;
-                try resident.close();
-            }
-            var terminal = try Resident.start(self.allocator, &self.prepared, &.{});
-            defer releaseResident(&terminal);
-            var result = try terminal.drive(self.allocator, .none, .{});
-            defer result.deinit();
-            if (result.record != .completed) return error.UnexpectedResult;
-            self.prepared.deinit();
-            try terminal.close();
-        }
-    };
     for (0..8) |_| {
         var prepared = try @import("kosmos").Prepared.init(allocator, image);
         defer prepared.deinit();
         var ready: std.atomic.Value(usize) = .init(0);
         var start: std.atomic.Value(bool) = .init(false);
-        var jobs: [8]Job = undefined;
+        var jobs: [8]ResidentJob = undefined;
         var initialized: usize = 0;
         defer for (jobs[0..initialized]) |*job| job.prepared.deinit();
         for (&jobs) |*job| {
-            job.* = .{ .prepared = try prepared.clone(), .allocator = allocator, .ready = &ready, .start = &start };
+            job.* = .{
+                .prepared = try prepared.clone(),
+                .allocator = allocator,
+                .ready = &ready,
+                .start = &start,
+            };
             initialized += 1;
         }
         prepared.deinit();
@@ -804,10 +952,10 @@ test "behavior: independent native residents release shared preparation exactly 
             for (threads[0..started]) |thread| thread.join();
         }
         for (&jobs) |*job| {
-            threads[started] = try std.Thread.spawn(.{}, Job.run, .{job});
+            threads[started] = try std.Thread.spawn(.{}, ResidentJob.run, .{job});
             started += 1;
         }
-        while (ready.load(.acquire) != jobs.len) std.atomic.spinLoopHint();
+        while (ready.load(.acquire) != jobs.len) std.atomic.spinLoopHint(); // tiger: event-loop
         start.store(true, .release);
         for (threads) |thread| thread.join();
         started = 0;
@@ -883,8 +1031,6 @@ test "behavior: resident gate rejects reentrant observation during allocator cal
     var resident = try Resident.start(allocator, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer releaseResident(&resident);
     callback.resident = &resident;
-    // A zero-work observation need not allocate. Enter a real transition so the
-    // callback observes the gate while its owner is mutating the session.
     var result = try resident.drive(testing.allocator, .none, .{ .quantum = 1 });
     defer result.deinit();
     try testing.expect(callback.attempted);
@@ -908,7 +1054,11 @@ fn checkedCheckpoint(subject: *Session) !void {
     defer testing.allocator.free(bytes);
     var decoded = try horos.data.state_image.decodeGraph(testing.allocator, bytes);
     defer decoded.deinit();
-    try horos.data.state_admission.validateStable(testing.allocator, subject.program, decoded.state);
+    try horos.data.state_admission.validateStable(
+        testing.allocator,
+        subject.program,
+        decoded.state,
+    );
     const reencoded = try horos.data.state_image.emit(testing.allocator, decoded.state);
     defer testing.allocator.free(reencoded);
     try testing.expectEqualSlices(u8, bytes, reencoded);
@@ -922,17 +1072,22 @@ fn retainedPreparation(subject: *Session) !@import("kosmos").Prepared {
     const core = subject.driver.selected;
     const borrowed: @import("kosmos").Prepared = .{
         .guest = .{ .core = subject.prepared },
-        .runtime = .{ .core = core, .content = core.content, .program = core.program, .helpers = core.helpers, .identity = core.identity },
+        .runtime = .{
+            .core = core,
+            .content = core.content,
+            .program = core.program,
+            .helpers = core.helpers,
+            .identity = core.identity,
+        },
     };
     return borrowed.clone();
 }
 
-fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Session.observe)).@"fn".return_type.?).error_union.payload {
+fn drive(subject: *Session, quantum: ?usize) !@typeInfo(
+    @typeInfo(@TypeOf(Session.observe)).@"fn".return_type.?,
+).error_union.payload {
     const before = try subject.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
-    // Every cut still reconstructs fresh mutable owners. Image/evaluator
-    // admission and the invoke wrapper have their own tests; repeating their
-    // immutable preparation at every instruction adds no lifecycle case.
     var prepared = try retainedPreparation(subject);
     defer prepared.deinit();
     var invocation_session = try Session.restore(testing.allocator, &prepared, before);
@@ -941,12 +1096,17 @@ fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Sessio
     defer releaseResident(&resident);
     @memset(before, 0xff);
     const result = try subject.run(quantum);
-    // advance(.none) calls Session.run directly. This reconstructed owner
-    // proves both restoration and invocation agreement in one execution.
     _ = try @import("kosmos").invocation.advance(&invocation_session, .none, quantum);
-    var fresh = try @import("kosmos").invocation.finish(testing.allocator, &invocation_session, true);
+    var fresh = try @import("kosmos").invocation.finish(
+        testing.allocator,
+        &invocation_session,
+        true,
+    );
     defer fresh.deinit();
-    var committed = try resident.drive(testing.allocator, .none, .{ .quantum = quantum, .checkpoint = true });
+    var committed = try resident.drive(testing.allocator, .none, .{
+        .quantum = quantum,
+        .checkpoint = true,
+    });
     defer committed.deinit();
     try testing.expectEqualDeep(fresh.record, committed.record);
     const expected = try subject.checkpoint(testing.allocator);
@@ -954,28 +1114,7 @@ fn drive(subject: *Session, quantum: ?usize) !@typeInfo(@typeInfo(@TypeOf(Sessio
     const actual = try invocation_session.checkpoint(testing.allocator);
     defer testing.allocator.free(actual);
     try testing.expectEqualSlices(u8, expected, actual);
-    switch (result) {
-        .progressed => try testing.expectEqualSlices(u8, expected, fresh.record.progressed.?),
-        .yielded => try testing.expectEqualSlices(u8, expected, fresh.record.yielded.?),
-        .requested => {
-            try testing.expectEqualSlices(u8, expected, fresh.record.requested.state.?);
-            var pending = try subject.pendingRequest(testing.allocator);
-            defer pending.deinit();
-            var decoded = try horos.data.invocation.decode(horos.data.invocation.Request, testing.allocator, fresh.record.requested.request);
-            defer decoded.deinit();
-            try testing.expectEqualDeep(pending.request, decoded.value);
-        },
-        .completed => |value| try testing.expectEqualSlices(u8, try subject.bytes(&value), fresh.record.completed),
-        .failed => |value| {
-            try testing.expectEqualSlices(u8, try subject.bytes(&value), fresh.record.failed.value);
-            try testing.expectEqualDeep((try subject.terminalExit()).cancellation, fresh.record.failed.cancellation);
-            try expectCleanupFailures(subject, fresh.record.failed.cleanup_failures);
-        },
-        .cancelled => |reason| {
-            try testing.expectEqualDeep(reason, fresh.record.cancelled.reason);
-            try expectCleanupFailures(subject, fresh.record.cancelled.cleanup_failures);
-        },
-    }
+    try expectInvocationObservation(subject, result, expected, fresh.record);
     try checkedCheckpoint(subject);
     return result;
 }
@@ -984,7 +1123,11 @@ fn expectCleanupFailures(subject: *Session, bytes: []const u8) !void {
     var reader: horos.data.wire.Reader = .{ .input = bytes };
     const failures = (try subject.terminalExit()).cleanup_failures;
     try testing.expectEqual(failures.len, try reader.count());
-    for (failures) |value| try testing.expectEqualSlices(u8, try subject.bytes(&value), try reader.bytes());
+    for (failures) |value| try testing.expectEqualSlices(
+        u8,
+        try subject.bytes(&value),
+        try reader.bytes(),
+    );
     try reader.finish();
 }
 
@@ -1002,20 +1145,31 @@ fn checkpointFailure(allocator: std.mem.Allocator, subject: *Session, before: []
 test "ownership: failed PST3 export retains exactly the same resident instruction boundary" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.installations(&builder, 1),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     try testing.expect(try session.run(1) == .progressed);
     const before = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(before);
-    try @import("allocation_testing.zig").check(testing.allocator, checkpointFailure, .{ &session, before });
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        checkpointFailure,
+        .{ &session, before },
+    );
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
     try testing.expectEqual(1, (try session.bytes(&result.completed))[0]);
 }
 
-fn initFromImage(allocator: std.mem.Allocator, program: horos.data.activation.Program, arguments: []const u8) !Session {
+fn initFromImage(
+    allocator: std.mem.Allocator,
+    program: horos.data.activation.Program,
+    arguments: []const u8,
+) !Session {
     const codec = horos.data.program_image;
     const image = try allocator.alloc(u8, try codec.encodedLength(program));
     defer allocator.free(image);
@@ -1047,9 +1201,15 @@ test "behavior: prepared Programs reuse immutable code and facts across sequenti
     const retained = try prepared.storageBytes();
     var shared_code: ?[*]const horos.data.activation.Function = null;
     for ([_]u8{ 1, 2, 3 }) |input| {
-        var session = try Session.start(testing.allocator, &prepared, &.{ input, 0, 0, 0, 0, 0, 0, 0 });
+        var session = try Session.start(
+            testing.allocator,
+            &prepared,
+            &.{ input, 0, 0, 0, 0, 0, 0, 0 },
+        );
         defer session.deinit();
-        if (shared_code) |pointer| try testing.expect(pointer == session.program.functions.ptr) else shared_code = session.program.functions.ptr;
+        if (shared_code) |pointer| try testing.expect(
+            pointer == session.program.functions.ptr,
+        ) else shared_code = session.program.functions.ptr;
         try testing.expect(try session.run(null) == .requested);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
@@ -1061,7 +1221,11 @@ test "behavior: prepared Programs reuse immutable code and facts across sequenti
         const result = try session.run(null);
         const other = try restored.run(null);
         try testing.expectEqual(input, (try session.bytes(&result.completed))[0]);
-        try testing.expectEqualSlices(u8, try session.bytes(&result.completed), try restored.bytes(&other.completed));
+        try testing.expectEqualSlices(
+            u8,
+            try session.bytes(&result.completed),
+            try restored.bytes(&other.completed),
+        );
         try testing.expectEqual(retained, try prepared.storageBytes());
     }
 }
@@ -1086,18 +1250,29 @@ test "behavior: Sessions retain preparation after all external prepared handles 
     clone.deinit();
     try testing.expectError(error.InvalidState, Session.start(testing.allocator, &prepared, &.{}));
     try testing.expectError(error.InvalidState, Session.restore(testing.allocator, &clone, &.{}));
-    try testing.expectError(error.InvalidState, Session.restore(testing.allocator, &clone, checkpoint));
+    try testing.expectError(error.InvalidState, Session.restore(
+        testing.allocator,
+        &clone,
+        checkpoint,
+    ));
     try testing.expect(try session.run(null) == .requested);
     try answerWithValue(&session, &.{});
     const result = try session.run(null);
     try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
 }
 
-fn startPreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !void {
+fn startPreparedFailure(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+) !void {
     var session = try Session.start(allocator, prepared, &.{ 1, 0, 0, 0, 0, 0, 0, 0 });
     defer session.deinit();
 }
-fn restorePreparedFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, checkpoint: []const u8) !void {
+fn restorePreparedFailure(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+    checkpoint: []const u8,
+) !void {
     var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
 }
@@ -1111,13 +1286,21 @@ test "ownership: failed prepared starts and restores preserve the reusable owner
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, bytes);
     defer prepared.deinit();
     const retained = try prepared.storageBytes();
-    try @import("allocation_testing.zig").check(testing.allocator, startPreparedFailure, .{&prepared});
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        startPreparedFailure,
+        .{&prepared},
+    );
     var session = try Session.start(testing.allocator, &prepared, &.{ 1, 0, 0, 0, 0, 0, 0, 0 });
     defer session.deinit();
     try testing.expect(try session.run(null) == .requested);
     const checkpoint = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(checkpoint);
-    try @import("allocation_testing.zig").check(testing.allocator, restorePreparedFailure, .{ &prepared, checkpoint });
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        restorePreparedFailure,
+        .{ &prepared, checkpoint },
+    );
     try testing.expectEqual(retained, try prepared.storageBytes());
     try answerWithValue(&session, &.{});
     try testing.expect(try session.run(null) == .completed);
@@ -1126,10 +1309,24 @@ test "ownership: failed prepared starts and restores preserve the reusable owner
 fn retainedInputExample(builder: *source.Builder) !source.Module {
     const integer = try builder.scalar(u64);
     const unit = try builder.scalar(void);
-    const effect = try builder.effect(.{ .identity = "binding/read", .payload = unit, .result = unit });
+    const effect = try builder.effect(.{
+        .identity = "binding/read",
+        .payload = unit,
+        .result = unit,
+    });
     const main = try builder.declare(&.{integer}, integer, &.{effect}, &.{});
-    const operation = try builder.term(.{ .perform = .{ .effect = effect, .payload = try builder.constant(void, {}) } });
-    try builder.define(main, try builder.bind(try builder.variable(unit), operation, try builder.pure(try builder.reference(builder.parameter(main, 0)))));
+    const operation = try builder.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try builder.constant(void, {}),
+    } });
+    try builder.define(
+        main,
+        try builder.bind(
+            try builder.variable(unit),
+            operation,
+            try builder.pure(try builder.reference(builder.parameter(main, 0))),
+        ),
+    );
     return builder.module(main, unit);
 }
 
@@ -1139,12 +1336,16 @@ fn invocationFailure(allocator: std.mem.Allocator, command: []const u8) !void {
         for (output) |byte| try testing.expectEqual(0xa5, byte);
         return err;
     };
-    var decoded = try horos.data.invocation.decode(horos.data.invocation.Outcome, testing.allocator, bytes);
+    var decoded = try horos.data.invocation.decode(
+        horos.data.invocation.Outcome,
+        testing.allocator,
+        bytes,
+    );
     defer decoded.deinit();
     try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, decoded.value.completed);
 }
 
-test "ownership: current fresh invocation binds captured values and rejects stale replies without mutation" {
+test "ownership: fresh invocation binds captures and rejects stale replies without mutation" {
     const protocol = horos.data.invocation;
     const fresh = @import("kosmos").invocation;
     var builder = source.Builder.init(testing.allocator);
@@ -1153,65 +1354,57 @@ test "ownership: current fresh invocation binds captured values and rejects stal
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var first = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .initial_args = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } } });
+    var first = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .initial_args = &.{ 1, 0, 0, 0, 0, 0, 0, 0 },
+    } });
     defer first.deinit();
-    var second = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .initial_args = &.{ 2, 0, 0, 0, 0, 0, 0, 0 } } });
+    var second = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .initial_args = &.{ 2, 0, 0, 0, 0, 0, 0, 0 },
+    } });
     defer second.deinit();
-    var first_request = try protocol.decode(protocol.Request, testing.allocator, first.record.requested.request);
+    var first_request = try protocol.decode(
+        protocol.Request,
+        testing.allocator,
+        first.record.requested.request,
+    );
     defer first_request.deinit();
-    var second_request = try protocol.decode(protocol.Request, testing.allocator, second.record.requested.request);
+    var second_request = try protocol.decode(
+        protocol.Request,
+        testing.allocator,
+        second.record.requested.request,
+    );
     defer second_request.deinit();
-    try testing.expectEqualDeep(first_request.value.binding.semantic_identity, second_request.value.binding.semantic_identity);
-    try testing.expectEqualSlices(u8, first_request.value.binding.payload, second_request.value.binding.payload);
-    try testing.expect(!std.mem.eql(u8, &first_request.value.request_identity, &second_request.value.request_identity));
-    var poll = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .state = first.record.requested.state.? } });
+    try expectDistinctRequestCaptures(first_request.value, second_request.value);
+    var poll = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .state = first.record.requested.state.?,
+    } });
     defer poll.deinit();
     try testing.expectEqualDeep(first.record, poll.record);
-    const stale = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = first_request.value.request_identity, .value = &.{} });
+    const stale = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+        .request_identity = first_request.value.request_identity,
+        .value = &.{},
+    });
     defer testing.allocator.free(stale);
     try testing.expectError(error.InvalidResult, fresh.invoke(testing.allocator, .{
         .image = image,
         .instance = .{ .state = second.record.requested.state.? },
         .control = .{ .reply = stale },
     }));
-    var resident = try Session.restoreImage(testing.allocator, image, second.record.requested.state.?);
+    var resident = try Session.restoreImage(
+        testing.allocator,
+        image,
+        second.record.requested.state.?,
+    );
     defer resident.deinit();
     try testing.expectError(error.InvalidResult, resident.answer(stale));
     const unchanged = try resident.checkpoint(testing.allocator);
     defer testing.allocator.free(unchanged);
     try testing.expectEqualSlices(u8, second.record.requested.state.?, unchanged);
-    const response = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = second_request.value.request_identity, .value = &.{} });
-    defer testing.allocator.free(response);
-    var zero = try fresh.invoke(testing.allocator, .{
-        .image = image,
-        .instance = .{ .state = second.record.requested.state.? },
-        .control = .{ .reply = response },
-        .quantum = 0,
-    });
-    defer zero.deinit();
-    try testing.expect(zero.record == .progressed);
-    try testing.expectError(error.InvalidState, fresh.invoke(testing.allocator, .{
-        .image = image,
-        .instance = .{ .state = zero.record.progressed.? },
-        .control = .{ .reply = response },
-    }));
-    var completed = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .state = zero.record.progressed.? } });
-    defer completed.deinit();
-    try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, completed.record.completed);
-    const command = try protocol.encodeOwned(protocol.Input, testing.allocator, .{
-        .image = image,
-        .instance = .{ .state = second.record.requested.state.? },
-        .control = .{ .reply = response },
-    });
-    defer testing.allocator.free(command);
-    const original = try testing.allocator.dupe(u8, command);
-    defer testing.allocator.free(original);
-    try @import("allocation_testing.zig").check(testing.allocator, invocationFailure, .{command});
-    try testing.expectEqualSlices(u8, original, command);
-    var output = @as([32]u8, @splat(0xa5));
-    try testing.expectError(error.Capacity, fresh.invokeInto(testing.allocator, command, output[0..1]));
-    for (output) |byte| try testing.expectEqual(0xa5, byte);
-    try testing.expectEqualSlices(u8, original, command);
+    try expectFreshReplyConsumption(
+        image,
+        second.record.requested.state.?,
+        second_request.value.request_identity,
+    );
 }
 
 test "behavior: current invocation preserves explicit yield polling and cancellation before work" {
@@ -1220,14 +1413,24 @@ test "behavior: current invocation preserves explicit yield polling and cancella
     defer builder.deinit();
     const integer = try builder.scalar(u64);
     const main = try builder.declare(&.{}, integer, &.{}, &.{});
-    try builder.define(main, try builder.term(.{ .yield_then = try builder.pure(try builder.constant(u64, 42)) }));
-    var compiled = try source.lower(testing.allocator, builder.module(main, try builder.scalar(void)));
+    try builder.define(main, try builder.term(.{
+        .yield_then = try builder.pure(try builder.constant(u64, 42)),
+    }));
+    var compiled = try source.lower(
+        testing.allocator,
+        builder.module(main, try builder.scalar(void)),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
-    var yielded = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .initial_args = &.{} } });
+    var yielded = try fresh.invoke(testing.allocator, .{
+        .image = image,
+        .instance = .{ .initial_args = &.{} },
+    });
     defer yielded.deinit();
-    var poll = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .state = yielded.record.yielded.? } });
+    var poll = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .state = yielded.record.yielded.?,
+    } });
     defer poll.deinit();
     try testing.expectEqualDeep(yielded.record, poll.record);
     var resumed = try fresh.invoke(testing.allocator, .{
@@ -1238,7 +1441,9 @@ test "behavior: current invocation preserves explicit yield polling and cancella
     });
     defer resumed.deinit();
     try testing.expect(resumed.record == .progressed);
-    var completed = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .state = resumed.record.progressed.? } });
+    var completed = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .state = resumed.record.progressed.?,
+    } });
     defer completed.deinit();
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, completed.record.completed);
     var cancelled = try fresh.invoke(testing.allocator, .{
@@ -1248,9 +1453,10 @@ test "behavior: current invocation preserves explicit yield polling and cancella
         .quantum = 0,
     });
     defer cancelled.deinit();
-    // Zero work can initiate cancellation; an unwind may need further quanta.
     if (cancelled.record == .progressed) {
-        var done = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{ .state = cancelled.record.progressed.? } });
+        var done = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+            .state = cancelled.record.progressed.?,
+        } });
         defer done.deinit();
         try testing.expectEqualStrings("stop", done.record.cancelled.reason.text);
     } else try testing.expectEqualStrings("stop", cancelled.record.cancelled.reason.text);
@@ -1267,17 +1473,29 @@ test "behavior: cancellation rebinds a pending cleanup without repeating its sem
     try testing.expect(try session.run(null) == .requested);
     var before = try session.pendingRequest(testing.allocator);
     defer before.deinit();
-    const acquired_result = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = before.request.request_identity, .value = &.{} });
+    const acquired_result = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+        .request_identity = before.request.request_identity,
+        .value = &.{},
+    });
     defer testing.allocator.free(acquired_result);
     try session.cancel(.{ .text = "stop" });
     var after = try session.pendingRequest(testing.allocator);
     defer after.deinit();
-    try testing.expectEqualStrings(before.request.binding.semantic_identity, after.request.binding.semantic_identity);
-    try testing.expectEqualSlices(u8, before.request.binding.payload, after.request.binding.payload);
-    try testing.expect(!std.mem.eql(u8, &before.request.request_identity, &after.request.request_identity));
+    try testing.expectEqualStrings(
+        before.request.binding.semantic_identity,
+        after.request.binding.semantic_identity,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        before.request.binding.payload,
+        after.request.binding.payload,
+    );
+    try testing.expect(!std.mem.eql(
+        u8,
+        &before.request.request_identity,
+        &after.request.request_identity,
+    ));
     try testing.expectError(error.InvalidResult, session.answer(acquired_result));
-    // The host explicitly re-encodes the already obtained typed result against
-    // the successor challenge; no external operation runs inside this helper.
     try answerWithValue(&session, &.{});
     try testing.expect(try session.run(null) == .requested);
     try answerWithValue(&session, &.{});
@@ -1286,7 +1504,11 @@ test "behavior: cancellation rebinds a pending cleanup without repeating its sem
     try testing.expectEqualStrings("stop", (try session.terminalExit()).cancellation.?.text);
 }
 
-fn restoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, checkpoint: []const u8) !void {
+fn restoreFailure(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+    checkpoint: []const u8,
+) !void {
     var session = try Session.restore(allocator, prepared, checkpoint);
     defer session.deinit();
     const bytes = try session.checkpoint(testing.allocator);
@@ -1297,7 +1519,10 @@ fn restoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos
 test "ownership: PST3 restore releases every partial owner on allocation failure" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 1));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.installations(&builder, 1),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -1308,9 +1533,11 @@ test "ownership: PST3 restore releases every partial owner on allocation failure
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    // Image admission owns its failure sweep. This one owns state admission,
-    // partial restored sessions, and byte-identical checkpoint reconstruction.
-    try @import("allocation_testing.zig").check(testing.allocator, restoreFailure, .{ &prepared, checkpoint });
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        restoreFailure,
+        .{ &prepared, checkpoint },
+    );
 }
 
 fn rejectCheckpoint(image: []const u8, state: horos.data.process_state.State) !void {
@@ -1327,7 +1554,10 @@ test "behavior: PST3 restore rejects wrong identity, code position, slots, and c
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.resourceScalar(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.resourceScalar(&builder),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -1361,20 +1591,7 @@ test "behavior: PST3 restore rejects wrong identity, code position, slots, and c
                 checked_frame = true;
             }
             if (!checked_binding and original.activation.?.bindings.len != 0) {
-                const bindings = try testing.allocator.dupe(data.process_state.Binding, original.activation.?.bindings);
-                defer testing.allocator.free(bindings);
-                node.activation.?.bindings = bindings;
-                bindings[0].slot = std.math.maxInt(u64);
-                // A single-row view avoids failing only the sorted-slot shape rule.
-                node.activation.?.bindings = bindings[0..1];
-                node.activation.?.owners = &.{};
-                if (bindings[0].value.body == .owned) node.activation.?.owners = &.{.{ .scope = node.activation.?.scope, .slot = std.math.maxInt(u64) }};
-                try rejectCheckpoint(image, forged);
-                node.* = original;
-                node.activation.?.bindings = &.{};
-                node.activation.?.owners = &.{};
-                try rejectCheckpoint(image, forged);
-                node.* = original;
+                try rejectCorruptBindings(image, forged, node, original);
                 checked_binding = true;
             }
         }
@@ -1392,7 +1609,10 @@ test "behavior: PST3 restore rejects aliased unique packages after graph renumbe
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.custodyOrder(&builder, 0));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.custodyOrder(&builder, 0),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -1427,7 +1647,6 @@ test "behavior: imported storage avoids payload copies and releases a large dead
     defer testing.allocator.free(big);
     @memset(big, 0x5a);
     const small: data.graph.Value = .{ .schema = 0, .body = .{ .blob = .{ .id = 1 } } };
-    // This is a physical Store test: no executable Program or control transition.
     const state: data.process_state.State = .{
         .program_identity = @as([32]u8, @splat(0)),
         .status = .active,
@@ -1444,13 +1663,14 @@ test "behavior: imported storage avoids payload copies and releases a large dead
     defer if (!moved) decoded.deinit();
     var store: Store = .{ .allocator = testing.allocator };
     defer store.deinit();
-    var statistics: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
+    var statistics: std.meta.Child(
+        @typeInfo(@FieldType(Session, "statistics")).optional.child,
+    ) = .{};
     store.statistics = &statistics.storage;
     var baseline: Store = .{ .allocator = testing.allocator };
     defer baseline.deinit();
     var baseline_statistics: @TypeOf(statistics) = .{};
     baseline.statistics = &baseline_statistics.storage;
-    // Contrast transferred checkpoint storage with ordinary copying insertion.
     for (state.nodes) |node| _ = try baseline.add(node.record);
     for (state.blobs) |blob| _ = try baseline.literal(&.{.bytes}, .{
         .schema = blob.schema,
@@ -1470,7 +1690,7 @@ test "behavior: imported storage avoids payload copies and releases a large dead
     try testing.expectEqual(1, interned.body.blob.id);
 }
 
-test "behavior: stable borrow admission distinguishes older from fresh references through return clauses" {
+test "behavior: borrow admission distinguishes older from fresh references through return clauses" {
     const fixture = @import("borrow_return_fixtures");
     for (std.enums.values(fixture.ResultFrom)) |from| {
         for ([_]bool{ false, true }) |initial| {
@@ -1478,9 +1698,18 @@ test "behavior: stable borrow admission distinguishes older from fresh reference
                 for ([_]bool{ false, true }) |younger| {
                     var builder = source.Builder.init(testing.allocator);
                     defer builder.deinit();
-                    const module = try fixture.scenario(&builder, from, initial, younger, delegated);
+                    const module = try fixture.scenario(
+                        &builder,
+                        from,
+                        initial,
+                        younger,
+                        delegated,
+                    );
                     if (younger) {
-                        try testing.expectError(error.InvalidOwnership, source.lower(testing.allocator, module));
+                        try testing.expectError(
+                            error.InvalidOwnership,
+                            source.lower(testing.allocator, module),
+                        );
                     } else {
                         var compiled = try source.lower(testing.allocator, module);
                         defer compiled.deinit();
@@ -1498,7 +1727,7 @@ test "behavior: stable borrow admission distinguishes older from fresh reference
     }
 }
 
-test "behavior: stable resource implementations preserve private authority and loans across requests" {
+test "behavior: resource implementations preserve private authority and loans across requests" {
     inline for (.{ source.examples.resourceScalar, source.examples.resourcePair }) |example| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -1507,11 +1736,19 @@ test "behavior: stable resource implementations preserve private authority and l
         var session = try initFromImage(testing.allocator, compiled.program, &.{});
         defer session.deinit();
         var borrowed = false;
-        for ([_][]const u8{ "example/resource-acquire", "example/resource-use", "example/resource-release" }, 0..) |name, index| {
+        for ([_][]const u8{
+            "example/resource-acquire", "example/resource-use", "example/resource-release",
+        }, 0..) |name, index| {
             const pending = try drive(&session, null);
             try testing.expect(pending == .requested);
-            try testing.expectEqualStrings(name, session.program.effects[@intCast(pending.requested.effect)].identity);
-            if (index != 0) try testing.expectEqual(41, (try session.bytes(&pending.requested.payload))[0]);
+            try testing.expectEqualStrings(
+                name,
+                session.program.effects[@intCast(pending.requested.effect)].identity,
+            );
+            if (index != 0) try testing.expectEqual(
+                41,
+                (try session.bytes(&pending.requested.payload))[0],
+            );
             var snapshot = try guestState(&session);
             defer snapshot.deinit();
             for (snapshot.state.nodes) |node| {
@@ -1529,7 +1766,10 @@ test "behavior: stable resource implementations preserve private authority and l
 test "behavior: stable cancellation releases the resource while its protected borrow is suspended" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.resourceScalar(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.resourceScalar(&builder),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -1537,11 +1777,17 @@ test "behavior: stable cancellation releases the resource while its protected bo
     try answerWithValue(&session, &.{ 41, 0, 0, 0, 0, 0, 0, 0 });
     const use = try drive(&session, null);
     try testing.expect(use == .requested);
-    try testing.expectEqualStrings("example/resource-use", session.program.effects[@intCast(use.requested.effect)].identity);
+    try testing.expectEqualStrings(
+        "example/resource-use",
+        session.program.effects[@intCast(use.requested.effect)].identity,
+    );
     try session.cancel(.{ .text = "stop" });
     const release = try drive(&session, null);
     try testing.expect(release == .requested);
-    try testing.expectEqualStrings("example/resource-release", session.program.effects[@intCast(release.requested.effect)].identity);
+    try testing.expectEqualStrings(
+        "example/resource-release",
+        session.program.effects[@intCast(release.requested.effect)].identity,
+    );
     try testing.expectEqual(41, (try session.bytes(&release.requested.payload))[0]);
     try answerWithValue(&session, &.{});
     try testing.expect(try drive(&session, null) == .cancelled);
@@ -1552,7 +1798,13 @@ test "behavior: stable admission rejects a fresh store hidden by a later same-sl
     const data = horos.data;
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try fixture.scenario(&builder, .pair, true, false, false));
+    var compiled = try source.lower(testing.allocator, try fixture.scenario(
+        &builder,
+        .pair,
+        true,
+        false,
+        false,
+    ));
     defer compiled.deinit();
     var image = compiled.program;
     const blocks = try testing.allocator.dupe(data.activation.Block, image.blocks);
@@ -1564,15 +1816,19 @@ test "behavior: stable admission rejects a fresh store hidden by a later same-sl
             for (block.instructions[0..at], 0..) |selected, position| {
                 if (selected.opcode != .field or selected.immediate != 1 or
                     selected.destination != write.operands[1]) continue;
-                const operations = try testing.allocator.alloc(data.activation.Instruction, block.instructions.len + 1);
+                const operations = try testing.allocator.alloc(
+                    data.activation.Instruction,
+                    block.instructions.len + 1,
+                );
                 defer testing.allocator.free(operations);
                 @memcpy(operations[0..block.instructions.len], block.instructions);
-                // Store the fresh field, then overwrite the same slot with the
-                // older field. End-of-block provenance would miss the bad store.
                 operations[position].immediate = 0;
                 operations[operations.len - 1] = selected;
                 block.instructions = operations;
-                try testing.expectError(error.InvalidOwnership, data.activation_ownership.analyze(testing.allocator, image));
+                try testing.expectError(
+                    error.InvalidOwnership,
+                    data.activation_ownership.analyze(testing.allocator, image),
+                );
                 return;
             }
         }
@@ -1584,13 +1840,20 @@ test "behavior: stable source installs real handlers and keeps the final checked
     for ([_]usize{ 1, 8, 64, 128, 256 }) |count| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, count));
+        var compiled = try source.lower(
+            testing.allocator,
+            try source.examples.installations(&builder, count),
+        );
         defer compiled.deinit();
         var session = try initFromImage(testing.allocator, compiled.program, &.{});
         defer session.deinit();
         const result = try drive(&session, null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(count * (count + 1) / 2, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+        try testing.expectEqual(count * (count + 1) / 2, std.mem.readInt(
+            u64,
+            (try session.bytes(&result.completed))[0..8],
+            .little,
+        ));
     }
 }
 
@@ -1600,7 +1863,11 @@ test "behavior: stable source retains an external request and joins into the sam
     const integer = try builder.scalar(u64);
     const boolean = try builder.scalar(bool);
     const unit = try builder.scalar(void);
-    const effect = try builder.effect(.{ .identity = "stable/read", .payload = unit, .result = integer });
+    const effect = try builder.effect(.{
+        .identity = "stable/read",
+        .payload = unit,
+        .result = integer,
+    });
     const main = try builder.declare(&.{boolean}, integer, &.{effect}, &.{});
     const value = try builder.variable(integer);
     const branch = try builder.term(.{ .conditional = .{
@@ -1626,13 +1893,21 @@ test "behavior: stable source retains an external request and joins into the sam
     try answerWithValue(&session, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+    try testing.expectEqual(42, std.mem.readInt(
+        u64,
+        (try session.bytes(&result.completed))[0..8],
+        .little,
+    ));
 }
 
 test "behavior: stable source owns its input and keeps tail-recursive control bounded" {
     var builder = source.Builder.init(testing.allocator);
     var compiled = try source.lower(testing.allocator, try source.examples.recursive(&builder));
-    var session = initFromImage(testing.allocator, compiled.program, &.{ 16, 39, 0, 0, 0, 0, 0, 0 }) catch |err| {
+    var session = initFromImage(
+        testing.allocator,
+        compiled.program,
+        &.{ 16, 39, 0, 0, 0, 0, 0, 0 },
+    ) catch |err| {
         compiled.deinit();
         builder.deinit();
         return err;
@@ -1641,13 +1916,11 @@ test "behavior: stable source owns its input and keeps tail-recursive control bo
     compiled.deinit();
     builder.deinit();
     var result = try drive(&session, 31);
-    while (result == .progressed) {
+    for (0..1_000_000) |_| {
+        if (!(result == .progressed)) break;
         var cut = try guestState(&session);
         defer cut.deinit();
         try testing.expect(cut.state.nodes.len <= 512);
-        // Keep all 10,000 recursive calls and the bound at every 31-step cut.
-        // The framing comparison above is independent of recursion depth;
-        // this resource fixture needs one execution of each remaining slice.
         result = try session.run(31);
         try checkedCheckpoint(&session);
     }
@@ -1658,73 +1931,18 @@ test "behavior: stable source owns its input and keeps tail-recursive control bo
 test "behavior: stable source resumes an owned package after its handler clause has returned" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
-    const unit = try b.scalar(void);
-    const integer = try b.scalar(u64);
-    const effect = try b.effect(.{ .identity = "stable/escape", .payload = unit, .result = integer, .external = false });
-    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
-    const token = try b.reserveSchema();
-    const package = try b.schema(.{ .internal = .{ .suspension_package = token } });
-    const answer = try b.schema(.{ .sum = &.{ integer, package } });
-    try b.defineSchema(token, .{ .internal = .{ .resumption = .{
-        .effect = effect,
-        .input = integer,
-        .answer = answer,
-        .handled = &.{effect},
-        .mode = .deep,
-        .use = .linear,
-    } } });
-    const returns = try b.declare(&.{integer}, answer, &.{}, &.{});
-    try b.define(returns, try b.pure(try b.primitive(answer, .variant, &.{try b.reference(b.parameter(returns, 0))}, 0)));
-    const clause = try b.declare(&.{ unit, token }, answer, &.{}, &.{});
-    const packaged = try b.primitive(package, .package, &.{try b.reference(b.parameter(clause, 1))}, 0);
-    try b.define(clause, try b.pure(try b.primitive(answer, .variant, &.{packaged}, 1)));
-    const handler = try b.handler(.{ .mode = .deep, .input = integer, .answer = answer, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
-    const body = try b.declare(&.{cap}, integer, &.{effect}, &.{});
-    try b.define(body, try b.term(.{ .perform = .{
-        .effect = effect,
-        .capability = try b.reference(b.parameter(body, 0)),
-        .payload = try b.constant(void, {}),
-    } }));
-    const finish = try b.declare(&.{answer}, integer, &.{}, &.{});
-    const ordinary = try b.variable(integer);
-    const suspended = try b.variable(package);
-    const k = try b.variable(token);
-    const resumed = try b.variable(answer);
-    const again = try b.term(.{ .call = .{ .function = finish, .arguments = &.{try b.reference(resumed)} } });
-    const resume_value = try b.term(.{ .resume_value = .{
-        .resumption = try b.reference(k),
-        .argument = try b.constant(u64, 42),
-    } });
-    const recover = try b.bind(k, try b.pure(try b.primitive(token, .unpack, &.{try b.reference(suspended)}, 0)), try b.bind(resumed, resume_value, again));
-    try b.define(finish, try b.term(.{ .match_sum = .{
-        .value = try b.reference(b.parameter(finish, 0)),
-        .cases = &.{
-            .{ .variable = ordinary, .body = try b.pure(try b.reference(ordinary)) },
-            .{ .variable = suspended, .body = recover },
-        },
-    } }));
-    const main = try b.declare(&.{}, integer, &.{}, &.{});
-    const result = try b.variable(answer);
-    const signature = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{cap},
-        .result = integer,
-        .effects = &.{effect},
-    } } });
-    const handled = try b.term(.{ .handle = .{
-        .handler = handler,
-        .body = try b.lambda(body, signature),
-    } });
-    try b.define(main, try b.bind(result, handled, try b.term(.{ .call = .{
-        .function = finish,
-        .arguments = &.{try b.reference(result)},
-    } })));
-    var compiled = try source.lower(testing.allocator, b.module(main, unit));
+    const module = try escapedPackageExample(&b);
+    var compiled = try source.lower(testing.allocator, module);
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     const observed = try drive(&session, null);
     try testing.expect(observed == .completed);
-    try testing.expectEqual(42, std.mem.readInt(u64, (try session.bytes(&observed.completed))[0..8], .little));
+    try testing.expectEqual(42, std.mem.readInt(
+        u64,
+        (try session.bytes(&observed.completed))[0..8],
+        .little,
+    ));
 }
 
 fn failingSession(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared) !void {
@@ -1742,9 +1960,6 @@ test "ownership: stable source releases partial native owners at every allocatio
     defer builder.deinit();
     var compiled = try source.lower(testing.allocator, try source.examples.deep(&builder));
     defer compiled.deinit();
-    // Compare the public entry points once. Their independent sessions use the
-    // ordinary allocator, so replaying them at each fault index adds no fault
-    // coverage. The swept session retains its before/after checkpoint checks.
     var reference = try initFromImage(testing.allocator, compiled.program, &.{});
     defer reference.deinit();
     try testing.expect(try drive(&reference, null) == .completed);
@@ -1752,8 +1967,6 @@ test "ownership: stable source releases partial native owners at every allocatio
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
-    // The allocator under test owns every mutable session allocation. Immutable
-    // preparation has its own sweep and is shared across all failure indices.
     try @import("allocation_testing.zig").check(testing.allocator, failingSession, .{&prepared});
 }
 
@@ -1767,11 +1980,10 @@ test "behavior: stable source reenters a live template-cell cycle without sharin
         defer session.deinit();
         var result = try drive(&session, 1);
         var yielded = false;
-        while (result == .progressed or result == .yielded) {
+        for (0..1_000_000) |_| {
+            if (!(result == .progressed or result == .yielded)) break;
             const before = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(before);
-            // Rebuild all physical ownership from canonical guest state;
-            // the cyclic template and its aliases must survive the transfer.
             try roundTrip(&session);
             const after = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(after);
@@ -1783,18 +1995,26 @@ test "behavior: stable source reenters a live template-cell cycle without sharin
             result = try drive(&session, 1);
         }
         try testing.expect(yielded and result == .completed);
-        try testing.expectEqualSlices(u8, &.{ 113, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+        try testing.expectEqualSlices(
+            u8,
+            &.{ 113, 0, 0, 0, 0, 0, 0, 0 },
+            try session.bytes(&result.completed),
+        );
     }
 }
 
-test "behavior: stable source does not read a reclaimed copyable result only assigned to a dead binding" {
+test "behavior: source does not read a reclaimed copyable result only assigned to a dead binding" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
     const integer = try builder.scalar(u64);
     const unit = try builder.scalar(void);
     const main = try builder.declare(&.{}, integer, &.{}, &.{});
     const unused = try builder.variable(integer);
-    try builder.define(main, try builder.bind(unused, try builder.pure(try builder.constant(u64, 7)), try builder.pure(try builder.constant(u64, 42))));
+    try builder.define(main, try builder.bind(
+        unused,
+        try builder.pure(try builder.constant(u64, 7)),
+        try builder.pure(try builder.constant(u64, 42)),
+    ));
     var compiled = try source.lower(testing.allocator, builder.module(main, unit));
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
@@ -1804,82 +2024,27 @@ test "behavior: stable source does not read a reclaimed copyable result only ass
     try testing.expectEqual(42, (try session.bytes(&result.completed))[0]);
 }
 
-test "behavior: stable retained template preserves an older activation across loop-slot rebindings" {
-    const d = horos.data;
-    const program: d.activation.Program = .{
-        .roots = .{ .entry = 0, .result = 0, .failure = 2 },
-        .schemas = &.{
-            .u64,                                  .boolean,                                                                                                                                              .unit,
-            .{ .internal = .{ .capability = 0 } }, .{ .internal = .{ .resumption = .{ .effect = 0, .input = 1, .answer = 0, .capture_bound = &.{0}, .handled = &.{0}, .mode = .deep, .use = .multi } } }, .{ .internal = .{ .computation = .{ .parameters = &.{3}, .result = 0, .effects = &.{0} } } },
-        },
-        .constants = &.{
-            .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
-            .{ .schema = 0, .bytes = &.{ 2, 0, 0, 0, 0, 0, 0, 0 } },
-            .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
-            .{ .schema = 1, .bytes = &.{0} },
-            .{ .schema = 1, .bytes = &.{1} },
-            .{ .schema = 2, .bytes = &.{} },
-        },
-        .effects = &.{.{ .identity = "stable/loop", .payload = 2, .result = 1, .control_use = .multi, .external = false }},
-        .functions = &.{
-            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 5, 0 } }, .result = 0 },
-            .{ .entry = 2, .inputs = &.{0}, .layout = .{ .slots = &.{ 3, 0, 0, 2, 1, 0, 0, 0, 1, 0 } }, .result = 0, .effects = &.{0} },
-            .{ .entry = 5, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 },
-            .{ .entry = 6, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 2, 4, 1, 0, 1, 0, 0 } }, .result = 0 },
-        },
-        .blocks = &.{
-            .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .computation }}, .terminator = .{ .handle = .{ .handler = 0, .body = 0, .arguments = &.{}, .state = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 1, .source = .returned }} } } } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
-            .{ .function = 1, .instructions = &.{
-                .{ .destination = 1, .opcode = .constant, .immediate = 0 },
-                .{ .destination = 2, .opcode = .constant, .immediate = 1 },
-                .{ .destination = 3, .opcode = .constant, .immediate = 5 },
-                .{ .destination = 9, .opcode = .constant, .immediate = 2 },
-            }, .terminator = .{ .perform = .{ .effect = 0, .capability = 0, .payload = 3, .next = .{ .block = 3, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } },
-            .{ .function = 1, .instructions = &.{
-                .{ .destination = 5, .opcode = .constant, .immediate = 0 },
-                .{ .destination = 6, .opcode = .integer_add, .operands = &.{ 1, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} },
-                .{ .destination = 7, .opcode = .integer_sub, .operands = &.{ 2, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} },
-                .{ .destination = 8, .opcode = .equal, .operands = &.{ 7, 9 } },
-            }, .terminator = .{ .branch = .{
-                .condition = 8,
-                .when_true = .{ .block = 4, .assignments = &.{
-                    .{ .destination = 1, .source = .{ .slot = 6 } },
-                    .{ .destination = 2, .source = .{ .slot = 7 } },
-                } },
-                .when_false = .{ .block = 3, .assignments = &.{
-                    .{ .destination = 1, .source = .{ .slot = 6 } },
-                    .{ .destination = 2, .source = .{ .slot = 7 } },
-                } },
-            } } },
-            .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
-            .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 3, .instructions = &.{.{ .destination = 2, .opcode = .constant, .immediate = 4 }}, .terminator = .{ .resume_value = .{ .resumption = 1, .argument = 2, .next = .{ .block = 7, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
-            .{ .function = 3, .instructions = &.{.{ .destination = 4, .opcode = .constant, .immediate = 3 }}, .terminator = .{ .resume_value = .{ .resumption = 1, .argument = 4, .next = .{ .block = 8, .assignments = &.{.{ .destination = 5, .source = .returned }} } } } },
-            .{ .function = 3, .instructions = &.{.{ .destination = 6, .opcode = .integer_add, .operands = &.{ 3, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} }}, .terminator = .{ .return_value = 6 } },
-        },
-        .handlers = &.{.{ .mode = .deep, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 3, .resumption = 4 }} }},
-        .scopes = .{ .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
-        .constructors = &.{.{ .function = 1, .capture = 0, .schema = 5 }},
-    };
-    var session = try initFromImage(testing.allocator, program, &.{});
+test "behavior: retained template preserves an older activation across loop-slot rebindings" {
+    var session = try initFromImage(testing.allocator, retainedTemplateProgram, &.{});
     defer session.deinit();
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    // Each activation starts at x=1, count=2, then returns 3. The retained
-    // template must not inherit the first branch's x=3/count=0 bindings.
     try testing.expectEqual(6, (try session.bytes(&result.completed))[0]);
 }
 
 test "behavior: stable shallow value and computation resumptions omit the original return clause" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.shallowResumptions(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.shallowResumptions(&builder),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     var result = try drive(&session, 1);
-    while (result == .progressed) {
+    for (0..1_000_000) |_| {
+        if (!(result == .progressed)) break;
         try roundTrip(&session);
         result = try drive(&session, 1);
     }
@@ -1903,7 +2068,8 @@ test "behavior: stable injection selects definition-site versus use-site capabil
             defer session.deinit();
             var result = try drive(&session, 1);
             var saw_injection = false;
-            while (result == .progressed) {
+            for (0..1_000_000) |_| {
+                if (!(result == .progressed)) break;
                 var snapshot = try guestState(&session);
                 defer snapshot.deinit();
                 for (snapshot.state.nodes) |node|
@@ -1914,7 +2080,10 @@ test "behavior: stable injection selects definition-site versus use-site capabil
                 result = try drive(&session, 1);
             }
             try testing.expect(result == .completed);
-            try testing.expectEqual(@as(u64, if (injecting == 0) 109 else 209), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+            try testing.expectEqual(@as(
+                u64,
+                if (injecting == 0) 109 else 209,
+            ), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
             try testing.expectEqual(injecting == 1, saw_injection);
         }
     }
@@ -1931,23 +2100,36 @@ test "behavior: stable cleanup preserves primary failure and resumes external cl
         for ([_][]const u8{ "example/middle-cleanup", "example/outer-cleanup" }) |name| {
             const pending = try drive(&session, null);
             try testing.expect(pending == .requested);
-            try testing.expectEqualStrings(name, session.program.effects[@intCast(pending.requested.effect)].identity);
+            try testing.expectEqualStrings(
+                name,
+                session.program.effects[@intCast(pending.requested.effect)].identity,
+            );
             try roundTrip(&session);
             try answerWithValue(&session, &.{});
         }
         const result = try drive(&session, null);
         try testing.expect(result == .failed);
-        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), (try session.bytes(&result.failed))[0]);
+        try testing.expectEqual(
+            @as(u8, if (primary == 1) 9 else 7),
+            (try session.bytes(&result.failed))[0],
+        );
         try testing.expectEqual(2, (try session.terminalExit()).cleanup_failures.len);
-        try testing.expectEqual(7, (try session.bytes(&(try session.terminalExit()).cleanup_failures[0]))[0]);
-        try testing.expectEqual(8, (try session.bytes(&(try session.terminalExit()).cleanup_failures[1]))[0]);
+        try testing.expectEqual(7, (try session.bytes(
+            &(try session.terminalExit()).cleanup_failures[0],
+        ))[0]);
+        try testing.expectEqual(8, (try session.bytes(
+            &(try session.terminalExit()).cleanup_failures[1],
+        ))[0]);
     }
 }
 
 test "behavior: stable cancellation during yielded cleanup preserves the first reason" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.yieldingCleanup(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.yieldingCleanup(&builder),
+    );
     defer compiled.deinit();
     for ([_]u8{ 0, 1 }) |primary| {
         var session = try initFromImage(testing.allocator, compiled.program, &.{primary});
@@ -1962,7 +2144,10 @@ test "behavior: stable cancellation during yielded cleanup preserves the first r
         }
         const result = try drive(&session, null);
         try testing.expect(result == .failed);
-        try testing.expectEqual(@as(u8, if (primary == 1) 9 else 7), (try session.bytes(&result.failed))[0]);
+        try testing.expectEqual(
+            @as(u8, if (primary == 1) 9 else 7),
+            (try session.bytes(&result.failed))[0],
+        );
         try testing.expectEqualStrings("stop", (try session.terminalExit()).cancellation.?.text);
     }
 }
@@ -1971,14 +2156,18 @@ test "behavior: stable unwind preserves lexical and temporary-owner cleanup orde
     for (0..10) |mode| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        var compiled = try source.lower(testing.allocator, try source.examples.custodyOrder(&builder, @intCast(mode)));
+        var compiled = try source.lower(
+            testing.allocator,
+            try source.examples.custodyOrder(&builder, @intCast(mode)),
+        );
         defer compiled.deinit();
         var session = try initFromImage(testing.allocator, compiled.program, &.{});
         defer session.deinit();
         var requests: usize = 0;
         var yields: usize = 0;
         var result = try drive(&session, 1);
-        while (result == .progressed or result == .yielded or result == .requested) {
+        for (0..1_000_000) |_| {
+            if (!(result == .progressed or result == .yielded or result == .requested)) break;
             if (result == .yielded) {
                 yields += 1;
                 try session.resumeYield();
@@ -1987,7 +2176,11 @@ test "behavior: stable unwind preserves lexical and temporary-owner cleanup orde
                 try testing.expect(requests < 2);
                 const reversed = mode == 1 or mode == 3 or mode >= 4;
                 const label: u64 = if (reversed) 2 - requests else requests + 1;
-                try testing.expectEqual(label, std.mem.readInt(u64, (try session.bytes(&result.requested.payload))[0..8], .little));
+                try testing.expectEqual(label, std.mem.readInt(
+                    u64,
+                    (try session.bytes(&result.requested.payload))[0..8],
+                    .little,
+                ));
                 requests += 1;
                 try answerWithValue(&session, &.{});
             }
@@ -2001,20 +2194,34 @@ test "behavior: stable unwind preserves lexical and temporary-owner cleanup orde
     }
 }
 
-test "behavior: stable cancellation preserves cleanup at entry yield request and answered boundaries" {
+test "behavior: cancellation preserves cleanup at entry yield request and answered boundaries" {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
     const integer = try b.scalar(u64);
     const info = try horos.library.cleanup.exitInfo(&b, integer);
-    const read_effect = try b.effect(.{ .identity = "cancel/read", .payload = unit, .result = integer });
-    const release = try b.effect(.{ .identity = "cancel/release", .payload = info, .result = unit });
+    const read_effect = try b.effect(.{
+        .identity = "cancel/read",
+        .payload = unit,
+        .result = integer,
+    });
+    const release = try b.effect(.{
+        .identity = "cancel/release",
+        .payload = info,
+        .result = unit,
+    });
     const body = try b.declare(&.{}, integer, &.{read_effect}, &.{});
-    const request = try b.term(.{ .perform = .{ .effect = read_effect, .payload = try b.constant(void, {}) } });
+    const request = try b.term(.{ .perform = .{
+        .effect = read_effect,
+        .payload = try b.constant(void, {}),
+    } });
     const repeated = try b.bind(try b.variable(integer), request, request);
     try b.define(body, try b.term(.{ .yield_then = repeated }));
     const cleanup = try b.declare(&.{info}, unit, &.{release}, &.{});
-    try b.define(cleanup, try b.term(.{ .perform = .{ .effect = release, .payload = try b.reference(b.parameter(cleanup, 0)) } }));
+    try b.define(cleanup, try b.term(.{ .perform = .{
+        .effect = release,
+        .payload = try b.reference(b.parameter(cleanup, 0)),
+    } }));
     const body_type = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{},
         .result = integer,
@@ -2065,8 +2272,15 @@ test "behavior: stable clause failure abandons a captured cleanup without losing
     defer session.deinit();
     const pending = try drive(&session, null);
     try testing.expect(pending == .requested);
-    try testing.expectEqualStrings("example/abandoned-release", session.program.effects[@intCast(pending.requested.effect)].identity);
-    try testing.expectEqualSlices(u8, &.{ 1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&pending.requested.payload));
+    try testing.expectEqualStrings(
+        "example/abandoned-release",
+        session.program.effects[@intCast(pending.requested.effect)].identity,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        try session.bytes(&pending.requested.payload),
+    );
     try roundTrip(&session);
     try answerWithValue(&session, &.{});
     const result = try drive(&session, null);
@@ -2084,7 +2298,8 @@ test "behavior: stable generator resumes private state and closes its retained c
     var yields: usize = 0;
     var releases: usize = 0;
     var result = try drive(&session, 1);
-    while (result != .completed) {
+    for (0..1_000_000) |_| {
+        if (!(result != .completed)) break;
         switch (result) {
             .progressed => {},
             .yielded => {
@@ -2093,7 +2308,10 @@ test "behavior: stable generator resumes private state and closes its retained c
             },
             .requested => |pending| {
                 releases += 1;
-                try testing.expectEqualStrings("example/generator-release", session.program.effects[@intCast(pending.effect)].identity);
+                try testing.expectEqualStrings(
+                    "example/generator-release",
+                    session.program.effects[@intCast(pending.effect)].identity,
+                );
                 try testing.expectEqual(43, (try session.bytes(&pending.payload))[0]);
                 try answerWithValue(&session, &.{});
             },
@@ -2102,9 +2320,12 @@ test "behavior: stable generator resumes private state and closes its retained c
         try roundTrip(&session);
         result = try drive(&session, 1);
     }
+    try testing.expect(result == .completed);
     try testing.expectEqual(1, yields);
     try testing.expectEqual(1, releases);
-    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+    try testing.expectEqualSlices(u8, &.{
+        42, 0, 0, 0, 0, 0, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0,
+    }, try session.bytes(&result.completed));
 }
 
 test "behavior: interaction phases follow atomic dispatch and the installed yield successor" {
@@ -2114,7 +2335,10 @@ test "behavior: interaction phases follow atomic dispatch and the installed yiel
     const clause = builder.handlers.items[0].clauses[0].function;
     const body = builder.functions.items[@intCast(clause)].body.?;
     builder.functions.items[@intCast(clause)].body = try builder.term(.{ .yield_then = body });
-    var compiled = try source.lower(testing.allocator, builder.module(module.entry, module.failure));
+    var compiled = try source.lower(
+        testing.allocator,
+        builder.module(module.entry, module.failure),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -2130,7 +2354,8 @@ test "behavior: interaction phases follow atomic dispatch and the installed yiel
         const frame = before.state.nodes[@intCast(current.id)].activation.?;
         const block = session.program.blocks[@intCast(control.block)];
         const at_control = frame.position == block.instructions.len;
-        const local = at_control and block.terminator == .perform and block.terminator.perform.capability != null;
+        const local = at_control and block.terminator == .perform and
+            block.terminator.perform.capability != null;
         const yielding = at_control and block.terminator == .yield_value;
         const result = try session.run(1);
         if (local or yielding) {
@@ -2141,7 +2366,10 @@ test "behavior: interaction phases follow atomic dispatch and the installed yiel
                 try testing.expect(result == .progressed);
                 try testing.expect(after.state.roots.pending == null);
                 const target = session.program.handlers[0].clauses[0].function;
-                try testing.expectEqual(target, session.program.blocks[@intCast(next.block)].function);
+                try testing.expectEqual(
+                    target,
+                    session.program.blocks[@intCast(next.block)].function,
+                );
                 try testing.expect(next.block != control.block);
                 dispatched = true;
             } else {
@@ -2149,15 +2377,15 @@ test "behavior: interaction phases follow atomic dispatch and the installed yiel
                 try testing.expectEqual(block.terminator.yield_value.block, next.block);
                 yielded = true;
             }
-            // The checkpoint exposes the actual cancellable control position,
-            // independently of the Horos monitor's event projection.
             const checkpoint = try session.checkpoint(testing.allocator);
             defer testing.allocator.free(checkpoint);
             var cancelled = try Session.restoreImage(testing.allocator, image, checkpoint);
             defer cancelled.deinit();
             var resumed = try guestState(&cancelled);
             defer resumed.deinit();
-            const restored = resumed.state.nodes[@intCast(resumed.state.roots.current.?.id)].record.control;
+            const restored = resumed.state.nodes[
+                @intCast(resumed.state.roots.current.?.id)
+            ].record.control;
             try testing.expectEqual(next.block, restored.block);
             try cancelled.cancel(.{ .text = "phase-check" });
             try testing.expect(try drive(&cancelled, null) == .cancelled);
@@ -2174,79 +2402,47 @@ test "behavior: stateful service preserves labeled replies and exclusive turns t
     }
 }
 
-fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, overflow, paired }, restore: bool) !void {
+fn serviceWitness(
+    comptime mode: ServiceMode,
+    restore: bool,
+) !void {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    const module = if (mode == .paired) try source.examples.pairedServices(&builder) else if (mode == .swapped) try source.examples.swappedServiceReplies(&builder) else try source.examples.statefulService(&builder);
+    const module = if (mode == .paired)
+        try source.examples.pairedServices(&builder)
+    else if (mode == .swapped)
+        try source.examples.swappedServiceReplies(&builder)
+    else
+        try source.examples.statefulService(&builder);
     var compiled = try source.lower(testing.allocator, module);
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
     var session = try Session.initImage(testing.allocator, image, &.{});
     defer session.deinit();
-    var commands: usize = 0;
-    var replies: usize = 0;
-    var releases: usize = 0;
-    var yields: usize = 0;
+    var counts: ServiceCounts = .{};
     const final: u64 = switch (mode) {
         .empty => 0,
         .cancelled, .overflow => 1,
         .requests, .swapped, .paired => 2,
     };
-    while (true) {
+    for (0..16) |_| {
         const result = try drive(&session, null);
         switch (result) {
             .yielded => {
-                yields += 1;
-                // The next command cannot be requested while this turn is held.
-                try testing.expectEqual(commands, yields);
-                try testing.expectEqual(replies + 1, commands);
-                if (restore) {
-                    const checkpoint = try session.checkpoint(testing.allocator);
-                    defer testing.allocator.free(checkpoint);
-                    var resumed = try Session.restoreImage(testing.allocator, image, checkpoint);
-                    errdefer resumed.deinit();
-                    const roundtrip = try resumed.checkpoint(testing.allocator);
-                    defer testing.allocator.free(roundtrip);
-                    try testing.expectEqualSlices(u8, checkpoint, roundtrip);
-                    session.deinit();
-                    session = resumed;
-                }
-                if (mode == .cancelled) try session.cancel(.{ .text = "stop" }) else try session.resumeYield();
+                counts.yields += 1;
+                try testing.expectEqual(counts.commands, counts.yields);
+                try testing.expectEqual(counts.replies + 1, counts.commands);
+                if (restore) try restoreService(&session, image);
+                if (mode == .cancelled) try session.cancel(.{
+                    .text = "stop",
+                }) else try session.resumeYield();
             },
-            .requested => |pending| {
-                const identity = session.program.effects[@intCast(pending.effect)].identity;
-                if (std.mem.eql(u8, identity, "example/service-command")) {
-                    // Each admitted request has replied before another is admitted.
-                    try testing.expectEqual(commands, replies);
-                    if (mode == .empty or (if (mode == .paired) commands == releases + 1 else commands == 2)) {
-                        try answerWithValue(&session, &.{1}); // close
-                    } else {
-                        var request: [17]u8 = undefined;
-                        request[0] = 0; // serve(id, delta)
-                        std.mem.writeInt(u64, request[1..9], commands + 1, .little);
-                        std.mem.writeInt(u64, request[9..17], if (mode == .overflow and commands == 1) std.math.maxInt(u64) else 1, .little);
-                        commands += 1;
-                        try answerWithValue(&session, &request);
-                    }
-                } else if (std.mem.eql(u8, identity, "example/service-reply")) {
-                    var expected: [16]u8 = undefined;
-                    std.mem.writeInt(u64, expected[0..8], if (mode == .swapped) (replies + 1) ^ 3 else replies + 1, .little);
-                    std.mem.writeInt(u64, expected[8..16], if (mode == .paired) 0 else replies, .little);
-                    try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
-                    replies += 1;
-                    try answerWithValue(&session, &.{});
-                } else {
-                    try testing.expectEqualStrings("example/service-finalize", identity);
-                    releases += 1;
-                    var expected: [8]u8 = undefined;
-                    std.mem.writeInt(u64, &expected, if (mode == .paired) 1 else final, .little);
-                    try testing.expectEqualSlices(u8, &expected, try session.bytes(&pending.payload));
-                    try answerWithValue(&session, &.{});
-                }
-            },
+            .requested => |pending| try serviceRequest(&session, pending, mode, &counts, final),
             .completed => |value| {
-                try testing.expect(mode == .empty or mode == .requests or mode == .swapped or mode == .paired);
+                try testing.expect(
+                    mode == .empty or mode == .requests or mode == .swapped or mode == .paired,
+                );
                 var expected: [8]u8 = undefined;
                 std.mem.writeInt(u64, &expected, final, .little);
                 try testing.expectEqualSlices(u8, &expected, try session.bytes(&value));
@@ -2263,18 +2459,22 @@ fn serviceWitness(comptime mode: enum { empty, requests, swapped, cancelled, ove
             else => return error.TestUnexpectedResult,
         }
     }
-    try testing.expectEqual(@as(usize, if (mode == .paired) 2 else 1), releases);
+    try testing.expect(session.isTerminal());
+    try testing.expectEqual(@as(usize, if (mode == .paired) 2 else 1), counts.releases);
     try testing.expectEqual(@as(usize, switch (mode) {
         .empty, .cancelled => 0,
         .overflow => 1,
         .requests, .swapped, .paired => 2,
-    }), replies);
+    }), counts.replies);
 }
 
 test "behavior: stable successor return clauses retain older capability and cell references" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.successorState(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.successorState(&builder),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -2283,7 +2483,9 @@ test "behavior: stable successor return clauses retain older capability and cell
     try session.resumeYield();
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0, 37, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+    try testing.expectEqualSlices(u8, &.{
+        42, 0, 0, 0, 0, 0, 0, 0, 37, 0, 0, 0, 0, 0, 0, 0,
+    }, try session.bytes(&result.completed));
 }
 
 fn captureFrameCheckpoint(session: *Session) ![]u8 {
@@ -2299,15 +2501,28 @@ fn captureFrameCheckpoint(session: *Session) ![]u8 {
     return error.MissingCapture;
 }
 
-fn emptyRecordPayload(comptime T: type) T {
-    return switch (@typeInfo(T)) {
-        .@"struct" => |info| blk: {
-            var value: T = undefined;
-            inline for (info.field_names, info.field_types) |field_name, FieldType| @field(value, field_name) = emptyRecordPayload(FieldType);
-            break :blk value;
-        },
-        .@"union" => |info| @unionInit(T, info.field_names[0], emptyRecordPayload(info.field_types[0])),
-        else => std.mem.zeroes(T),
+fn emptyNodeRecord(comptime tag: horos.data.graph.NodeTag) horos.data.graph.Node {
+    const g = horos.data.graph;
+    const value: g.Value = .{ .schema = 0, .body = .{ .scalar = @splat(0) } };
+    return switch (tag) {
+        .package => .{ .package = .{ .schema = 0, .continuation = value } },
+        .resource => .{ .resource = .{ .schema = 0, .value = value } },
+        .pending => .{ .pending = .{
+            .effect = 0,
+            .payload = value,
+            .continuation = .{ .id = 0 },
+            .source_block = 0,
+        } },
+        .obligation => .{ .obligation = .{
+            .source_block = 0,
+            .cleanup = null,
+            .resource = null,
+            .status = .pending,
+        } },
+        .exit => .{ .exit = .{ .reason = .{ .normal = value } } },
+        else => @unionInit(g.Node, @tagName(tag), std.mem.zeroes(
+            @FieldType(g.Node, @tagName(tag)),
+        )),
     };
 }
 
@@ -2326,7 +2541,12 @@ fn returnParent(record: *horos.data.graph.Node) ?*?horos.data.graph.NodeRef {
     };
 }
 
-fn rejectDisposalParent(image: []const u8, original: horos.data.process_state.State, frame: usize, schema: u64) !void {
+fn rejectDisposalParent(
+    image: []const u8,
+    original: horos.data.process_state.State,
+    frame: usize,
+    schema: u64,
+) !void {
     const data = horos.data;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2342,11 +2562,19 @@ fn rejectDisposalParent(image: []const u8, original: horos.data.process_state.St
     state.nodes = nodes;
     const encoded = try data.state_image.emit(testing.allocator, state);
     defer testing.allocator.free(encoded);
-    // The public restore path must reject the canonical bytes before execution.
-    try testing.expectError(error.InvalidState, Session.restoreImage(testing.allocator, image, encoded));
+    try testing.expectError(
+        error.InvalidState,
+        Session.restoreImage(testing.allocator, image, encoded),
+    );
 }
 
-fn checkReturnPaths(session: *Session, image: []const u8, schema: u64, seen: *std.EnumSet(ReturnPathKind), captured_cleanup: *bool) !void {
+fn checkReturnPaths(
+    session: *Session,
+    image: []const u8,
+    schema: u64,
+    seen: *std.EnumSet(ReturnPathKind),
+    captured_cleanup: *bool,
+) !void {
     const data = horos.data;
     const bytes = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(bytes);
@@ -2361,12 +2589,14 @@ fn checkReturnPaths(session: *Session, image: []const u8, schema: u64, seen: *st
         if (state.status == .yielded) selected.set(.yielded, @intCast(ref.id));
     }
     const nodes = @constCast(state.nodes);
-    while (cursor) |ref| {
+    for (0..nodes.len) |_| {
+        const ref = cursor orelse break;
         const record = &nodes[@intCast(ref.id)].record;
         if (record.* == .continuation) selected.set(.continuation, @intCast(ref.id));
         if (record.* == .protection) selected.set(.protection, @intCast(ref.id));
         cursor = if (returnParent(record)) |parent| parent.* else null;
     }
+    try testing.expect(cursor == null);
     for (nodes) |node| switch (node.record) {
         .exit => |exit| if (exit.reason == .normal) {
             if (exit.stop) |stop| selected.set(.normal_exit, @intCast(stop.id));
@@ -2383,13 +2613,12 @@ fn checkReturnPaths(session: *Session, image: []const u8, schema: u64, seen: *st
             seen.insert(kind);
         }
     };
-    // Continue from actual restored bytes at every boundary, including cleanup.
     const restored = try Session.restoreImage(testing.allocator, image, bytes);
     session.deinit();
     session.* = restored;
 }
 
-test "behavior: PST3 normal return paths reject disposal markers while captured cleanup stays valid" {
+test "behavior: PST3 return paths reject disposal markers and preserve captured cleanup" {
     var seen: std.EnumSet(ReturnPathKind) = .{};
     var captured_cleanup = false;
     for (0..3) |example| {
@@ -2404,7 +2633,6 @@ test "behavior: PST3 normal return paths reject disposal markers while captured 
             const entry = &b.functions.items[@intCast(module.entry)];
             entry.body = try b.term(.{ .yield_then = entry.body.? });
         }
-        // Keep effect admission valid so rejection must detect the return path.
         var marker = b.schemas.items[@intCast(b.handlers.items[0].clauses[0].resumption)];
         const effects = try b.allocator().alloc(u64, b.effects.items.len);
         for (effects, 0..) |*effect, id| effect.* = id;
@@ -2414,7 +2642,11 @@ test "behavior: PST3 normal return paths reject disposal markers while captured 
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        var session = try Session.initImage(testing.allocator, image, if (example == 1) &.{1} else &.{});
+        var session = try Session.initImage(
+            testing.allocator,
+            image,
+            if (example == 1) &.{1} else &.{},
+        );
         defer session.deinit();
         for (0..512) |_| {
             try checkReturnPaths(&session, image, marker_schema, &seen, &captured_cleanup);
@@ -2431,7 +2663,10 @@ test "behavior: PST3 normal return paths reject disposal markers while captured 
             try testing.expectEqual(9, (try session.bytes(&result.failed))[0]);
         } else {
             try testing.expect(result == .completed);
-            try testing.expectEqual(if (example == 0) @as(u8, 67) else 60, (try session.bytes(&result.completed))[0]);
+            try testing.expectEqual(
+                if (example == 0) @as(u8, 67) else 60,
+                (try session.bytes(&result.completed))[0],
+            );
         }
     }
     try testing.expectEqual(std.EnumSet(ReturnPathKind).full.bits, seen.bits);
@@ -2440,17 +2675,25 @@ test "behavior: PST3 normal return paths reject disposal markers while captured 
 
 test "behavior: PST3 captured handler state obeys one-shot and multi bounds and reference kinds" {
     const data = horos.data;
-    const g = data.graph;
     inline for (.{ false, true }) |multi| inline for (.{ false, true }) |allowed| {
         var b = source.Builder.init(testing.allocator);
         defer b.deinit();
-        const module = if (multi) try source.examples.choicesAll(&b) else try source.examples.deep(&b);
-        // The captured body returns the handler input, before answer transformation.
+        const module = if (multi)
+            try source.examples.choicesAll(&b)
+        else
+            try source.examples.deep(&b);
         const result_type = b.handlers.items[0].input;
         const wide = try b.scalar(u16);
         const returns = try b.declare(&.{ wide, result_type }, result_type, &.{}, &.{});
         try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
-        const extra = try b.handler(.{ .mode = .deep, .input = result_type, .answer = result_type, .return_function = returns, .state = &.{wide}, .clauses = &.{} });
+        const extra = try b.handler(.{
+            .mode = .deep,
+            .input = result_type,
+            .answer = result_type,
+            .return_function = returns,
+            .state = &.{wide},
+            .clauses = &.{},
+        });
         if (allowed) for (b.schemas.items) |*schema| {
             if (schema.* != .internal or schema.internal != .resumption) continue;
             const old = schema.internal.resumption.capture_bound;
@@ -2468,19 +2711,7 @@ test "behavior: PST3 captured handler state obeys one-shot and multi bounds and 
         var decoded = try data.state_image.decodeGraph(testing.allocator, bytes);
         defer decoded.deinit();
         try data.state_admission.validateStable(testing.allocator, compiled.program, decoded.state);
-        const a = decoded.arena.allocator();
-        const count = decoded.state.nodes.len;
-        const nodes = try a.alloc(data.process_state.Node, count + 2);
-        @memcpy(nodes[0..count], decoded.state.nodes);
-        const token = for (nodes[0..count]) |node| {
-            if (node.record == .one_shot or node.record == .multi_template)
-                break if (node.record == .one_shot) node.record.one_shot else node.record.multi_template;
-        } else return error.MissingCapture;
-        const saved = &nodes[@intCast(token.capture.?.id)].record.continuation;
-        nodes[count] = .{ .record = .{ .handler = .{ .definition = extra, .state = try a.dupe(g.Value, &.{.{ .schema = wide, .body = .{ .scalar = @splat(0) } }}), .evidence = saved.evidence, .region = saved.region } } };
-        nodes[count + 1] = .{ .record = .{ .attachment = .{ .handler = .{ .id = count }, .outer = saved.evidence, .return_to = saved.parent, .region = saved.region } } };
-        saved.parent = .{ .id = count + 1 };
-        decoded.state.nodes = nodes;
+        try insertCapturedHandler(&decoded, extra, wide);
         const encoded = try data.state_image.emit(testing.allocator, decoded.state);
         defer testing.allocator.free(encoded);
         var canonical = try data.state_image.decodeGraph(testing.allocator, encoded);
@@ -2490,30 +2721,14 @@ test "behavior: PST3 captured handler state obeys one-shot and multi bounds and 
             if (node.record == .handler and node.record.handler.definition == extra) break index;
         } else return error.MissingInsertedHandler;
         if (!allowed) {
-            try testing.expectError(error.InvalidOwnership, data.state_admission.validateStable(testing.allocator, compiled.program, canonical.state));
+            try testing.expectError(error.InvalidOwnership, data.state_admission.validateStable(
+                testing.allocator,
+                compiled.program,
+                canonical.state,
+            ));
             continue;
         }
-        try data.state_admission.validateStable(testing.allocator, compiled.program, canonical.state);
-        const original = checked_nodes[handler_index];
-        inline for (@typeInfo(g.Node).@"union".field_names, @typeInfo(g.Node).@"union".field_types) |field_name, FieldType| {
-            if (comptime !std.mem.eql(u8, field_name, "handler")) {
-                checked_nodes[handler_index].record = @unionInit(g.Node, field_name, emptyRecordPayload(FieldType));
-                if (data.state_admission.validateStable(testing.allocator, compiled.program, canonical.state)) |_| {
-                    return error.AcceptedWrongCapturedHandlerKind;
-                } else |err| try testing.expect(err != error.OutOfMemory);
-                checked_nodes[handler_index] = original;
-            }
-        }
-        const image = try programBytes(compiled.program);
-        defer testing.allocator.free(image);
-        const checkpoint = try data.state_image.emit(testing.allocator, canonical.state);
-        defer testing.allocator.free(checkpoint);
-        var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
-        defer restored.deinit();
-        const result = try restored.run(null);
-        try testing.expect(result == .completed);
-        const expected: []const u8 = if (multi) &.{ 4, 0, 0, 0, 1, 1, 0, 1, 1 } else &.{ 67, 0, 0, 0, 0, 0, 0, 0 };
-        try testing.expectEqualSlices(u8, expected, try restored.bytes(&result.completed));
+        try expectCapturedHandlerKinds(compiled.program, canonical.state, handler_index, multi);
     };
 }
 
@@ -2545,12 +2760,20 @@ fn argumentBytes(size: usize) ![]u8 {
     return bytes;
 }
 
-fn argumentSessionFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, input: []const u8) !void {
+fn argumentSessionFailure(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+    input: []const u8,
+) !void {
     var session = try Session.start(allocator, prepared, input);
     defer session.deinit();
     const result = try session.run(null);
     try testing.expect(result == .completed);
-    try testing.expectEqualSlices(u8, &.{ 5, 's', 'm', 'a', 'l', 'l' }, try session.bytes(&result.completed));
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 5, 's', 'm', 'a', 'l', 'l' },
+        try session.bytes(&result.completed),
+    );
 }
 
 test "ownership: argument backing releases every partial Session owner on allocation failure" {
@@ -2560,7 +2783,11 @@ test "ownership: argument backing releases every partial Session owner on alloca
     defer prepared.deinit();
     const input = try argumentBytes(4096);
     defer testing.allocator.free(input);
-    try @import("allocation_testing.zig").check(testing.allocator, argumentSessionFailure, .{ &prepared, input });
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        argumentSessionFailure,
+        .{ &prepared, input },
+    );
 }
 
 test "behavior: argument Session survives caller release and sheds a large dead payload" {
@@ -2589,10 +2816,17 @@ test "behavior: argument Session survives caller release and sheds a large dead 
     try testing.expect(terminal_state.len < 1024);
 }
 
-fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("kosmos").Prepared, input: []const u8) !void {
+fn argumentStoreFailure(
+    allocator: std.mem.Allocator,
+    prepared: *const @import("kosmos").Prepared,
+    input: []const u8,
+) !void {
     const core = try prepared.acquire();
     defer core.release();
-    var store: @FieldType(@FieldType(@FieldType(Session, "driver"), "outer"), "store") = .{ .allocator = allocator };
+    var store: @FieldType(@FieldType(
+        @FieldType(Session, "driver"),
+        "outer",
+    ), "store") = .{ .allocator = allocator };
     defer store.deinit();
     var temporary = std.heap.ArenaAllocator.init(allocator);
     defer temporary.deinit();
@@ -2604,31 +2838,53 @@ fn argumentStoreFailure(allocator: std.mem.Allocator, prepared: *const @import("
     try store.replace(root, .{ .environment = .{ .values = &.{}, .tail = null } });
     try store.collect(.{ .current = root });
     try testing.expect(store.imported != null);
-    _ = try store.literal(core.admitted().program().schemas, .{ .schema = values[1].schema, .bytes = &.{ 3, 'n', 'e', 'w' } });
+    _ = try store.literal(core.admitted().program().schemas, .{
+        .schema = values[1].schema,
+        .bytes = &.{ 3, 'n', 'e', 'w' },
+    });
     store.rollback();
     const original = (try store.get(root)).environment.values;
     try testing.expectEqualDeep(values, original);
-    try testing.expectEqualSlices(u8, &.{ 5, 's', 'm', 'a', 'l', 'l' }, store.blobs.items[@intCast(values[1].body.blob.id)].bytes);
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 5, 's', 'm', 'a', 'l', 'l' },
+        store.blobs.items[@intCast(values[1].body.blob.id)].bytes,
+    );
     var reader: horos.data.wire.Reader = .{ .input = input };
     const count = try reader.count();
     _ = try reader.take(count);
-    try testing.expectEqualSlices(u8, input[0..reader.position], store.blobs.items[@intCast(values[0].body.blob.id)].bytes);
+    try testing.expectEqualSlices(
+        u8,
+        input[0..reader.position],
+        store.blobs.items[@intCast(values[0].body.blob.id)].bytes,
+    );
     try store.replace(root, .{ .environment = .{ .values = values[1..2], .tail = null } });
     try store.collect(.{ .current = root });
     try testing.expect(store.imported == null);
-    try testing.expectEqualSlices(u8, &.{ 5, 's', 'm', 'a', 'l', 'l' }, store.blobs.items[@intCast(values[1].body.blob.id)].bytes);
-    const same = try store.literal(core.admitted().program().schemas, .{ .schema = values[1].schema, .bytes = &.{ 5, 's', 'm', 'a', 'l', 'l' } });
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 5, 's', 'm', 'a', 'l', 'l' },
+        store.blobs.items[@intCast(values[1].body.blob.id)].bytes,
+    );
+    const same = try store.literal(core.admitted().program().schemas, .{
+        .schema = values[1].schema,
+        .bytes = &.{ 5, 's', 'm', 'a', 'l', 'l' },
+    });
     try testing.expectEqualDeep(values[1], same);
 }
 
-test "ownership: argument backing survives journal collection and reuse then compacts a tiny survivor" {
+test "ownership: argument backing survives collection and reuse then compacts a tiny survivor" {
     const image = try argumentImage();
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
     defer prepared.deinit();
     const input = try argumentBytes(4096);
     defer testing.allocator.free(input);
-    try @import("allocation_testing.zig").check(testing.allocator, argumentStoreFailure, .{ &prepared, input });
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        argumentStoreFailure,
+        .{ &prepared, input },
+    );
 }
 
 test "ownership: resident terminal compaction preserves rollback and releases backing at commit" {
@@ -2642,10 +2898,21 @@ test "ownership: resident terminal compaction preserves rollback and releases ba
     defer initial.deinit();
     const checkpoint = try initial.checkpoint(testing.allocator);
     defer testing.allocator.free(checkpoint);
-    const expected = try horos.data.invocation.encodeOwned(horos.data.invocation.Outcome, testing.allocator, .{ .completed = &.{ 5, 's', 'm', 'a', 'l', 'l' } });
+    const expected = try horos.data.invocation.encodeOwned(
+        horos.data.invocation.Outcome,
+        testing.allocator,
+        .{ .completed = &.{ 5, 's', 'm', 'a', 'l', 'l' } },
+    );
     defer testing.allocator.free(expected);
-    var failures: usize = 0;
-    while (true) : (failures += 1) {
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var reference = try Resident.start(counting.allocator(), &prepared, input);
+    defer releaseResident(&reference);
+    const allocation_start = counting.alloc_index;
+    counting.resize_fail_index = counting.resize_index;
+    const reference_output = try reference.driveEncoded(counting.allocator(), .none, .{});
+    defer counting.allocator().free(reference_output);
+    const allocation_count = counting.alloc_index - allocation_start;
+    for (0..allocation_count + 1) |failures| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
         var resident = try Resident.start(failing.allocator(), &prepared, input);
         defer releaseResident(&resident);
@@ -2670,14 +2937,18 @@ test "ownership: resident terminal compaction preserves rollback and releases ba
         try testing.expectEqualSlices(u8, expected, output);
         try testing.expect(!(try resident.diagnostics()).imported_backing);
         try testing.expect(failures > 0);
-        break;
+        return;
     }
+    return error.MissingAllocationSweepSuccess;
 }
 
 test "behavior: handler continuation preserves staged operands across checkpoint restoration" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.installations(&builder, 8),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
@@ -2702,7 +2973,11 @@ test "behavior: handler continuation preserves staged operands across checkpoint
             defer testing.allocator.free(checkpoint);
             const result = try drive(&session, null);
             try testing.expect(result == .completed);
-            try testing.expectEqual(36, std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+            try testing.expectEqual(36, std.mem.readInt(
+                u64,
+                (try session.bytes(&result.completed))[0..8],
+                .little,
+            ));
             return;
         }
         try session.step();
@@ -2710,7 +2985,11 @@ test "behavior: handler continuation preserves staged operands across checkpoint
     return error.TestUnexpectedResult;
 }
 
-fn prepareContractFailure(allocator: std.mem.Allocator, image: []const u8, runtime: *const @import("kosmos").RuntimeArtifact) !void {
+fn prepareContractFailure(
+    allocator: std.mem.Allocator,
+    image: []const u8,
+    runtime: *const @import("kosmos").RuntimeArtifact,
+) !void {
     var prepared = try @import("kosmos").Prepared.initWithRuntime(allocator, image, runtime);
     defer prepared.deinit();
 }
@@ -2721,9 +3000,17 @@ test "ownership: prepared contracts retain encoded bytes without canonicalizatio
     var fields: [64]source.Id = undefined;
     for (&fields, 0..) |*field, i| field.* = try b.schema(.{ .bounded_text = i + 1 });
     const payload = try b.schema(.{ .product = &fields });
-    const effect = try b.effect(.{ .identity = "large-contract", .payload = payload, .result = payload, .external = true });
+    const effect = try b.effect(.{
+        .identity = "large-contract",
+        .payload = payload,
+        .result = payload,
+        .external = true,
+    });
     const entry = try b.declare(&.{payload}, payload, &.{effect}, &.{});
-    try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
+    try b.define(entry, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.reference(b.parameter(entry, 0)),
+    } }));
     var compiled = try source.lower(testing.allocator, b.module(entry, try b.scalar(void)));
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
@@ -2733,20 +3020,33 @@ test "ownership: prepared contracts retain encoded bytes without canonicalizatio
     const admitted = prepared.guest.core.?.admitted();
     const program = admitted.program();
     const contract = try prepared.guest.core.?.contract(0);
-    const expected = try horos.data.schema.encodeOwned(testing.allocator, program.schemas, program.effects[0].payload);
+    const expected = try horos.data.schema.encodeOwned(
+        testing.allocator,
+        program.schemas,
+        program.effects[0].payload,
+    );
     defer testing.allocator.free(expected);
     try testing.expectEqualSlices(u8, expected, contract.payload);
     try testing.expectEqualSlices(u8, expected, contract.resume_value);
-    // Arena growth and the contract table are chargeable; temporary partition
-    // maps and schema graphs must not remain owned by preparation.
     const contract_storage = (try prepared.guest.storageBytes()) - admitted.storageBytes();
-    try testing.expect(contract_storage <= 1024 + 4 * (contract.payload.len + contract.resume_value.len));
-    try @import("allocation_testing.zig").check(testing.allocator, prepareContractFailure, .{ image, &prepared.runtime });
+    try testing.expect(
+        contract_storage <= 1024 + 4 * (contract.payload.len + contract.resume_value.len),
+    );
+    try @import("allocation_testing.zig").check(
+        testing.allocator,
+        prepareContractFailure,
+        .{ image, &prepared.runtime },
+    );
 }
 
 const blobRetentionCaptured: horos.data.activation.Program = .{
     .roots = .{ .entry = 0, .result = 1, .failure = 2 },
-    .schemas = &.{ .bytes, .u64, .unit, .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 1, .capture_bound = &.{0}, .use = .reusable } } } },
+    .schemas = &.{ .bytes, .u64, .unit, .{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = 1,
+        .capture_bound = &.{0},
+        .use = .reusable,
+    } } } },
     .constants = &.{},
     .effects = &.{},
     .functions = &.{
@@ -2757,9 +3057,25 @@ const blobRetentionCaptured: horos.data.activation.Program = .{
         .{ .function = 0, .instructions = &.{
             .{ .destination = 2, .opcode = .computation, .immediate = 0, .operands = &.{0} },
             .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
-        }, .terminator = .{ .apply = .{ .computation = 2, .arguments = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        }, .terminator = .{
+            .apply = .{
+                .computation = 2,
+                .arguments = &.{},
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{
+                        .destination = 3,
+                        .source = .returned,
+                    }},
+                },
+            },
+        } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
-        .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .blob_length, .operands = &.{0} }}, .terminator = .{ .return_value = 1 } },
+        .{ .function = 1, .instructions = &.{.{
+            .destination = 1,
+            .opcode = .blob_length,
+            .operands = &.{0},
+        }}, .terminator = .{ .return_value = 1 } },
     },
     .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
     .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
@@ -2771,7 +3087,12 @@ fn blobRetentionProgram(comptime alias: bool) horos.data.activation.Program {
         .schemas = &.{ .bytes, .u64, .unit },
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = if (alias) &.{ 0, 2 } else &.{0}, .layout = .{ .slots = &.{ 0, 1, 0 } }, .result = 1 }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = if (alias) &.{ 0, 2 } else &.{0},
+            .layout = .{ .slots = &.{ 0, 1, 0 } },
+            .result = 1,
+        }},
         .blocks = if (alias) &.{.{ .function = 0, .instructions = &.{
             .{ .destination = 1, .opcode = .blob_length, .operands = &.{0} },
             .{ .destination = 1, .opcode = .blob_length, .operands = &.{2} },
@@ -2782,9 +3103,11 @@ fn blobRetentionProgram(comptime alias: bool) horos.data.activation.Program {
     };
 }
 
-test "behavior: bounded active cuts reclaim dead large blobs and preserve direct and captured aliases" {
+test "behavior: bounded cuts reclaim dead blobs and preserve direct and captured aliases" {
     inline for (0..3) |kind| {
-        const original = comptime if (kind == 2) blobRetentionCaptured else blobRetentionProgram(kind == 1);
+        const original = comptime if (kind == 2) blobRetentionCaptured else blobRetentionProgram(
+            kind == 1,
+        );
         const image = try programBytes(original);
         defer testing.allocator.free(image);
         var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
@@ -2798,15 +3121,28 @@ test "behavior: bounded active cuts reclaim dead large blobs and preserve direct
         try writer.bytes(payload);
         if (kind == 1) try writer.bytes(payload);
         for ([_]bool{ false, true }) |checkpoint_mode| {
-            var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
-            var resident = try Resident.start(budget.allocator(), &prepared, arguments[0..writer.position]);
+            var budget: @import("kosmos").AllocationBudget = .{
+                .parent = testing.allocator,
+                .limit = 32 << 20,
+            };
+            var resident = try Resident.start(
+                budget.allocator(),
+                &prepared,
+                arguments[0..writer.position],
+            );
             defer releaseResident(&resident);
             const before = budget.live;
-            var parked = try resident.drive(testing.allocator, .none, .{ .quantum = if (kind == 2) 2 else 1, .checkpoint = checkpoint_mode });
+            var parked = try resident.drive(testing.allocator, .none, .{
+                .quantum = if (kind == 2) 2 else 1,
+                .checkpoint = checkpoint_mode,
+            });
             defer parked.deinit();
             try testing.expect(parked.record == .progressed);
             const after = budget.live;
-            std.debug.print("bounded blob retention: kind={d}, before={d}, after={d}, checkpoint={}\n", .{ kind, before, after, checkpoint_mode });
+            std.debug.print(
+                "bounded blob retention: kind={d}, before={d}, after={d}, checkpoint={}\n",
+                .{ kind, before, after, checkpoint_mode },
+            );
             if (kind == 0) {
                 try testing.expect(after < payload.len / 4);
                 try testing.expect(before - after > payload.len - payload.len / 4);
@@ -2819,13 +3155,16 @@ test "behavior: bounded active cuts reclaim dead large blobs and preserve direct
                 var result = try subject.drive(testing.allocator, .none, .{});
                 defer result.deinit();
                 try testing.expect(result.record == .completed);
-                try testing.expectEqual(@as(u64, if (kind == 0) 0 else payload.len), std.mem.readInt(u64, result.record.completed[0..8], .little));
+                try testing.expectEqual(@as(
+                    u64,
+                    if (kind == 0) 0 else payload.len,
+                ), std.mem.readInt(u64, result.record.completed[0..8], .little));
             }
         }
     }
 }
 
-test "ownership: active-cut large blob reclamation rolls back every allocation and final publication failure" {
+test "ownership: active-cut blob reclamation rolls back allocation and publication failures" {
     const image = try programBytes(blobRetentionProgram(false));
     defer testing.allocator.free(image);
     var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
@@ -2844,25 +3183,53 @@ test "ownership: active-cut large blob reclamation rolls back every allocation a
     try testing.expect(initial.len >= writer.position);
     for ([_]bool{ false, true }) |checkpoint_mode| {
         try residentFailureSweep(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
-        try residentPublicationFailure(&prepared, .{ .checkpoint = initial }, .none, checkpoint_mode);
+        try residentPublicationFailure(
+            &prepared,
+            .{ .checkpoint = initial },
+            .none,
+            checkpoint_mode,
+        );
     }
 }
 
-fn smallSurvivorExample(b: *source.Builder, keep_original: bool, request_boundary: bool) !source.Module {
+fn smallSurvivorExample(
+    b: *source.Builder,
+    keep_original: bool,
+    request_boundary: bool,
+) !source.Module {
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);
     const sequence = try b.schema(.{ .seq = integer });
-    const pause = if (request_boundary) try b.effect(.{ .identity = "retention/pause", .payload = unit, .result = unit }) else 0;
-    const result_schema = if (keep_original) try b.schema(.{ .product = &.{ sequence, sequence } }) else sequence;
-    const entry = try b.declare(&.{sequence}, result_schema, if (request_boundary) &.{pause} else &.{}, &.{});
+    const pause = if (request_boundary) try b.effect(.{
+        .identity = "retention/pause",
+        .payload = unit,
+        .result = unit,
+    }) else 0;
+    const result_schema = if (keep_original) try b.schema(.{
+        .product = &.{ sequence, sequence },
+    }) else sequence;
+    const entry = try b.declare(
+        &.{sequence},
+        result_schema,
+        if (request_boundary) &.{pause} else &.{},
+        &.{},
+    );
     const input = try b.reference(b.parameter(entry, 0));
     const kept = try b.variable(sequence);
     const take = try b.primitive(sequence, .sequence_take, &.{ input, try b.constant(u64, 1) }, 0);
     const small = try b.reference(kept);
-    const result = if (keep_original) try b.primitive(result_schema, .product, &.{ small, input }, 0) else small;
+    const result = if (keep_original) try b.primitive(
+        result_schema,
+        .product,
+        &.{ small, input },
+        0,
+    ) else small;
     const returned = try b.pure(result);
     const suspended = if (request_boundary)
-        try b.bind(try b.variable(unit), try b.term(.{ .perform = .{ .effect = pause, .payload = try b.constant(void, {}) } }), returned)
+        try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
+            .effect = pause,
+            .payload = try b.constant(void, {}),
+        } }), returned)
     else
         try b.term(.{ .yield_then = returned });
     try b.define(entry, try b.bind(kept, try b.pure(take), suspended));
@@ -2881,27 +3248,36 @@ test "behavior: public suspension releases large dead input backing while preser
     for ([_]bool{ false, true }) |keep_original| for ([_]bool{ false, true }) |request_boundary| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        var compiled = try source.lower(testing.allocator, try smallSurvivorExample(&builder, keep_original, request_boundary));
+        var compiled = try source.lower(testing.allocator, try smallSurvivorExample(
+            &builder,
+            keep_original,
+            request_boundary,
+        ));
         defer compiled.deinit();
         const image = try programBytes(compiled.program);
         defer testing.allocator.free(image);
-        // Measure execution-owned retention separately from the reusable code
-        // and evaluator artifact. Their preparation cost is independent of input.
         var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
         defer prepared.deinit();
         var workspace = @import("kosmos").Workspace.init(backing);
-        var session = try Session.start(workspace.allocator(), &prepared, input[0..writer.position]);
+        var session = try Session.start(
+            workspace.allocator(),
+            &prepared,
+            input[0..writer.position],
+        );
         defer session.deinit();
         const observed = try session.run(null);
         try testing.expect(if (request_boundary) observed == .requested else observed == .yielded);
         const retained = workspace.live_payload;
         if (!keep_original and retained >= writer.position / 4)
-            std.debug.print("dead input retention: live={d}, input={d}, request={}\n", .{ retained, writer.position, request_boundary });
-        if (keep_original) try testing.expect(retained >= writer.position) else try testing.expect(retained < writer.position / 4);
+            std.debug.print("dead input retention: live={d}, input={d}, request={}\n", .{
+                retained, writer.position, request_boundary,
+            });
+        if (keep_original)
+            try testing.expect(retained >= writer.position)
+        else
+            try testing.expect(retained < writer.position / 4);
         const checkpoint = try session.checkpoint(testing.allocator);
         defer testing.allocator.free(checkpoint);
-        // The current base may memoize a demanded field projection. It must
-        // still release the large dead input, and repeated export must stabilize.
         const after_checkpoint = workspace.live_payload;
         if (!keep_original) try testing.expect(after_checkpoint < writer.position / 4);
         const repeated = try session.checkpoint(testing.allocator);
@@ -2911,29 +3287,23 @@ test "behavior: public suspension releases large dead input backing while preser
         if (!keep_original) try testing.expect(checkpoint.len < 1024);
         var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
         defer restored.deinit();
-        for ([_]*Session{ &session, &restored }) |subject| {
-            if (request_boundary) {
-                var pending = try subject.pendingRequest(testing.allocator);
-                defer pending.deinit();
-                const protocol = horos.data.invocation;
-                const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{ .request_identity = pending.request.request_identity, .value = &.{} });
-                defer testing.allocator.free(reply);
-                try subject.answer(reply);
-            } else try subject.resumeYield();
-            const result = try subject.run(null);
-            try testing.expect(result == .completed);
-            const bytes = try subject.bytes(&result.completed);
-            const expected = [_]u8{ 1, 1, 0, 0, 0, 0, 0, 0, 0 };
-            try testing.expectEqualSlices(u8, &expected, bytes[0..expected.len]);
-            if (keep_original) try testing.expectEqualSlices(u8, input[0..writer.position], bytes[expected.len..]) else try testing.expectEqual(expected.len, bytes.len);
-        }
+        try expectSuspensionContinuation(
+            &session,
+            &restored,
+            request_boundary,
+            keep_original,
+            input[0..writer.position],
+        );
     };
 }
 
 test "ownership: suspension reclamation preserves exhaustive rollback and large input publication" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try smallSurvivorExample(&builder, false, true));
+    var compiled = try source.lower(
+        testing.allocator,
+        try smallSurvivorExample(&builder, false, true),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -2956,7 +3326,9 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
             defer snapshot.deinit();
             const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
             const block = compiled.program.blocks[@intCast(current.record.control.block)];
-            if (current.activation.?.position == block.instructions.len and block.terminator == .perform) {
+            if (current.activation.?.position == block.instructions.len and
+                block.terminator == .perform)
+            {
                 found = true;
                 break;
             }
@@ -2965,7 +3337,10 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
         }
         try testing.expect(found);
         const fixture: ResidentFixture = .{ .checkpoint = initial, .prefix_steps = steps };
-        var budget: @import("kosmos").AllocationBudget = .{ .parent = testing.allocator, .limit = 32 << 20 };
+        var budget: @import("kosmos").AllocationBudget = .{
+            .parent = testing.allocator,
+            .limit = 32 << 20,
+        };
         var retained = try fixture.restore(budget.allocator(), &prepared);
         defer releaseResident(&retained);
         try testing.expect(budget.live >= writer.position);
@@ -2987,7 +3362,10 @@ test "ownership: suspension reclamation preserves exhaustive rollback and large 
 test "behavior: retained recursive tail fixture preserves transactional rollback" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try @import("retained_loop_bench.zig").build(&builder, 3));
+    var compiled = try source.lower(
+        testing.allocator,
+        try @import("retained_loop_bench.zig").build(&builder, 3),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -3000,14 +3378,22 @@ test "behavior: retained recursive tail fixture preserves transactional rollback
     var transaction = try session.begin();
     const outcome = try session.run(null);
     try testing.expect(outcome == .completed);
-    try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, (try session.bytes(&outcome.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, 8), std.mem.readInt(
+        u64,
+        (try session.bytes(&outcome.completed))[0..8],
+        .little,
+    ));
     transaction.rollback(&session);
     const unchanged = try session.checkpoint(testing.allocator);
     defer testing.allocator.free(unchanged);
     try testing.expectEqualSlices(u8, before, unchanged);
     const retried = try session.run(null);
     try testing.expect(retried == .completed);
-    try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, (try session.bytes(&retried.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, 8), std.mem.readInt(
+        u64,
+        (try session.bytes(&retried.completed))[0..8],
+        .little,
+    ));
 }
 
 test "behavior: handler return functions distinguish body value from state" {
@@ -3022,7 +3408,9 @@ test "behavior: handler return functions distinguish body value from state" {
         if (mode == 1) {
             b.functions.items[@intCast(returned)].body = try b.pure(try b.constant(u64, 99));
         } else if (mode == 2) {
-            b.functions.items[@intCast(returned)].body = try b.pure(try b.reference(b.parameter(returned, 0)));
+            b.functions.items[@intCast(returned)].body = try b.pure(
+                try b.reference(b.parameter(returned, 0)),
+            );
         }
         var compiled = try source.lower(testing.allocator, b.module(module.entry, module.failure));
         defer compiled.deinit();
@@ -3034,104 +3422,33 @@ test "behavior: handler return functions distinguish body value from state" {
         defer session.deinit();
         const result = try session.run(null);
         try testing.expect(result == .completed);
-        try testing.expectEqual(([_]u64{ 7, 99, 1 })[mode], std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+        try testing.expectEqual(([_]u64{ 7, 99, 1 })[mode], std.mem.readInt(
+            u64,
+            (try session.bytes(&result.completed))[0..8],
+            .little,
+        ));
     }
 }
 
 test "behavior: closed handler bodies preserve escaping values and bounded-step checkpoints" {
-    const ir = horos.data.activation;
     for (0..6) |mode| {
         var b = source.Builder.init(testing.allocator);
         defer b.deinit();
-        var compiled = try source.lower(testing.allocator, try source.examples.installations(&b, 2));
+        var compiled = try source.lower(
+            testing.allocator,
+            try source.examples.installations(&b, 2),
+        );
         defer compiled.deinit();
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         var program = compiled.program;
-        const blocks = try a.dupe(ir.Block, program.blocks);
-        program.blocks = blocks;
-        const entry = program.functions[@intCast(program.roots.entry)].entry;
-        try testing.expect(blocks[@intCast(entry)].terminator == .handle);
-        const first = &blocks[@intCast(entry)].terminator.handle;
-        const following = first.next.block;
-        try testing.expect(blocks[@intCast(following)].terminator == .handle);
-        const second = &blocks[@intCast(following)].terminator.handle;
-        if (mode == 1) {
-            for ([_]u64{ entry, following }) |id| {
-                const block = &blocks[@intCast(id)];
-                const instructions = try a.alloc(ir.Instruction, block.instructions.len + 1);
-                @memcpy(instructions[0..block.instructions.len], block.instructions);
-                const body = block.terminator.handle.body;
-                instructions[instructions.len - 1] = .{ .destination = body, .opcode = .move, .operands = try a.dupe(u64, &.{body}) };
-                block.instructions = instructions;
-            }
-        } else if (mode == 2) {
-            second.body = first.body; // The callable must survive the first handler.
-        } else if (mode == 3 or mode == 5) {
-            const functions = try a.dupe(ir.Function, program.functions);
-            program.functions = functions;
-            const function = &functions[@intCast(program.roots.entry)];
-            const old = function.layout.slots;
-            const layout = try a.alloc(u64, old.len + 1);
-            @memcpy(layout[0..old.len], old);
-            layout[old.len] = old[@intCast(first.body)];
-            function.layout.slots = layout;
-            const assignments = try a.alloc(ir.Assignment, first.next.assignments.len + 1);
-            @memcpy(assignments[0..first.next.assignments.len], first.next.assignments);
-            assignments[assignments.len - 1] = .{ .destination = old.len, .source = .{ .slot = first.body } };
-            first.next.assignments = assignments;
-            // Capture still needs the source if the copied destination is dead.
-            if (mode == 3) second.body = old.len;
-        } else if (mode == 4) {
-            const body_schema = program.functions[@intCast(program.roots.entry)].layout.slots[@intCast(first.body)];
-            const schemas = try a.dupe(horos.data.program.Schema, program.schemas);
-            schemas[@intCast(body_schema)].internal.computation.use = .linear;
-            program.schemas = schemas;
-            const captures = try a.dupe(horos.data.program.Capture, program.scopes.captures);
-            for (program.constructors) |constructor| if (constructor.schema == body_schema) {
-                captures[@intCast(constructor.capture)].use = .linear;
-            };
-            program.scopes.captures = captures;
-        }
+        try configureClosedHandler(a, &program, mode);
         const image = try programBytes(program);
         defer testing.allocator.free(image);
         var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
         defer prepared.deinit();
-        var session = try Session.start(testing.allocator, &prepared, &.{});
-        defer session.deinit();
-        var strict_stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        session.setStatistics(&strict_stats);
-        var saw_callable = false;
-        while (!session.isTerminal()) {
-            try session.step();
-            var snapshot = try guestState(&session);
-            defer snapshot.deinit();
-            for (snapshot.state.nodes) |node|
-                if (node.record == .computation) {
-                    saw_callable = true;
-                };
-            const checkpoint = try session.checkpoint(testing.allocator);
-            defer testing.allocator.free(checkpoint);
-            var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
-            defer restored.deinit();
-            const again = try restored.checkpoint(testing.allocator);
-            defer testing.allocator.free(again);
-            try testing.expectEqualSlices(u8, checkpoint, again);
-        }
-        const result = try session.observe();
-        try testing.expect(result == .completed);
-        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
-        try testing.expect(saw_callable); // Explicit single-step retains this horos.
-        var fast = try Session.start(testing.allocator, &prepared, &.{});
-        defer fast.deinit();
-        var fast_stats: std.meta.Child(@typeInfo(@FieldType(Session, "statistics")).optional.child) = .{};
-        fast.setStatistics(&fast_stats);
-        const fast_result = try fast.run(null);
-        try testing.expect(fast_result == .completed);
-        try testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, (try fast.bytes(&fast_result.completed))[0..8], .little));
-        try testing.expectEqual(strict_stats.transitions, fast_stats.transitions);
-
+        try expectClosedHandlerExecution(&prepared, image);
         var bounded = try Session.start(testing.allocator, &prepared, &.{});
         defer bounded.deinit();
         var stepped = try Session.start(testing.allocator, &prepared, &.{});
@@ -3151,21 +3468,36 @@ test "behavior: a callable also used as handler state is materialized" {
     defer b.deinit();
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);
-    const callable = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{}, .result = integer } } });
+    const callable = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = integer,
+    } } });
     const body = try b.declare(&.{}, integer, &.{}, &.{});
     try b.define(body, try b.pure(try b.constant(u64, 42)));
     const returns = try b.declare(&.{ callable, integer }, integer, &.{}, &.{});
     try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
-    const handler = try b.handler(.{ .mode = .deep, .input = integer, .answer = integer, .state = &.{callable}, .return_function = returns, .clauses = &.{} });
+    const handler = try b.handler(.{
+        .mode = .deep,
+        .input = integer,
+        .answer = integer,
+        .state = &.{callable},
+        .return_function = returns,
+        .clauses = &.{},
+    });
     const entry = try b.declare(&.{}, integer, &.{}, &.{});
     const value = try b.lambda(body, callable);
-    try b.define(entry, try b.term(.{ .handle = .{ .handler = handler, .body = value, .state = &.{value} } }));
+    try b.define(entry, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = value,
+        .state = &.{value},
+    } }));
     var compiled = try source.lower(testing.allocator, b.module(entry, unit));
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     var saw_callable = false;
-    while (!session.isTerminal()) {
+    for (0..1_000_000) |_| {
+        if (session.isTerminal()) break;
         _ = try session.run(2);
         var snapshot = try guestState(&session);
         defer snapshot.deinit();
@@ -3176,14 +3508,21 @@ test "behavior: a callable also used as handler state is materialized" {
     }
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, 42), std.mem.readInt(
+        u64,
+        (try session.bytes(&result.completed))[0..8],
+        .little,
+    ));
     try testing.expect(saw_callable);
 }
 
 test "behavior: sequence consumption keeps canonical state bounded and preserves resident retry" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try @import("sequence_fixture.zig").build(&builder));
+    var compiled = try source.lower(
+        testing.allocator,
+        try @import("sequence_fixture.zig").build(&builder),
+    );
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -3204,14 +3543,16 @@ test "behavior: sequence consumption keeps canonical state bounded and preserves
         try session.step();
         var snapshot = try guestState(&session);
         defer snapshot.deinit();
-        // Canonical projection encodes sequence values as blobs. Bound the
-        // retained graph at every step independently of physical collection.
         const live = snapshot.state.nodes.len;
         try testing.expect(live < 40);
     }
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 2080), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, 2080), std.mem.readInt(
+        u64,
+        (try session.bytes(&result.completed))[0..8],
+        .little,
+    ));
     var rollback = try Session.restore(testing.allocator, &prepared, initial);
     defer rollback.deinit();
     var transaction = try rollback.begin();
@@ -3235,7 +3576,9 @@ test "behavior: mutual tail entry restores each changed guest function" {
     defer session.deinit();
     var initial_state = try guestState(&session);
     defer initial_state.deinit();
-    const control = initial_state.state.nodes[@intCast(initial_state.state.roots.current.?.id)].record.control;
+    const control = initial_state.state.nodes[
+        @intCast(initial_state.state.roots.current.?.id)
+    ].record.control;
     var function = session.program.blocks[@intCast(control.block)].function;
     var changes: usize = 0;
     var steps: usize = 0;
@@ -3245,7 +3588,9 @@ test "behavior: mutual tail entry restores each changed guest function" {
         if (session.isTerminal()) break;
         var snapshot = try guestState(&session);
         defer snapshot.deinit();
-        const active = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)].record.control;
+        const active = snapshot.state.nodes[
+            @intCast(snapshot.state.roots.current.?.id)
+        ].record.control;
         const next_function = session.program.blocks[@intCast(active.block)].function;
         if (next_function != function) {
             changes += 1;
@@ -3268,23 +3613,31 @@ test "behavior: mutual tail entry restores each changed guest function" {
 test "behavior: handler returns preserve the caller results across every guest transition" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, 8));
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.installations(&builder, 8),
+    );
     defer compiled.deinit();
     var session = try initFromImage(testing.allocator, compiled.program, &.{});
     defer session.deinit();
     var initial_state = try guestState(&session);
     defer initial_state.deinit();
-    const caller = initial_state.state.nodes[@intCast(initial_state.state.roots.current.?.id)].record.control;
+    const caller = initial_state.state.nodes[
+        @intCast(initial_state.state.roots.current.?.id)
+    ].record.control;
     const function = session.program.blocks[@intCast(caller.block)].function;
     var returns: usize = 0;
     var was_caller = true;
-    while (!session.isTerminal()) {
+    for (0..1_000_000) |_| {
+        if (session.isTerminal()) break;
         try testing.expect(session.transitions < 256);
         try session.step();
         if (session.isTerminal()) break;
         var snapshot = try guestState(&session);
         defer snapshot.deinit();
-        const current = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)].record.control;
+        const current = snapshot.state.nodes[
+            @intCast(snapshot.state.roots.current.?.id)
+        ].record.control;
         const is_caller = session.program.blocks[@intCast(current.block)].function == function;
         if (is_caller) {
             if (!was_caller) returns += 1;
@@ -3294,7 +3647,11 @@ test "behavior: handler returns preserve the caller results across every guest t
     try testing.expectEqual(@as(usize, 8), returns);
     const result = try session.observe();
     try testing.expect(result == .completed);
-    try testing.expectEqual(@as(u64, 36), std.mem.readInt(u64, (try session.bytes(&result.completed))[0..8], .little));
+    try testing.expectEqual(@as(u64, 36), std.mem.readInt(
+        u64,
+        (try session.bytes(&result.completed))[0..8],
+        .little,
+    ));
 }
 
 fn guestState(session: *Session) !horos.data.state_image.Owned {
@@ -3311,4 +3668,915 @@ fn roundTrip(session: *Session) !void {
     const restored = try Session.restore(session.allocator, &prepared, state);
     session.deinit();
     session.* = restored;
+}
+
+const retainedTemplateProgram: horos.data.activation.Program = .{
+    .roots = .{ .entry = 0, .result = 0, .failure = 2 },
+    .schemas = &.{
+        .u64,                                  .boolean, .unit,
+        .{ .internal = .{ .capability = 0 } },
+        .{ .internal = .{ .resumption = .{
+            .effect = 0,
+            .input = 1,
+            .answer = 0,
+            .capture_bound = &.{0},
+            .handled = &.{0},
+            .mode = .deep,
+            .use = .multi,
+        } } },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{3},
+            .result = 0,
+            .effects = &.{0},
+        } } },
+    },
+    .constants = &.{
+        .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 2, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 1, .bytes = &.{0} },
+        .{ .schema = 1, .bytes = &.{1} },
+        .{ .schema = 2, .bytes = &.{} },
+    },
+    .effects = &.{.{
+        .identity = "stable/loop",
+        .payload = 2,
+        .result = 1,
+        .control_use = .multi,
+        .external = false,
+    }},
+    .functions = &.{
+        .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 5, 0 } }, .result = 0 },
+        .{ .entry = 2, .inputs = &.{0}, .layout = .{
+            .slots = &.{ 3, 0, 0, 2, 1, 0, 0, 0, 1, 0 },
+        }, .result = 0, .effects = &.{0} },
+        .{ .entry = 5, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 },
+        .{ .entry = 6, .inputs = &.{ 0, 1 }, .layout = .{
+            .slots = &.{ 2, 4, 1, 0, 1, 0, 0 },
+        }, .result = 0 },
+    },
+    .blocks = &.{
+        .{ .function = 0, .instructions = &.{.{
+            .destination = 0,
+            .opcode = .computation,
+        }}, .terminator = .{
+            .handle = .{
+                .handler = 0,
+                .body = 0,
+                .arguments = &.{},
+                .state = &.{},
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{
+                        .destination = 1,
+                        .source = .returned,
+                    }},
+                },
+            },
+        } },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
+        .{ .function = 1, .instructions = &.{
+            .{ .destination = 1, .opcode = .constant, .immediate = 0 },
+            .{ .destination = 2, .opcode = .constant, .immediate = 1 },
+            .{ .destination = 3, .opcode = .constant, .immediate = 5 },
+            .{ .destination = 9, .opcode = .constant, .immediate = 2 },
+        }, .terminator = .{
+            .perform = .{
+                .effect = 0,
+                .capability = 0,
+                .payload = 3,
+                .next = .{
+                    .block = 3,
+                    .assignments = &.{.{
+                        .destination = 4,
+                        .source = .returned,
+                    }},
+                },
+            },
+        } },
+        .{ .function = 1, .instructions = &.{
+            .{ .destination = 5, .opcode = .constant, .immediate = 0 },
+            .{
+                .destination = 6,
+                .opcode = .integer_add,
+                .operands = &.{ 1, 5 },
+                .failures = &.{.{
+                    .kind = .arithmetic_overflow,
+                    .value = 5,
+                }},
+            },
+            .{
+                .destination = 7,
+                .opcode = .integer_sub,
+                .operands = &.{ 2, 5 },
+                .failures = &.{.{
+                    .kind = .arithmetic_overflow,
+                    .value = 5,
+                }},
+            },
+            .{ .destination = 8, .opcode = .equal, .operands = &.{ 7, 9 } },
+        }, .terminator = .{ .branch = .{
+            .condition = 8,
+            .when_true = .{ .block = 4, .assignments = &.{
+                .{ .destination = 1, .source = .{ .slot = 6 } },
+                .{ .destination = 2, .source = .{ .slot = 7 } },
+            } },
+            .when_false = .{ .block = 3, .assignments = &.{
+                .{ .destination = 1, .source = .{ .slot = 6 } },
+                .{ .destination = 2, .source = .{ .slot = 7 } },
+            } },
+        } } },
+        .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
+        .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+        .{ .function = 3, .instructions = &.{.{
+            .destination = 2,
+            .opcode = .constant,
+            .immediate = 4,
+        }}, .terminator = .{
+            .resume_value = .{
+                .resumption = 1,
+                .argument = 2,
+                .next = .{
+                    .block = 7,
+                    .assignments = &.{.{
+                        .destination = 3,
+                        .source = .returned,
+                    }},
+                },
+            },
+        } },
+        .{ .function = 3, .instructions = &.{.{
+            .destination = 4,
+            .opcode = .constant,
+            .immediate = 3,
+        }}, .terminator = .{
+            .resume_value = .{
+                .resumption = 1,
+                .argument = 4,
+                .next = .{
+                    .block = 8,
+                    .assignments = &.{.{
+                        .destination = 5,
+                        .source = .returned,
+                    }},
+                },
+            },
+        } },
+        .{
+            .function = 3,
+            .instructions = &.{
+                .{
+                    .destination = 6,
+                    .opcode = .integer_add,
+                    .operands = &.{ 3, 5 },
+                    .failures = &.{.{
+                        .kind = .arithmetic_overflow,
+                        .value = 5,
+                    }},
+                },
+            },
+            .terminator = .{ .return_value = 6 },
+        },
+    },
+    .handlers = &.{
+        .{
+            .mode = .deep,
+            .input = 0,
+            .answer = 0,
+            .return_function = 2,
+            .clauses = &.{.{
+                .effect = 0,
+                .function = 3,
+                .resumption = 4,
+            }},
+        },
+    },
+    .scopes = .{ .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
+    .constructors = &.{.{ .function = 1, .capture = 0, .schema = 5 }},
+};
+
+const ResidentJob = struct {
+    prepared: @import("kosmos").Prepared,
+    allocator: std.mem.Allocator,
+    ready: *std.atomic.Value(usize),
+    start: *std.atomic.Value(bool),
+    failure: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        _ = self.ready.fetchAdd(1, .release);
+        while (!self.start.load(.acquire)) std.atomic.spinLoopHint(); // tiger: event-loop
+        self.work() catch |err| {
+            self.failure = err;
+        };
+    }
+    fn work(self: *@This()) !void {
+        defer self.prepared.deinit();
+        for (0..32) |_| {
+            var resident = try Resident.start(self.allocator, &self.prepared, &.{});
+            defer releaseResident(&resident);
+            var result = try resident.drive(self.allocator, .none, .{});
+            defer result.deinit();
+            if (result.record != .completed or !std.mem.eql(
+                u8,
+                result.record.completed,
+                &.{ 1, 0, 0, 0, 0, 0, 0, 0 },
+            ))
+                return error.UnexpectedResult;
+            try resident.close();
+        }
+        var terminal = try Resident.start(self.allocator, &self.prepared, &.{});
+        defer releaseResident(&terminal);
+        var result = try terminal.drive(self.allocator, .none, .{});
+        defer result.deinit();
+        if (result.record != .completed) return error.UnexpectedResult;
+        self.prepared.deinit();
+        try terminal.close();
+    }
+};
+
+fn expectLexicalCapture(builder: *source.Builder, original: source.Module) !void {
+    const inner = &builder.functions.items[1];
+    inner.body = try builder.term(.{ .yield_then = inner.body.? });
+    var yielding = try source.lower(
+        testing.allocator,
+        builder.module(original.entry, original.failure),
+    );
+    defer yielding.deinit();
+    var paused = try initFromImage(
+        testing.allocator,
+        yielding.program,
+        &.{ 40, 0, 0, 0, 0, 0, 0, 0 },
+    );
+    defer paused.deinit();
+    try testing.expect(try paused.run(null) == .yielded);
+    const checkpoint = try paused.checkpoint(testing.allocator);
+    defer testing.allocator.free(checkpoint);
+    const image = try programBytes(yielding.program);
+    defer testing.allocator.free(image);
+    var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
+    defer restored.deinit();
+    try restored.resumeYield();
+    const completed = try restored.run(null);
+    try testing.expect(completed == .completed);
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 42, 0, 0, 0, 0, 0, 0, 0 },
+        try restored.bytes(&completed.completed),
+    );
+}
+
+fn expectResidentTransactionCopies(
+    prepared: *const @import("kosmos").Prepared,
+    state: []const u8,
+) !void {
+    var engine_storage = try Session.restore(
+        testing.allocator,
+        prepared,
+        state,
+    );
+    defer engine_storage.deinit();
+    const engine = &engine_storage;
+    const copies = engine.driver.outer.frames.slots.statistics.value_copies;
+    const custody_copies = engine.driver.outer.frames.custody.nodes.statistics.value_copies;
+    {
+        var transaction = try engine.begin();
+        defer transaction.rollback(engine);
+        try testing.expectEqual(copies, engine.driver.outer.frames.slots.statistics.value_copies);
+        try testing.expectEqual(
+            custody_copies,
+            engine.driver.outer.frames.custody.nodes.statistics.value_copies,
+        );
+    }
+}
+
+fn expectInvocationObservation(
+    subject: *Session,
+    result: SessionObservation,
+    expected: []const u8,
+    record: horos.data.invocation.Outcome,
+) !void {
+    switch (result) {
+        .progressed => try testing.expectEqualSlices(u8, expected, record.progressed.?),
+        .yielded => try testing.expectEqualSlices(u8, expected, record.yielded.?),
+        .requested => {
+            try testing.expectEqualSlices(u8, expected, record.requested.state.?);
+            var pending = try subject.pendingRequest(testing.allocator);
+            defer pending.deinit();
+            var decoded = try horos.data.invocation.decode(
+                horos.data.invocation.Request,
+                testing.allocator,
+                record.requested.request,
+            );
+            defer decoded.deinit();
+            try testing.expectEqualDeep(pending.request, decoded.value);
+        },
+        .completed => |value| try testing.expectEqualSlices(
+            u8,
+            try subject.bytes(&value),
+            record.completed,
+        ),
+        .failed => |value| {
+            try testing.expectEqualSlices(u8, try subject.bytes(&value), record.failed.value);
+            try testing.expectEqualDeep(
+                (try subject.terminalExit()).cancellation,
+                record.failed.cancellation,
+            );
+            try expectCleanupFailures(subject, record.failed.cleanup_failures);
+        },
+        .cancelled => |reason| {
+            try testing.expectEqualDeep(reason, record.cancelled.reason);
+            try expectCleanupFailures(subject, record.cancelled.cleanup_failures);
+        },
+    }
+}
+
+const SessionObservation = @typeInfo(
+    @typeInfo(@TypeOf(Session.observe)).@"fn".return_type.?,
+).error_union.payload;
+
+fn rejectCorruptBindings(
+    image: []const u8,
+    forged: horos.data.process_state.State,
+    node: *horos.data.process_state.Node,
+    original: horos.data.process_state.Node,
+) !void {
+    const bindings = try testing.allocator.dupe(
+        horos.data.process_state.Binding,
+        original.activation.?.bindings,
+    );
+    defer testing.allocator.free(bindings);
+    node.activation.?.bindings = bindings;
+    bindings[0].slot = std.math.maxInt(u64);
+    node.activation.?.bindings = bindings[0..1];
+    node.activation.?.owners = &.{};
+    if (bindings[0].value.body == .owned) node.activation.?.owners = &.{.{
+        .scope = node.activation.?.scope,
+        .slot = std.math.maxInt(u64),
+    }};
+    try rejectCheckpoint(image, forged);
+    node.* = original;
+    node.activation.?.bindings = &.{};
+    node.activation.?.owners = &.{};
+    try rejectCheckpoint(image, forged);
+    node.* = original;
+}
+
+fn expectSuspensionContinuation(
+    session: *Session,
+    restored: *Session,
+    request_boundary: bool,
+    keep_original: bool,
+    input: []const u8,
+) !void {
+    for ([_]*Session{ session, restored }) |subject| {
+        if (request_boundary) {
+            var pending = try subject.pendingRequest(testing.allocator);
+            defer pending.deinit();
+            const protocol = horos.data.invocation;
+            const reply = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+                .request_identity = pending.request.request_identity,
+                .value = &.{},
+            });
+            defer testing.allocator.free(reply);
+            try subject.answer(reply);
+        } else try subject.resumeYield();
+        const result = try subject.run(null);
+        try testing.expect(result == .completed);
+        const bytes = try subject.bytes(&result.completed);
+        const expected = [_]u8{ 1, 1, 0, 0, 0, 0, 0, 0, 0 };
+        try testing.expectEqualSlices(u8, &expected, bytes[0..expected.len]);
+        if (keep_original) try testing.expectEqualSlices(
+            u8,
+            input,
+            bytes[expected.len..],
+        ) else try testing.expectEqual(expected.len, bytes.len);
+    }
+}
+
+fn expectClonePublicationFailure(
+    session: *Session,
+    prepared: *const @import("kosmos").Prepared,
+) !void {
+    var found = false;
+    for (0..256) |_| {
+        var snapshot = try guestState(session);
+        defer snapshot.deinit();
+        const node = snapshot.state.nodes[@intCast(snapshot.state.roots.current.?.id)];
+        const block = session.program.blocks[@intCast(node.record.control.block)];
+        const position = node.activation.?.position;
+        if (position < block.instructions.len and
+            block.instructions[@intCast(position)].opcode == .clone_resumption)
+        {
+            const before_clone = try session.checkpoint(testing.allocator);
+            defer testing.allocator.free(before_clone);
+            for ([_]bool{ false, true }) |with_checkpoint| try residentPublicationFailure(
+                prepared,
+                .{ .checkpoint = before_clone },
+                .none,
+                with_checkpoint,
+            );
+            found = true;
+            break;
+        }
+        try session.step();
+    }
+    try testing.expect(found);
+}
+
+fn expectResidentOutputFailures(resident: *Resident, before: []const u8) !void {
+    var tiny = [_]u8{0xa5};
+    try testing.expectError(error.Capacity, resident.driveInto(
+        .none,
+        .{ .quantum = 1, .checkpoint = true },
+        &tiny,
+    ));
+    try testing.expectEqual(0xa5, tiny[0]);
+    try expectResidentCheckpoint(resident, before);
+    var empty: [0]u8 = .{};
+    var output = std.heap.FixedBufferAllocator.init(&empty);
+    try testing.expectError(error.OutOfMemory, resident.driveEncoded(
+        output.allocator(),
+        .none,
+        .{ .quantum = 1, .checkpoint = true },
+    ));
+    try expectResidentCheckpoint(resident, before);
+    try testing.expectError(error.OutOfMemory, resident.drive(
+        output.allocator(),
+        .none,
+        .{ .quantum = 1, .checkpoint = true },
+    ));
+    try expectResidentCheckpoint(resident, before);
+}
+
+fn expectFreshReplyConsumption(image: []const u8, state: []const u8, identity: [32]u8) !void {
+    const protocol = horos.data.invocation;
+    const fresh = @import("kosmos").invocation;
+    const response = try protocol.encodeOwned(protocol.Result, testing.allocator, .{
+        .request_identity = identity,
+        .value = &.{},
+    });
+    defer testing.allocator.free(response);
+    var zero = try fresh.invoke(testing.allocator, .{
+        .image = image,
+        .instance = .{ .state = state },
+        .control = .{ .reply = response },
+        .quantum = 0,
+    });
+    defer zero.deinit();
+    try testing.expect(zero.record == .progressed);
+    try testing.expectError(error.InvalidState, fresh.invoke(testing.allocator, .{
+        .image = image,
+        .instance = .{ .state = zero.record.progressed.? },
+        .control = .{ .reply = response },
+    }));
+    var completed = try fresh.invoke(testing.allocator, .{ .image = image, .instance = .{
+        .state = zero.record.progressed.?,
+    } });
+    defer completed.deinit();
+    try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, completed.record.completed);
+    const command = try protocol.encodeOwned(protocol.Input, testing.allocator, .{
+        .image = image,
+        .instance = .{ .state = state },
+        .control = .{ .reply = response },
+    });
+    defer testing.allocator.free(command);
+    const original = try testing.allocator.dupe(u8, command);
+    defer testing.allocator.free(original);
+    try @import("allocation_testing.zig").check(testing.allocator, invocationFailure, .{command});
+    try testing.expectEqualSlices(u8, original, command);
+    var output = @as([32]u8, @splat(0xa5));
+    try testing.expectError(error.Capacity, fresh.invokeInto(
+        testing.allocator,
+        command,
+        output[0..1],
+    ));
+    for (output) |byte| try testing.expectEqual(0xa5, byte);
+    try testing.expectEqualSlices(u8, original, command);
+}
+
+fn escapedPackageFinish(
+    b: *source.Builder,
+    answer: u64,
+    integer: u64,
+    package: u64,
+    token: u64,
+) !u64 {
+    const finish = try b.declare(&.{answer}, integer, &.{}, &.{});
+    const ordinary = try b.variable(integer);
+    const suspended = try b.variable(package);
+    const k = try b.variable(token);
+    const resumed = try b.variable(answer);
+    const again = try b.term(.{ .call = .{
+        .function = finish,
+        .arguments = &.{try b.reference(resumed)},
+    } });
+    const resume_value = try b.term(.{ .resume_value = .{
+        .resumption = try b.reference(k),
+        .argument = try b.constant(u64, 42),
+    } });
+    const recover = try b.bind(k, try b.pure(try b.primitive(
+        token,
+        .unpack,
+        &.{try b.reference(suspended)},
+        0,
+    )), try b.bind(resumed, resume_value, again));
+    try b.define(finish, try b.term(.{ .match_sum = .{
+        .value = try b.reference(b.parameter(finish, 0)),
+        .cases = &.{
+            .{ .variable = ordinary, .body = try b.pure(try b.reference(ordinary)) },
+            .{ .variable = suspended, .body = recover },
+        },
+    } }));
+    return finish;
+}
+
+fn escapedPackageExample(b: *source.Builder) !source.Module {
+    const unit = try b.scalar(void);
+    const integer = try b.scalar(u64);
+    const effect = try b.effect(.{
+        .identity = "stable/escape",
+        .payload = unit,
+        .result = integer,
+        .external = false,
+    });
+    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+    const token = try b.reserveSchema();
+    const package = try b.schema(.{ .internal = .{ .suspension_package = token } });
+    const answer = try b.schema(.{ .sum = &.{ integer, package } });
+    try b.defineSchema(token, .{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = integer,
+        .answer = answer,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const returns = try b.declare(&.{integer}, answer, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.primitive(answer, .variant, &.{
+        try b.reference(b.parameter(returns, 0)),
+    }, 0)));
+    const clause = try b.declare(&.{ unit, token }, answer, &.{}, &.{});
+    const packaged = try b.primitive(package, .package, &.{
+        try b.reference(b.parameter(clause, 1)),
+    }, 0);
+    try b.define(clause, try b.pure(try b.primitive(answer, .variant, &.{packaged}, 1)));
+    const handler = try b.handler(
+        .{
+            .mode = .deep,
+            .input = integer,
+            .answer = answer,
+            .return_function = returns,
+            .clauses = &.{.{
+                .effect = effect,
+                .function = clause,
+                .resumption = token,
+            }},
+        },
+    );
+    const body = try b.declare(&.{cap}, integer, &.{effect}, &.{});
+    try b.define(body, try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try b.reference(b.parameter(body, 0)),
+        .payload = try b.constant(void, {}),
+    } }));
+    const finish = try escapedPackageFinish(b, answer, integer, package, token);
+    const main = try b.declare(&.{}, integer, &.{}, &.{});
+    const result = try b.variable(answer);
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = integer,
+        .effects = &.{effect},
+    } } });
+    const handled = try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = try b.lambda(body, signature),
+    } });
+    try b.define(main, try b.bind(result, handled, try b.term(.{ .call = .{
+        .function = finish,
+        .arguments = &.{try b.reference(result)},
+    } })));
+    return b.module(main, unit);
+}
+
+fn configureClosedHandler(
+    a: std.mem.Allocator,
+    program: *horos.data.activation.Program,
+    mode: usize,
+) !void {
+    const ir = horos.data.activation;
+    const blocks = try a.dupe(ir.Block, program.blocks);
+    program.blocks = blocks;
+    const entry = program.functions[@intCast(program.roots.entry)].entry;
+    try testing.expect(blocks[@intCast(entry)].terminator == .handle);
+    const first = &blocks[@intCast(entry)].terminator.handle;
+    const following = first.next.block;
+    try testing.expect(blocks[@intCast(following)].terminator == .handle);
+    const second = &blocks[@intCast(following)].terminator.handle;
+    if (mode == 1) {
+        for ([_]u64{ entry, following }) |id| {
+            const block = &blocks[@intCast(id)];
+            const instructions = try a.alloc(ir.Instruction, block.instructions.len + 1);
+            @memcpy(instructions[0..block.instructions.len], block.instructions);
+            const body = block.terminator.handle.body;
+            instructions[instructions.len - 1] = .{
+                .destination = body,
+                .opcode = .move,
+                .operands = try a.dupe(u64, &.{body}),
+            };
+            block.instructions = instructions;
+        }
+    } else if (mode == 2) {
+        second.body = first.body;
+    } else if (mode == 3 or mode == 5) {
+        const functions = try a.dupe(ir.Function, program.functions);
+        program.functions = functions;
+        const function = &functions[@intCast(program.roots.entry)];
+        const old = function.layout.slots;
+        const layout = try a.alloc(u64, old.len + 1);
+        @memcpy(layout[0..old.len], old);
+        layout[old.len] = old[@intCast(first.body)];
+        function.layout.slots = layout;
+        const assignments = try a.alloc(ir.Assignment, first.next.assignments.len + 1);
+        @memcpy(assignments[0..first.next.assignments.len], first.next.assignments);
+        assignments[assignments.len - 1] = .{
+            .destination = old.len,
+            .source = .{ .slot = first.body },
+        };
+        first.next.assignments = assignments;
+        if (mode == 3) second.body = old.len;
+    } else if (mode == 4) {
+        const body_schema = program.functions[
+            @intCast(program.roots.entry)
+        ].layout.slots[
+            @intCast(first.body)
+        ];
+        const schemas = try a.dupe(horos.data.program.Schema, program.schemas);
+        schemas[@intCast(body_schema)].internal.computation.use = .linear;
+        program.schemas = schemas;
+        const captures = try a.dupe(horos.data.program.Capture, program.scopes.captures);
+        for (program.constructors) |constructor| if (constructor.schema == body_schema) {
+            captures[@intCast(constructor.capture)].use = .linear;
+        };
+        program.scopes.captures = captures;
+    }
+}
+
+fn expectClosedHandlerExecution(
+    prepared: *const @import("kosmos").Prepared,
+    image: []const u8,
+) !void {
+    var session = try Session.start(testing.allocator, prepared, &.{});
+    defer session.deinit();
+    var strict_stats: std.meta.Child(
+        @typeInfo(@FieldType(Session, "statistics")).optional.child,
+    ) = .{};
+    session.setStatistics(&strict_stats);
+    var saw_callable = false;
+    for (0..1_000_000) |_| {
+        if (session.isTerminal()) break;
+        try session.step();
+        var snapshot = try guestState(&session);
+        defer snapshot.deinit();
+        for (snapshot.state.nodes) |node|
+            if (node.record == .computation) {
+                saw_callable = true;
+            };
+        const checkpoint = try session.checkpoint(testing.allocator);
+        defer testing.allocator.free(checkpoint);
+        var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
+        defer restored.deinit();
+        const again = try restored.checkpoint(testing.allocator);
+        defer testing.allocator.free(again);
+        try testing.expectEqualSlices(u8, checkpoint, again);
+    }
+    const result = try session.observe();
+    try testing.expect(result == .completed);
+    try testing.expectEqual(@as(u64, 3), std.mem.readInt(
+        u64,
+        (try session.bytes(&result.completed))[0..8],
+        .little,
+    ));
+    try testing.expect(saw_callable);
+    var fast = try Session.start(testing.allocator, prepared, &.{});
+    defer fast.deinit();
+    var fast_stats: std.meta.Child(
+        @typeInfo(@FieldType(Session, "statistics")).optional.child,
+    ) = .{};
+    fast.setStatistics(&fast_stats);
+    const fast_result = try fast.run(null);
+    try testing.expect(fast_result == .completed);
+    try testing.expectEqual(@as(u64, 3), std.mem.readInt(
+        u64,
+        (try fast.bytes(&fast_result.completed))[0..8],
+        .little,
+    ));
+    try testing.expectEqual(strict_stats.transitions, fast_stats.transitions);
+}
+
+fn insertCapturedHandler(decoded: *horos.data.state_image.Owned, extra: u64, wide: u64) !void {
+    const data = horos.data;
+    const g = data.graph;
+    const a = decoded.arena.allocator();
+    const count = decoded.state.nodes.len;
+    const nodes = try a.alloc(data.process_state.Node, count + 2);
+    @memcpy(nodes[0..count], decoded.state.nodes);
+    const token = for (nodes[0..count]) |node| {
+        if (node.record == .one_shot or node.record == .multi_template)
+            break if (node.record == .one_shot)
+                node.record.one_shot
+            else
+                node.record.multi_template;
+    } else return error.MissingCapture;
+    const saved = &nodes[@intCast(token.capture.?.id)].record.continuation;
+    nodes[count] = .{
+        .record = .{
+            .handler = .{
+                .definition = extra,
+                .state = try a.dupe(
+                    g.Value,
+                    &.{.{
+                        .schema = wide,
+                        .body = .{ .scalar = @splat(0) },
+                    }},
+                ),
+                .evidence = saved.evidence,
+                .region = saved.region,
+            },
+        },
+    };
+    nodes[count + 1] = .{ .record = .{ .attachment = .{
+        .handler = .{ .id = count },
+        .outer = saved.evidence,
+        .return_to = saved.parent,
+        .region = saved.region,
+    } } };
+    saved.parent = .{ .id = count + 1 };
+    decoded.state.nodes = nodes;
+}
+
+fn expectCapturedHandlerKinds(
+    program: horos.data.activation.Program,
+    state: horos.data.process_state.State,
+    handler_index: usize,
+    multi: bool,
+) !void {
+    const data = horos.data;
+    const g = data.graph;
+    const checked_nodes = @constCast(state.nodes);
+    try data.state_admission.validateStable(
+        testing.allocator,
+        program,
+        state,
+    );
+    const original = checked_nodes[handler_index];
+    inline for (std.enums.values(g.NodeTag)) |tag| {
+        if (comptime tag != .handler) {
+            checked_nodes[handler_index].record = emptyNodeRecord(tag);
+            if (data.state_admission.validateStable(
+                testing.allocator,
+                program,
+                state,
+            )) |_| {
+                return error.AcceptedWrongCapturedHandlerKind;
+            } else |err| try testing.expect(err != error.OutOfMemory);
+            checked_nodes[handler_index] = original;
+        }
+    }
+    const image = try programBytes(program);
+    defer testing.allocator.free(image);
+    const checkpoint = try data.state_image.emit(testing.allocator, state);
+    defer testing.allocator.free(checkpoint);
+    var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
+    defer restored.deinit();
+    const result = try restored.run(null);
+    try testing.expect(result == .completed);
+    const expected: []const u8 = if (multi)
+        &.{ 4, 0, 0, 0, 1, 1, 0, 1, 1 }
+    else
+        &.{ 67, 0, 0, 0, 0, 0, 0, 0 };
+    try testing.expectEqualSlices(u8, expected, try restored.bytes(&result.completed));
+}
+
+const ServiceMode = enum { empty, requests, swapped, cancelled, overflow, paired };
+const ServiceCounts = struct {
+    commands: usize = 0,
+    replies: usize = 0,
+    releases: usize = 0,
+    yields: usize = 0,
+};
+fn restoreService(session: *Session, image: []const u8) !void {
+    const checkpoint = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(checkpoint);
+    var resumed = try Session.restoreImage(testing.allocator, image, checkpoint);
+    errdefer resumed.deinit();
+    const roundtrip = try resumed.checkpoint(testing.allocator);
+    defer testing.allocator.free(roundtrip);
+    try testing.expectEqualSlices(u8, checkpoint, roundtrip);
+    session.deinit();
+    session.* = resumed;
+}
+fn serviceRequest(
+    session: *Session,
+    pending: @FieldType(SessionObservation, "requested"),
+    comptime mode: ServiceMode,
+    counts: *ServiceCounts,
+    final: u64,
+) !void {
+    const identity = session.program.effects[@intCast(pending.effect)].identity;
+    if (std.mem.eql(u8, identity, "example/service-command")) {
+        try testing.expectEqual(counts.commands, counts.replies);
+        if (mode == .empty or
+            (if (mode == .paired) counts.commands == counts.releases + 1 else counts.commands == 2))
+        {
+            try answerWithValue(session, &.{1});
+        } else {
+            var request: [17]u8 = undefined;
+            request[0] = 0;
+            std.mem.writeInt(u64, request[1..9], counts.commands + 1, .little);
+            std.mem.writeInt(
+                u64,
+                request[9..17],
+                if (mode == .overflow and counts.commands == 1) std.math.maxInt(u64) else 1,
+                .little,
+            );
+            counts.commands += 1;
+            try answerWithValue(session, &request);
+        }
+    } else if (std.mem.eql(u8, identity, "example/service-reply")) {
+        var expected: [16]u8 = undefined;
+        std.mem.writeInt(
+            u64,
+            expected[0..8],
+            if (mode == .swapped) (counts.replies + 1) ^ 3 else counts.replies + 1,
+            .little,
+        );
+        std.mem.writeInt(
+            u64,
+            expected[8..16],
+            if (mode == .paired) 0 else counts.replies,
+            .little,
+        );
+        try testing.expectEqualSlices(
+            u8,
+            &expected,
+            try session.bytes(&pending.payload),
+        );
+        counts.replies += 1;
+        try answerWithValue(session, &.{});
+    } else {
+        try testing.expectEqualStrings("example/service-finalize", identity);
+        counts.releases += 1;
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, if (mode == .paired) 1 else final, .little);
+        try testing.expectEqualSlices(
+            u8,
+            &expected,
+            try session.bytes(&pending.payload),
+        );
+        try answerWithValue(session, &.{});
+    }
+}
+
+fn expectDistinctRequestCaptures(
+    first: horos.data.invocation.Request,
+    second: horos.data.invocation.Request,
+) !void {
+    try testing.expectEqualDeep(
+        first.binding.semantic_identity,
+        second.binding.semantic_identity,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        first.binding.payload,
+        second.binding.payload,
+    );
+    try testing.expect(!std.mem.eql(
+        u8,
+        &first.request_identity,
+        &second.request_identity,
+    ));
+}
+
+fn residentTransitionAllocations(
+    prepared: *const @import("kosmos").Prepared,
+    fixture: ResidentFixture,
+    control: horos.data.invocation.Control,
+    checkpoint_mode: bool,
+) !usize {
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var resident = try fixture.restore(counting.allocator(), prepared);
+    defer releaseResident(&resident);
+    var statistics: std.meta.Child(
+        @typeInfo(@FieldType(Session, "statistics")).optional.child,
+    ) = .{};
+    try resident.setStatistics(&statistics);
+    _ = try resident.diagnostics();
+    const allocation_start = counting.alloc_index;
+    counting.resize_fail_index = counting.resize_index;
+    var output = try resident.drive(counting.allocator(), control, .{
+        .quantum = 1,
+        .checkpoint = checkpoint_mode,
+    });
+    defer output.deinit();
+    return counting.alloc_index - allocation_start;
 }

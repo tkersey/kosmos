@@ -24,9 +24,17 @@ fn pruneFrame(count: usize) !void {
         .constants = &.{},
         .effects = &.{},
         .blocks = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{ 0, last }, .layout = .{ .slots = layout }, .result = 0 }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{ 0, last },
+            .layout = .{ .slots = layout },
+            .result = 0,
+        }},
     };
-    var frame_layouts = try @import("frame_layouts.zig").Layouts.init(testing.allocator, program.functions);
+    var frame_layouts = try @import("frame_layouts.zig").Layouts.init(
+        testing.allocator,
+        program.functions,
+    );
     defer frame_layouts.deinit();
     var frames = try Frames.init(testing.allocator, &pool, &frame_layouts);
     defer frames.deinit();
@@ -270,7 +278,9 @@ test "existing Kosmos value operations read stable slots without full-frame mate
         .immediate = 1,
     }, 0, reader);
     try testing.expectEqual(42, std.mem.readInt(u64, &field.body.scalar, .little));
-    try testing.expectEqualSlices(u8, &.{ 7, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0 }, try values.bytes(&product));
+    try testing.expectEqualSlices(u8, &.{
+        7, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0,
+    }, try values.bytes(&product));
     try store.set(view, 3, try heap.literal(&schemas, .{ .schema = 2, .bytes = &.{ 1, 'a' } }));
     try store.set(view, 1900, try heap.literal(&schemas, .{ .schema = 2, .bytes = &.{ 1, 'b' } }));
     const result = try @import("blobs.zig").evaluate(&values, .{
@@ -341,7 +351,10 @@ test "stable slots match an independent flat model across mixed view lifecycles"
                     const binding = (try iterator.next()).?;
                     try testing.expectEqual(position, binding.slot);
                     try testing.expectEqual(known, binding.value);
-                } else try testing.expectError(error.UninitializedSlot, store.get(current, position));
+                } else try testing.expectError(
+                    error.UninitializedSlot,
+                    store.get(current, position),
+                );
             }
             try testing.expect(try iterator.next() == null);
         }
@@ -417,7 +430,12 @@ fn batchFrame(allocator: std.mem.Allocator, count: usize) !void {
         .constants = &.{},
         .effects = &.{},
         .blocks = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = layout }, .result = 0 }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = layout },
+            .result = 0,
+        }},
     };
     var frame_layouts = try @import("frame_layouts.zig").Layouts.init(allocator, program.functions);
     defer frame_layouts.deinit();
@@ -425,13 +443,21 @@ fn batchFrame(allocator: std.mem.Allocator, count: usize) !void {
     defer frames.deinit();
     var original = try frames.create(0);
     defer frames.releaseFrame(original);
-    try frames.apply(&original, try pool.run(0, last), @as([]const data.program.Id, &.{ 0, last }), &.{ Values.natural(0, 42), Values.natural(0, 99) });
+    try frames.apply(&original, try pool.run(0, last), @as(
+        []const data.program.Id,
+        &.{ 0, last },
+    ), &.{ Values.natural(0, 42), Values.natural(0, 99) });
     try testing.expectEqual(42, (try frames.slots.get(original.view, 0)).body.scalar[0]);
     for ([_]usize{ 1, 2, last }) |slot|
         try testing.expectError(error.UninitializedSlot, frames.slots.get(original.view, slot));
     var next = try frames.forkFrame(original);
     defer frames.releaseFrame(next);
-    frames.apply(&next, try pool.run(1, last), @as([]const data.program.Id, &.{1}), &.{Values.natural(0, 7)}) catch |err| {
+    frames.apply(
+        &next,
+        try pool.run(1, last),
+        @as([]const data.program.Id, &.{1}),
+        &.{Values.natural(0, 7)},
+    ) catch |err| {
         try testing.expectEqual(42, (try frames.slots.get(original.view, 0)).body.scalar[0]);
         try testing.expectError(error.UninitializedSlot, frames.slots.get(original.view, 1));
         return err;
@@ -445,7 +471,7 @@ fn batchFrame(allocator: std.mem.Allocator, count: usize) !void {
     try testing.expect((try bindings.next()) == null);
 }
 
-test "tail restart clears old locals and preserves retained input permutations on allocation failure" {
+test "tail restart clears locals and preserves input permutations on allocation failure" {
     for ([_]usize{ 4, 65, 256 }) |count| for ([_]u64{ 0, 1 }) |target| {
         try restartFrame(testing.allocator, count, target);
         try testing.checkAllAllocationFailures(testing.allocator, restartFrame, .{ count, target });
@@ -484,10 +510,16 @@ fn restartFrame(allocator: std.mem.Allocator, count: usize, target: u64) !void {
     var next = try frames.forkFrame(original);
     defer frames.releaseFrame(next);
     next.position = 3;
-    const arguments = [_]data.graph.Value{ try frames.slots.get(next.view, 1), try frames.slots.get(next.view, 0) };
+    const arguments = [_]data.graph.Value{
+        try frames.slots.get(next.view, 1),
+        try frames.slots.get(next.view, 0),
+    };
     frames.restart(&next, target, try pool.run(0, 2), &arguments) catch |err| {
         try testing.expectEqual(10, (try frames.slots.get(original.view, 0)).body.scalar[0]);
-        try testing.expectEqual(99, (try frames.slots.get(original.view, count - 1)).body.scalar[0]);
+        try testing.expectEqual(
+            99,
+            (try frames.slots.get(original.view, count - 1)).body.scalar[0],
+        );
         return err;
     };
     try testing.expectEqual(0, next.position);
@@ -516,10 +548,19 @@ test "cross-function restart rejects incompatible schemas capacity and active cu
             .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0 },
             .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1 } }, .result = 0 },
             .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0, 0 } }, .result = 0 },
-            .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0, .custody = &.{ .{}, .{ .parent = 0 } } },
+            .{
+                .entry = 0,
+                .inputs = &.{0},
+                .layout = .{ .slots = &.{ 0, 0 } },
+                .result = 0,
+                .custody = &.{ .{}, .{ .parent = 0 } },
+            },
         },
     };
-    var frame_layouts = try @import("frame_layouts.zig").Layouts.init(testing.allocator, program.functions);
+    var frame_layouts = try @import("frame_layouts.zig").Layouts.init(
+        testing.allocator,
+        program.functions,
+    );
     defer frame_layouts.deinit();
     var frames = try Frames.init(testing.allocator, &pool, &frame_layouts);
     defer frames.deinit();
@@ -528,7 +569,12 @@ test "cross-function restart rejects incompatible schemas capacity and active cu
     try testing.expect(frames.canRestart(frame, 1));
     for ([_]u64{ 2, 3, 4, 99 }) |target| {
         try testing.expect(!frames.canRestart(frame, target));
-        try testing.expectError(error.InvalidState, frames.restart(&frame, target, data.analysis_sets.empty, &.{}));
+        try testing.expectError(error.InvalidState, frames.restart(
+            &frame,
+            target,
+            data.analysis_sets.empty,
+            &.{},
+        ));
         try testing.expectEqual(0, frame.function);
     }
     // The gate is deliberately independent of the number of current owners.

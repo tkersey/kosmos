@@ -7,7 +7,9 @@ pub fn main(init: std.process.Init) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const compiler = @import("semantic/compiler.zig");
-    const bundle = try compiler.compile(a, .{ .horos_package = @import("artifact_options").horos_package });
+    const bundle = try compiler.compile(a, .{
+        .horos_package = @import("artifact_options").horos_package,
+    });
     var checked = try artifact.Admitted.init(a, bundle, artifact.digest(bundle));
     defer checked.deinit();
     try compiler.validate(a, &checked);

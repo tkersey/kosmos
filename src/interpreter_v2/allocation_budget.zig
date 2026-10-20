@@ -15,9 +15,19 @@ pub const Budget = struct {
         self.failed = false;
     }
     pub fn allocator(self: *Budget) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = allocate, .free = release, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap } };
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = allocate,
+            .free = release,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+        } };
     }
-    fn allocate(context: *anyopaque, length: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    fn allocate(
+        context: *anyopaque,
+        length: usize,
+        alignment: std.mem.Alignment,
+        ra: usize,
+    ) ?[*]u8 {
         const self: *Budget = @ptrCast(@alignCast(context));
         const required = @as(u64, self.live) +| length;
         self.required = @max(self.required, required);

@@ -150,7 +150,8 @@ test "removal retires borrowed slot and custody handles before journal ownership
         if (exhausted & 2 != 0) {
             const entry = c.frames.entries.getPtr(0).?;
             entry.custody.view.generation = std.math.maxInt(u64);
-            c.frames.custody.nodes.views.items[entry.custody.view.index].generation = entry.custody.view.generation;
+            c.frames.custody.nodes.views.items[entry.custody.view.index].generation =
+                entry.custody.view.generation;
         }
         const descriptor = try c.frames.get(0);
         var iterator = try c.frames.slots.iterator(descriptor.view);
@@ -160,10 +161,20 @@ test "removal retires borrowed slot and custody handles before journal ownership
         defer if (c.frames.journal != null) c.frames.rollback(1);
         try c.frames.remove(0);
         try testing.expectError(error.InvalidHandle, c.frames.slots.get(descriptor.view, 0));
-        try testing.expectError(error.InvalidHandle, c.frames.slots.set(descriptor.view, 0, Values.natural(0, 99)));
+        try testing.expectError(error.InvalidHandle, c.frames.slots.set(
+            descriptor.view,
+            0,
+            Values.natural(0, 99),
+        ));
         try testing.expectError(error.InvalidHandle, c.frames.slots.clear(descriptor.view, 1));
-        try testing.expectError(error.InvalidHandle, c.frames.slots.retainOnly(descriptor.view, &.{}));
-        try testing.expectError(error.InvalidHandle, c.frames.custody.nodes.clear(descriptor.custody.view, 0));
+        try testing.expectError(
+            error.InvalidHandle,
+            c.frames.slots.retainOnly(descriptor.view, &.{}),
+        );
+        try testing.expectError(
+            error.InvalidHandle,
+            c.frames.custody.nodes.clear(descriptor.custody.view, 0),
+        );
         try testing.expectError(error.InvalidHandle, iterator.next());
         try c.insert(0, 100);
         try c.frames.slots.set(independent.view, 0, Values.natural(0, 33));
@@ -209,7 +220,8 @@ test "direct first touch allocation failure rolls back and retries without histo
                 try c.frames.slots.set(frame.view, width - 1, Values.natural(0, 99));
                 if (cycle % 2 == 0) c.frames.rollback(3) else c.frames.commit();
                 if (cycle > 2) {
-                    const live = c.frames.slots.retainedBytes() + c.frames.custody.nodes.retainedBytes();
+                    const live = c.frames.slots.retainedBytes() +
+                        c.frames.custody.nodes.retainedBytes();
                     if (plateau) |bound| try testing.expect(live <= bound) else plateau = live;
                 }
                 try testing.expect(c.frames.journal == null);
@@ -236,7 +248,12 @@ const Context = struct {
         self.slots = try allocator.alloc(data.program.Id, width);
         errdefer allocator.free(self.slots);
         @memset(self.slots, 0);
-        self.functions = .{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = self.slots }, .result = 0 }};
+        self.functions = .{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = self.slots },
+            .result = 0,
+        }};
         self.layouts = try Layouts.init(allocator, &self.functions);
         errdefer self.layouts.deinit();
         self.frames = try Frames.init(allocator, &self.pool, &self.layouts);
@@ -433,7 +450,7 @@ test "first appended identity becomes an ordinary protected entry in the next tr
     try testing.expectEqual(20, try c.value(0, 0));
 }
 
-test "frame transaction restores entry membership through reuse and semantic forks without allocation" {
+test "frame transaction restores membership through reuse and semantic forks without allocation" {
     var counting = testing.FailingAllocator.init(testing.allocator, .{});
     var c: Context = undefined;
     try c.init(counting.allocator(), 65);
@@ -531,7 +548,10 @@ fn protectionFailure(allocator: std.mem.Allocator, remove: bool) !void {
     // reaches failures after the slot fork but before the custody fork finishes.
     while (c.frames.slots.views.items.len < c.frames.slots.views.capacity)
         try c.insert(c.frames.entries.count(), 11);
-    try testing.expectEqual(c.frames.custody.nodes.views.items.len, c.frames.custody.nodes.views.capacity);
+    try testing.expectEqual(
+        c.frames.custody.nodes.views.items.len,
+        c.frames.custody.nodes.views.capacity,
+    );
     const count = c.frames.entries.count();
     try c.frames.begin(count);
     // The first untouched removal can transfer ownership without allocation.
@@ -591,7 +611,10 @@ test "repeated frame commits release rollback views and retain a bounded plateau
         try c.frames.write(try c.frames.getMutable(0), 0, Values.natural(0, iteration));
         c.frames.commit();
         if (iteration == 16) plateau = counting.allocated_bytes - counting.freed_bytes;
-        if (iteration > 16) try testing.expectEqual(plateau, counting.allocated_bytes - counting.freed_bytes);
+        if (iteration > 16) try testing.expectEqual(
+            plateau,
+            counting.allocated_bytes - counting.freed_bytes,
+        );
         try testing.expectEqual(1, c.frames.slots.statistics.live_pages);
     }
     try testing.expectEqual(2047, try c.value(0, 0));

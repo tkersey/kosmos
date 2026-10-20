@@ -5,6 +5,7 @@ const data = @import("horos_data");
 const p = data.program;
 const g = data.graph;
 const Store = @import("store.zig").Store;
+const DataProjection = @import("store.zig").DataProjection;
 const Error = @import("runtime_types.zig").Error;
 const read = @import("operands.zig").read;
 pub const Parts = struct { tag: p.Id = 0, fields: []const g.Value };
@@ -70,13 +71,28 @@ const Collection = struct {
                     break :blk .{ .encoded = encoded[offset..reader.position] };
                 },
             };
-            return .{ .element = collection.element, .count = count, .storage = storage, .origin = collection.origin, .encoded_origin = collection.encoded_origin, .byte_offset = byte_offset, .offset = if (collection.origin != null) collection.offset + @as(usize, @intCast(start)) else 0 };
+            return .{
+                .element = collection.element,
+                .count = count,
+                .storage = storage,
+                .origin = collection.origin,
+                .encoded_origin = collection.encoded_origin,
+                .byte_offset = byte_offset,
+                .offset = if (collection.origin != null) collection.offset + @as(
+                    usize,
+                    @intCast(start),
+                ) else 0,
+            };
         }
     };
     fn slice(self: Collection, values: *Values, start: u64, count: u64) Error!Collection {
         if (values.store.statistics) |statistics| statistics.collection_range_checks +|= 1;
         if (start > self.count or count > self.count - start) return error.InvalidLength;
-        return (CheckedRange{ .collection = self, .start = start, .count = count }).materialize(values);
+        return (CheckedRange{
+            .collection = self,
+            .start = start,
+            .count = count,
+        }).materialize(values);
     }
     fn find(self: Collection, values: *Values, index: u64) Error!?g.Value {
         if (values.store.statistics) |statistics| statistics.collection_index_checks +|= 1;
@@ -87,8 +103,18 @@ const Collection = struct {
         // Memoize only a whole encoded container with nonempty elements. A
         // huge zero-width collection or many overlapping views must not grow
         // a cache in proportion to access history instead of its source bytes.
-        const key: ?@import("store.zig").DataProjection = if (values.aggregate_storage == .structured and self.whole_encoded and self.encoded_origin != null and (try values.schemaFacts()).minimum[@intCast(self.element)] != 0)
-            .{ .blob = self.encoded_origin.?.id, .schema = self.element, .field = index, .element = true, .offset = self.byte_offset }
+        const key: ?DataProjection = if (values.aggregate_storage == .structured and
+            self.whole_encoded and self.encoded_origin != null and
+            (try values.schemaFacts()).minimum[
+                @intCast(self.element)
+            ] != 0)
+            .{
+                .blob = self.encoded_origin.?.id,
+                .schema = self.element,
+                .field = index,
+                .element = true,
+                .offset = self.byte_offset,
+            }
         else
             null;
         if (key) |selected| if (values.store.data_projections.get(selected)) |cached| {
@@ -97,7 +123,11 @@ const Collection = struct {
         };
         // index < count proves that [index, index+1) is in this exact view,
         // including the maximum-u64 and zero-width element cases.
-        const item = try (CheckedRange{ .collection = self, .start = index, .count = 1 }).materialize(values);
+        const item = try (CheckedRange{
+            .collection = self,
+            .start = index,
+            .count = 1,
+        }).materialize(values);
         const result = try decodeItem(item, values);
         if (key) |selected| try values.store.rememberProjection(selected, result);
         return result;
@@ -105,7 +135,10 @@ const Collection = struct {
     fn decodeItem(item: Collection, values: *Values) Error!g.Value {
         return switch (item.storage) {
             .fields => |fields| fields[0],
-            .encoded => |encoded| values.store.literal(values.schemas, .{ .schema = item.element, .bytes = encoded }),
+            .encoded => |encoded| values.store.literal(values.schemas, .{
+                .schema = item.element,
+                .bytes = encoded,
+            }),
         };
     }
 
@@ -134,15 +167,25 @@ pub const Values = struct {
     aggregate_storage: enum { encoded, structured } = .encoded,
 
     fn schemaFacts(self: *Values) Error!data.admission.SchemaFacts {
-        if (self.facts == null) self.facts = try data.admission.schemas(self.allocator, self.schemas);
+        if (self.facts == null) self.facts = try data.admission.schemas(
+            self.allocator,
+            self.schemas,
+        );
         return self.facts.?;
     }
     pub fn bytes(self: Values, value: *const g.Value) Error![]const u8 {
         return switch (value.body) {
-            .scalar => |*scalar| scalar[0..data.scalar.width(self.schemas[@intCast(value.schema)]).?],
+            .scalar => |*scalar| scalar[0..data.scalar.width(
+                self.schemas[@intCast(value.schema)],
+            ).?],
             .blob => |ref| self.store.blobs.items[@intCast(ref.id)].bytes,
             .reference => blk: {
-                const encoded = try @import("value_encoding.zig").encode(self.store.allocator, self.schemas, self.store, value.*);
+                const encoded = try @import("value_encoding.zig").encode(
+                    self.store.allocator,
+                    self.schemas,
+                    self.store,
+                    value.*,
+                );
                 errdefer self.store.allocator.free(encoded);
                 const stored = try self.store.literalOwned(self.schemas, value.schema, encoded);
                 break :blk self.store.blobs.items[@intCast(stored.body.blob.id)].bytes;
@@ -169,7 +212,9 @@ pub const Values = struct {
         for (parts.fields) |field| if (field.body == .reference or field.body == .owned) {
             deferred = true;
         };
-        if (self.aggregate_storage == .encoded and !deferred and (try self.schemaFacts()).exportable[@intCast(schema)]) {
+        if (self.aggregate_storage == .encoded and
+            !deferred and (try self.schemaFacts()).exportable[@intCast(schema)])
+        {
             var measure: data.wire.Writer = .{};
             try self.write(&measure, schema, parts);
             const buffer = try self.store.allocator.alloc(u8, measure.position);
@@ -179,8 +224,21 @@ pub const Values = struct {
             return self.store.literalOwned(self.schemas, schema, buffer);
         }
         if (self.traits == null) self.traits = try data.traits.derive(self.allocator, self.schemas);
-        const reference = try self.store.add(.{ .aggregate = .{ .schema = schema, .tag = parts.tag, .fields = parts.fields } });
-        return .{ .schema = schema, .body = if (self.traits.?.copy[@intCast(schema)]) .{ .reference = reference } else .{ .owned = .{ .node = reference } } };
+        const reference = try self.store.add(.{ .aggregate = .{
+            .schema = schema,
+            .tag = parts.tag,
+            .fields = parts.fields,
+        } });
+        return .{
+            .schema = schema,
+            .body = if (self.traits.?.copy[
+                @intCast(
+                    schema,
+                )
+            ]) .{ .reference = reference } else .{ .owned = .{
+                .node = reference,
+            } },
+        };
     }
     fn structured(self: *Values, value: g.Value) Error!?Parts {
         switch (value.body) {
@@ -214,7 +272,8 @@ pub const Values = struct {
         if (try self.structured(value)) |parts| return parts.fields[@intCast(index)];
         const shape = self.schemas[@intCast(value.schema)];
         if (shape != .product or index >= shape.product.len) return error.TypeMismatch;
-        const key: ?@import("store.zig").DataProjection = if (self.aggregate_storage == .structured and value.body == .blob)
+        const cacheable = self.aggregate_storage == .structured and value.body == .blob;
+        const key: ?DataProjection = if (cacheable)
             .{ .blob = value.body.blob.id, .schema = value.schema, .field = index }
         else
             null;
@@ -236,7 +295,10 @@ pub const Values = struct {
         else
             try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
         // Materialize only the selected value into its own Store lifetime.
-        const result = try self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
+        const result = try self.store.literal(self.schemas, .{
+            .schema = schema,
+            .bytes = encoded,
+        });
         if (key) |selected| try self.store.rememberProjection(selected, result);
         return result;
     }
@@ -284,7 +346,13 @@ pub const Values = struct {
                 const remainder = reader.input[reader.position..];
                 reader.position = reader.input.len;
                 break :blk remainder;
-            } else try data.admission.readValue(self.allocator, self.schemas, facts, schema, &reader);
+            } else try data.admission.readValue(
+                self.allocator,
+                self.schemas,
+                facts,
+                schema,
+                &reader,
+            );
             field.* = try self.store.literal(self.schemas, .{ .schema = schema, .bytes = encoded });
         }
         try reader.finish();
@@ -306,8 +374,12 @@ pub const Values = struct {
                 else
                     value.body.owned.node;
                 if (self.store.encoded_sequences.get(@intCast(ref.id))) |sequence| {
-                    const backing_bytes = self.store.blobs.items[@intCast(sequence.backing.id)].bytes;
-                    return .{ .element = element, .count = sequence.count, .storage = .{ .encoded = backing_bytes[sequence.start..][0..sequence.length] }, .encoded_origin = sequence.backing, .byte_offset = sequence.start };
+                    const backing_bytes = self.store.blobs.items[
+                        @intCast(sequence.backing.id)
+                    ].bytes;
+                    return .{ .element = element, .count = sequence.count, .storage = .{
+                        .encoded = backing_bytes[sequence.start..][0..sequence.length],
+                    }, .encoded_origin = sequence.backing, .byte_offset = sequence.start };
                 }
                 const fields = (try self.store.get(ref)).aggregate.fields;
                 return .{
@@ -355,12 +427,19 @@ pub const Values = struct {
             count = std.math.add(u64, count, segment.count) catch return error.InvalidLength;
         }
         if ((try self.schemaFacts()).exportable[@intCast(schema)]) {
-            if (segments.len == 1 and (try self.schemaFacts()).minimum[@intCast(segments[0].element)] != 0)
+            if (segments.len == 1 and (try self.schemaFacts()).minimum[
+                @intCast(segments[0].element)
+            ] != 0)
                 if (segments[0].encoded_origin) |backing| {
                     const encoded_bytes = segments[0].storage.encoded;
                     const base = self.store.blobs.items[@intCast(backing.id)].bytes;
                     if (count != 0 and encoded_bytes.len > base.len / 4) {
-                        const ref = try self.store.encodedSequence(schema, .{ .backing = backing, .start = segments[0].byte_offset, .length = encoded_bytes.len, .count = count });
+                        const ref = try self.store.encodedSequence(schema, .{
+                            .backing = backing,
+                            .start = segments[0].byte_offset,
+                            .length = encoded_bytes.len,
+                            .count = count,
+                        });
                         return .{ .schema = schema, .body = .{ .reference = ref } };
                     }
                 };
@@ -374,8 +453,16 @@ pub const Values = struct {
         }
         const physical_count = std.math.cast(usize, count) orelse return error.OutOfMemory;
         if (segments.len == 1) if (segments[0].origin) |origin| {
-            if (self.traits == null) self.traits = try data.traits.derive(self.allocator, self.schemas);
-            const reference = try self.store.aggregateSlice(schema, origin, segments[0].offset, physical_count);
+            if (self.traits == null) self.traits = try data.traits.derive(
+                self.allocator,
+                self.schemas,
+            );
+            const reference = try self.store.aggregateSlice(
+                schema,
+                origin,
+                segments[0].offset,
+                physical_count,
+            );
             return .{ .schema = schema, .body = if (self.traits.?.copy[@intCast(schema)])
                 .{ .reference = reference }
             else

@@ -7,7 +7,13 @@ const p = data.program;
 const ir = data.activation;
 
 pub const identity = "kosmos.execution-base/1";
-pub const Error = error{ UnsupportedBaseOperation, UnsupportedBaseSchema, UnsupportedBaseDeclaration, InvalidBridge, Capacity };
+pub const Error = error{
+    UnsupportedBaseOperation,
+    UnsupportedBaseSchema,
+    UnsupportedBaseDeclaration,
+    InvalidBridge,
+    Capacity,
+};
 
 /// Exact declarations supplied by the selected core contract. Numeric schema
 /// references belong to that exact admitted image, not a caller's substitute
@@ -162,7 +168,11 @@ fn scan(program: ir.Program, bridge: Bridge) Error!Report {
             return error.InvalidBridge;
     }
     for (program.blocks) |block| {
-        report.instructions = std.math.add(usize, report.instructions, block.instructions.len) catch return error.Capacity;
+        report.instructions = std.math.add(
+            usize,
+            report.instructions,
+            block.instructions.len,
+        ) catch return error.Capacity;
         for (block.instructions) |instruction| {
             if (!permitsOpcode(instruction.opcode)) return error.UnsupportedBaseOperation;
             report.opcodes.insert(instruction.opcode);
@@ -225,7 +235,9 @@ test "base profile scans prohibited operations in every helper block" {
 
 test "base profile rejects admitted unused internal declarations" {
     var program = fixture;
-    program.schemas = &.{ .unit, .u64, .{ .internal = .{ .computation = .{ .parameters = &.{1}, .result = 1 } } } };
+    program.schemas = &.{ .unit, .u64, .{ .internal = .{
+        .computation = .{ .parameters = &.{1}, .result = 1 },
+    } } };
     const admitted = try admit(program);
     defer admitted.deinit();
     try std.testing.expectError(error.UnsupportedBaseSchema, check(admitted, .{}));
@@ -233,7 +245,9 @@ test "base profile rejects admitted unused internal declarations" {
 
 test "base profile distinguishes plain guest descriptors from executable schemas" {
     var program = fixture;
-    program.schemas = &.{ .unit, .u64, .{ .enumeration = &.{ 0, 1, 2, 3, 4, 5, 6, 7 } }, .{ .seq = 2 } };
+    program.schemas = &.{ .unit, .u64, .{
+        .enumeration = &.{ 0, 1, 2, 3, 4, 5, 6, 7 },
+    }, .{ .seq = 2 } };
     const admitted = try admit(program);
     defer admitted.deinit();
     _ = try check(admitted, .{});

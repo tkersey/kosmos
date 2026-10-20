@@ -8,7 +8,13 @@ const base = @import("../base/session.zig");
 const native = @import("native_baseline");
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
-const Command = union(enum) { initialize: []const u8, step, resume_yield, answer: []const u8, cancel: data.invocation.Reason };
+const Command = union(enum) {
+    initialize: []const u8,
+    step,
+    resume_yield,
+    answer: []const u8,
+    cancel: data.invocation.Reason,
+};
 
 fn prepare() !base.Prepared {
     var b = source.Builder.init(a);
@@ -31,21 +37,33 @@ fn prepare() !base.Prepared {
         const argument = try b.reference(parameter);
         var call = switch (i) {
             0 => try e.call(life.initialize, &.{ try e.param(entry, 0), argument }),
-            1 => try b.bind(stepped, try e.call(step.active, &.{input}), try b.pure(try e.payload(try b.reference(stepped), 0))),
+            1 => try b.bind(stepped, try e.call(step.active, &.{input}), try b.pure(
+                try e.payload(try b.reference(stepped), 0),
+            )),
             2 => try e.call(life.resume_yield, &.{input}),
             3 => try e.call(life.respond, &.{ input, argument }),
             4 => try e.call(life.cancel, &.{ input, argument }),
             else => unreachable,
         };
         call = try b.bind(changed, call, projected);
-        if (i != 0) call = try b.bind(hydrated, try e.call(m.hydrate, &.{ try e.param(entry, 0), try e.param(entry, 1) }), call);
+        if (i != 0) call = try b.bind(hydrated, try e.call(m.hydrate, &.{
+            try e.param(entry, 0), try e.param(entry, 1),
+        }), call);
         cases[i] = .{ .variable = parameter, .body = call };
     }
-    try b.define(entry, try b.term(.{ .match_sum = .{ .value = try e.param(entry, 2), .cases = &cases } }));
+    try b.define(entry, try b.term(.{ .match_sum = .{
+        .value = try e.param(entry, 2),
+        .cases = &cases,
+    } }));
     return support.prepare(b.module(entry, e.unit));
 }
 
-fn compare(core: *base.Prepared, guest: *native.Session, admitted: *const data.program_image.Admitted, command: Command) !void {
+fn compare(
+    core: *base.Prepared,
+    guest: *native.Session,
+    admitted: *const data.program_image.Admitted,
+    command: Command,
+) !void {
     const program = try projection.programBytes(a, admitted);
     defer a.free(program);
     const before = try guest.checkpoint(a);
@@ -74,7 +92,10 @@ fn compare(core: *base.Prepared, guest: *native.Session, admitted: *const data.p
         .answer => |value| {
             var pending = try guest.pendingRequest(a);
             defer pending.deinit();
-            const response = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request.request_identity, .value = value });
+            const response = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+                .request_identity = pending.request.request_identity,
+                .value = value,
+            });
             defer a.free(response);
             try guest.answer(response);
         },
@@ -107,15 +128,25 @@ test "authored lifecycle initializes responds resumes and cancels nested cleanup
                 done = true;
                 break;
             }
-            if (!cancelled and ((cancel_at == 0 and cut == 0) or (cancel_at == 1 and observed == .yielded) or (cancel_at == 2 and observed == .requested))) {
+            if (!cancelled and ((cancel_at == 0 and
+                cut == 0) or (cancel_at == 1 and
+                observed == .yielded) or (cancel_at == 2 and observed == .requested)))
+            {
                 try compare(&core, &guest, admitted, .{ .cancel = .{ .text = "stop λ" } });
                 try compare(&core, &guest, admitted, .{ .cancel = .{ .bytes = &.{ 0xff, 0 } } });
                 cancelled = true;
                 continue;
             }
-            const command: Command = if (observed == .yielded) .resume_yield else if (observed == .requested) .{ .answer = &.{} } else .step;
+            const command: Command = if (observed == .yielded)
+                .resume_yield
+            else if (observed == .requested)
+                .{ .answer = &.{} }
+            else
+                .step;
             compare(&core, &guest, admitted, command) catch |err| {
-                std.debug.print("lifecycle cancellation case {d} cut {d} command {s}: {s}\n", .{ cancel_at, cut, @tagName(command), @errorName(err) });
+                std.debug.print("lifecycle cancellation case {d} cut {d} command {s}: {s}\n", .{
+                    cancel_at, cut, @tagName(command), @errorName(err),
+                });
                 return err;
             };
         }

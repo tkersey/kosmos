@@ -39,7 +39,7 @@ pub const Custody = struct {
         return result;
     }
     pub fn release(self: *Custody, state: State) void {
-        self.nodes.release(state.view) catch unreachable;
+        self.nodes.release(state.view) catch |err| std.debug.panic("{s}", .{@errorName(err)});
     }
     fn get(self: *Custody, state: State, index: usize) Error!Item {
         return self.nodes.get(state.view, index);
@@ -48,7 +48,12 @@ pub const Custody = struct {
         try self.nodes.set(state.view, index, item);
     }
 
-    pub fn moveTo(self: *Custody, state: *State, scopes: []const data.activation.CustodyScope, target: usize) Error!void {
+    pub fn moveTo(
+        self: *Custody,
+        state: *State,
+        scopes: []const data.activation.CustodyScope,
+        target: usize,
+    ) Error!void {
         if (state.scope == target) return;
         if (!state.initialized) {
             state.scope = target;
@@ -57,17 +62,20 @@ pub const Custody = struct {
         var common = state.scope;
         var candidate = target;
         while (common != candidate) {
-            if (common > candidate) common = @intCast(scopes[common].parent.?) else candidate = @intCast(scopes[candidate].parent.?);
+            if (common > candidate)
+                common = parentScope(scopes, common).?
+            else
+                candidate = parentScope(scopes, candidate).?;
         }
         var path: std.ArrayList(usize) = .empty;
         defer path.deinit(self.allocator);
         var cursor = target;
         while (cursor != common) {
             try path.append(self.allocator, cursor);
-            cursor = @intCast(scopes[cursor].parent.?);
+            cursor = parentScope(scopes, cursor).?;
         }
         while (state.scope != common)
-            try self.leave(state, @intCast(scopes[state.scope].parent.?));
+            try self.leave(state, parentScope(scopes, state.scope).?);
         var index = path.items.len;
         while (index != 0) {
             index -= 1;
@@ -75,7 +83,17 @@ pub const Custody = struct {
         }
     }
 
-    fn ensure(self: *Custody, state: *State, scopes: []const data.activation.CustodyScope) Error!void {
+    fn parentScope(scopes: []const data.activation.CustodyScope, scope: usize) ?usize {
+        const parent = scopes[scope].parent orelse return null;
+        std.debug.assert(parent < scope);
+        return @intCast(parent);
+    }
+
+    fn ensure(
+        self: *Custody,
+        state: *State,
+        scopes: []const data.activation.CustodyScope,
+    ) Error!void {
         if (state.initialized) return;
         const target = state.scope;
         try self.put(state.*, state.slots, .{ .tail = state.slots });
@@ -124,7 +142,12 @@ pub const Custody = struct {
         state.scope = parent_scope;
     }
 
-    pub fn establish(self: *Custody, state: *State, scopes: []const data.activation.CustodyScope, slot: usize) Error!void {
+    pub fn establish(
+        self: *Custody,
+        state: *State,
+        scopes: []const data.activation.CustodyScope,
+        slot: usize,
+    ) Error!void {
         try self.ensure(state, scopes);
         try self.remove(state, slot);
         const marker = state.slots + state.scope;
@@ -190,7 +213,11 @@ pub const Custody = struct {
     }
 
     /// Portable lexical order, excluding private markers, links and COW handles.
-    pub fn project(self: *Custody, state: State, allocator: std.mem.Allocator) Error![]data.process_state.Owner {
+    pub fn project(
+        self: *Custody,
+        state: State,
+        allocator: std.mem.Allocator,
+    ) Error![]data.process_state.Owner {
         var result: std.ArrayList(data.process_state.Owner) = .empty;
         errdefer result.deinit(allocator);
         if (!state.initialized) return result.toOwnedSlice(allocator);
@@ -209,20 +236,30 @@ pub const Custody = struct {
         return result.toOwnedSlice(allocator);
     }
 
-    pub fn restore(self: *Custody, state: *State, scopes: []const data.activation.CustodyScope, target: usize, owners: []const data.process_state.Owner) Error!void {
+    pub fn restore(
+        self: *Custody,
+        state: *State,
+        scopes: []const data.activation.CustodyScope,
+        target: usize,
+        owners: []const data.process_state.Owner,
+    ) Error!void {
         var path: std.ArrayList(usize) = .empty;
         defer path.deinit(self.allocator);
         var cursor: ?usize = target;
         while (cursor) |scope| {
             try path.append(self.allocator, scope);
-            cursor = if (scopes[scope].parent) |parent| @intCast(parent) else null;
+            cursor = parentScope(scopes, scope);
         }
         var end = owners.len;
         while (path.pop()) |scope| {
             try self.moveTo(state, scopes, scope);
             var start = end;
             while (start != 0 and owners[start - 1].scope == scope) start -= 1;
-            for (owners[start..end]) |owner| try self.establish(state, scopes, @intCast(owner.slot));
+            for (owners[start..end]) |owner| try self.establish(
+                state,
+                scopes,
+                @intCast(owner.slot),
+            );
             end = start;
         }
         if (end != 0) return error.InvalidState;

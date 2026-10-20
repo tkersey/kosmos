@@ -54,9 +54,14 @@ const Encoder = struct {
                 try self.header(visit.value, &measure);
                 var length = measure.position;
                 if (self.store.encoded_sequences.get(@intCast(ref.id))) |sequence| {
-                    length = std.math.add(usize, length, sequence.length) catch return error.InvalidLength;
+                    length = std.math.add(usize, length, sequence.length) catch
+                        return error.InvalidLength;
                 } else for (node.aggregate.fields) |field| {
-                    length = std.math.add(usize, length, try self.size(field)) catch return error.InvalidLength;
+                    length = std.math.add(
+                        usize,
+                        length,
+                        try self.size(field),
+                    ) catch return error.InvalidLength;
                 }
                 self.sizes.getPtr(ref.id).?.* = .{ .done = true, .bytes = length };
                 continue;
@@ -105,10 +110,19 @@ const Encoder = struct {
     }
 };
 
-pub fn encode(allocator: std.mem.Allocator, schemas: []const p.Schema, store: *const Store, value: g.Value) Error![]u8 {
+pub fn encode(
+    allocator: std.mem.Allocator,
+    schemas: []const p.Schema,
+    store: *const Store,
+    value: g.Value,
+) Error![]u8 {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var encoder: Encoder = .{ .allocator = scratch.allocator(), .schemas = schemas, .store = store };
+    var encoder: Encoder = .{
+        .allocator = scratch.allocator(),
+        .schemas = schemas,
+        .store = store,
+    };
     const length = try encoder.discover(value);
     const bytes = try allocator.alloc(u8, length);
     errdefer allocator.free(bytes);

@@ -31,15 +31,45 @@ fn prepare() !base.Prepared {
     const tasks = try @import("table.zig").define(&b, try projection.schema(clones.Task, &b));
     const set = try @import("sets.zig").define(&b);
     const lists = try @import("map.zig").define(&b, refs.refs.table);
-    const entry = try b.declare(&.{ m.program, try projection.schema(Input, &b) }, e.boolean, &.{}, &.{});
+    const entry = try b.declare(&.{
+        m.program, try projection.schema(Input, &b),
+    }, e.boolean, &.{}, &.{});
     const input = try e.param(entry, 1);
     const machine = try b.variable(m.schema);
     const mapping = try b.variable(refs.map.tree);
     const originals = try b.variable(refs.refs.table);
     const queued = try b.variable(tasks.table);
-    const ctx = try e.tuple(clone.context, &.{ try b.reference(machine), try b.reference(mapping), try b.reference(originals), try set.map.empty(e), try set.map.empty(e), try lists.empty(e), try lists.empty(e), try b.reference(queued) });
-    const check = try e.when(try e.field(input, 5), try e.call(validation.context, &.{ ctx, try e.field(input, 3) }), try e.call(validation.rebase, &.{ try b.reference(machine), try b.reference(mapping), try b.reference(originals), try e.field(input, 3) }));
-    try b.define(entry, try b.bind(machine, try e.call(m.hydrate, &.{ try e.param(entry, 0), try e.field(input, 0) }), try b.bind(mapping, try e.call(refs.map.from_sequence, &.{try e.field(input, 1)}), try b.bind(originals, try e.call(refs.refs.from_sequence, &.{try e.field(input, 2)}), try b.bind(queued, try e.call(tasks.from_sequence, &.{try e.field(input, 4)}), check)))));
+    const ctx = try e.tuple(clone.context, &.{
+        try b.reference(machine),
+        try b.reference(mapping),
+        try b.reference(originals),
+        try set.map.empty(e),
+        try set.map.empty(e),
+        try lists.empty(e),
+        try lists.empty(e),
+        try b.reference(queued),
+    });
+    const check = try e.when(try e.field(input, 5), try e.call(
+        validation.context,
+        &.{ ctx, try e.field(input, 3) },
+    ), try e.call(validation.rebase, &.{
+        try b.reference(machine),
+        try b.reference(mapping),
+        try b.reference(originals),
+        try e.field(input, 3),
+    }));
+    try b.define(entry, try b.bind(machine, try e.call(m.hydrate, &.{
+        try e.param(entry, 0), try e.field(input, 0),
+    }), try b.bind(mapping, try e.call(
+        refs.map.from_sequence,
+        &.{try e.field(input, 1)},
+    ), try b.bind(originals, try e.call(
+        refs.refs.from_sequence,
+        &.{try e.field(input, 2)},
+    ), try b.bind(queued, try e.call(
+        tasks.from_sequence,
+        &.{try e.field(input, 4)},
+    ), check)))));
     return support.prepare(b.module(entry, e.unit));
 }
 
@@ -75,14 +105,26 @@ test "clone phase validation checks submitted mapping records cursors and work l
             .{ .record = .{ .environment = .{ .values = &new0, .tail = null } } },
             .{ .record = .{ .environment = .{ .values = &new1, .tail = null } } },
         };
-        var mapping = [_]Binding{ .{ .id = 0, .replacement = .{ .id = 2 } }, .{ .id = 1, .replacement = .{ .id = 3 } } };
+        var mapping = [_]Binding{ .{
+            .id = 0,
+            .replacement = .{ .id = 2 },
+        }, .{ .id = 1, .replacement = .{ .id = 3 } } };
         if (case == 4) mapping[1].replacement.id = 2;
         const arguments = try projection.encode(Input, a, .{
-            .state = .{ .program_identity = owner.admitted().identity(), .status = .active, .roots = .{}, .nodes = &nodes, .blobs = &.{} },
+            .state = .{
+                .program_identity = owner.admitted().identity(),
+                .status = .active,
+                .roots = .{},
+                .nodes = &nodes,
+                .blobs = &.{},
+            },
             .mapping = if (case == 5) mapping[0..1] else &mapping,
             .originals = &.{ .{ .id = 0 }, .{ .id = 1 } },
             .cursor = cursor,
-            .tasks = &.{.{ .kind = if (case == 9) 2 else 0, .reference = .{ .id = if (case == 10) 2 else 0 } }},
+            .tasks = &.{.{
+                .kind = if (case == 9) 2 else 0,
+                .reference = .{ .id = if (case == 10) 2 else 0 },
+            }},
             .context = case >= 8,
         });
         defer a.free(arguments);
