@@ -184,7 +184,12 @@ fn describeNode(node: data.process_state.Node, id: usize) Node {
         .tag = @backingInt(std.meta.activeTag(node.record)),
         .block = switch (node.record) {
             .control => |value| value.block,
-            inline .continuation, .region_scope, .protection, .obligation, .pending => |value| value.source_block,
+            inline .continuation,
+            .region_scope,
+            .protection,
+            .obligation,
+            .pending,
+            => |value| value.source_block,
             else => null,
         },
         .position = if (node.activation) |value| value.position else null,

@@ -108,7 +108,13 @@ fn reify(
     values: *Values,
     machine: g.Value,
 ) !data.state_image.Owned {
-    try bindGuest(a, values, machine, guest, selected.content.value.recovery.layout.machine_program);
+    try bindGuest(
+        a,
+        values,
+        machine,
+        guest,
+        selected.content.value.recovery.layout.machine_program,
+    );
     const input = try arguments(
         a,
         session.program.schemas,

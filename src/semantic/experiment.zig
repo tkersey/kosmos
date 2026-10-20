@@ -74,7 +74,10 @@ pub const Experiment = struct {
 
     pub fn begin(self: *Experiment, control: Control, guest_quantum: u64) !void {
         if (self.phase != .ready) return error.OperationInProgress;
-        try self.execution.submit(.{ .advance = .{ .control = control, .quantum = guest_quantum } });
+        try self.execution.submit(.{ .advance = .{
+            .control = control,
+            .quantum = guest_quantum,
+        } });
         self.phase = .advancing;
         self.stage = .advanced;
     }
@@ -128,7 +131,11 @@ pub const Experiment = struct {
         const a = self.execution.allocator;
         var canonical = try data.state_image.canonicalize(a, event.projection);
         defer canonical.deinit();
-        try data.state_admission.validateAdmitted(a, self.execution.guest.admitted(), canonical.state);
+        try data.state_admission.validateAdmitted(
+            a,
+            self.execution.guest.admitted(),
+            canonical.state,
+        );
         if (canonical.state.status != self.execution.last_cut.?.status)
             return error.InvalidServiceEvent;
         const checkpoint = try data.state_image.emit(a, canonical.state);

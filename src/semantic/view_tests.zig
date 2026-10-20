@@ -321,7 +321,10 @@ fn typedViewGuest(b: *source.Builder) !source.Module {
     return b.module(entry, unit);
 }
 
-fn typedViewBinding(guest: *const data.program_image.Admitted, checkpoint: []const u8) views.Binding {
+fn typedViewBinding(
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+) views.Binding {
     var bound = binding;
     bound.guest = guest.identity();
     bound.checkpoint = @import("artifact.zig").digest(checkpoint);
