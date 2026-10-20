@@ -454,6 +454,7 @@ pub fn inspectOuter(
     disclosure: @import("views.zig").Disclosure,
     disclosure_identity: artifact.Digest,
 ) !OuterInspection {
+    if (disclosure.snapshot) return error.InvalidDisclosure;
     var envelope = try read(a, bytes);
     errdefer envelope.deinit();
     const value = envelope.value;

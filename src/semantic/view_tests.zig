@@ -350,6 +350,7 @@ test "typed guest views disclose selected scalars schemas and bounded blob slice
     defer metadata.deinit();
     try std.testing.expectEqual(.not_requested, metadata.value.value_coverage);
     try std.testing.expectEqual(@as(usize, 0), metadata.value.values.len);
+    try std.testing.expectEqual(null, metadata.value.snapshot);
     const mask = try a.alloc(bool, metadata.value.metadata.nodes.len);
     defer a.free(mask);
     @memset(mask, true);
@@ -360,10 +361,51 @@ test "typed guest views disclose selected scalars schemas and bounded blob slice
     try std.testing.expectEqual(.complete, values.value.value_coverage);
     try std.testing.expect(values.value.schemas.len > 0);
     try std.testing.expectEqual(@as(usize, 0), values.value.blobs.len);
+    try std.testing.expectEqual(null, values.value.snapshot);
     try checkTypedDisclosure(guest, checkpoint, bound, values.value);
+    try checkSnapshotDisclosure(guest, checkpoint, bound, mask);
     const unchanged = try oracle.checkpoint(a);
     defer a.free(unchanged);
     try std.testing.expectEqualSlices(u8, checkpoint, unchanged);
+}
+
+fn checkSnapshotDisclosure(
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+    bound: views.Binding,
+    mask: []const bool,
+) !void {
+    const temporary = try a.dupe(u8, checkpoint);
+    defer a.free(temporary);
+    var disclosed = try views.captureDetailed(a, guest, temporary, bound, .{
+        .values = .{ .nodes = mask },
+        .snapshot = true,
+    });
+    defer disclosed.deinit();
+    @memset(temporary, 0);
+    try std.testing.expectEqualDeep(bound, disclosed.value.metadata.binding);
+    const reconstructed = try data.state_image.emit(a, disclosed.value.snapshot.?);
+    defer a.free(reconstructed);
+    try std.testing.expectEqualSlices(u8, checkpoint, reconstructed);
+    const partial = try a.dupe(bool, mask);
+    defer a.free(partial);
+    try std.testing.expect(partial.len != 0);
+    partial[0] = false;
+    const invalid = [_]views.Disclosure{
+        .{ .snapshot = true },
+        .{ .snapshot = true, .values = .{ .fields = &.{} } },
+        .{ .snapshot = true, .values = .{ .nodes = partial } },
+        .{ .snapshot = true, .values = .{ .nodes = mask }, .nodes = mask },
+        .{
+            .snapshot = true,
+            .values = .{ .nodes = mask },
+            .blobs = &.{.{ .blob = 0, .offset = 0, .length = 1 }},
+        },
+    };
+    for (invalid) |selection| try std.testing.expectError(
+        error.InvalidDisclosure,
+        views.captureDetailed(a, guest, checkpoint, bound, selection),
+    );
 }
 
 fn checkTypedDisclosure(

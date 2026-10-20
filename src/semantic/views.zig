@@ -41,6 +41,7 @@ pub const Disclosure = struct {
     nodes: ?[]const bool = null,
     values: ValueAccess = .none,
     blobs: []const BlobRange = &.{},
+    snapshot: bool = false,
 };
 pub const TypedValue = struct { node: u64, field: []const u8, value: g.Value };
 pub const Structure = struct { node: u64, schema: u64, tag: u64 };
@@ -61,8 +62,19 @@ pub const DetailedView = struct {
     structures: []const Structure,
     schemas: []const Schema,
     blobs: []const BlobSlice,
+    snapshot: ?data.process_state.State = null,
 };
-pub const Detailed = projection.Owned(DetailedView);
+pub const Detailed = struct {
+    arena: std.heap.ArenaAllocator,
+    value: DetailedView,
+    snapshot_owner: ?data.state_image.Owned = null,
+
+    pub fn deinit(self: *Detailed) void {
+        if (self.snapshot_owner) |*owner| owner.deinit();
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
 
 const Captured = struct {
     arena: std.heap.ArenaAllocator,
@@ -203,6 +215,7 @@ pub fn captureDetailed(
     binding: Binding,
     disclosure: Disclosure,
 ) !Detailed {
+    try validateSnapshotDisclosure(disclosure);
     var state = try admittedCut(a, guest, checkpoint, binding);
     defer state.deinit();
     var captured = try captureState(a, state.state, binding, disclosure);
@@ -210,14 +223,26 @@ pub fn captureDetailed(
     const storage = captured.arena.allocator();
     const schemas = try valueSchemas(storage, guest, captured.values, captured.structures);
     const blobs = try blobSlices(storage, state.state, captured.values, disclosure.blobs);
-    return .{ .arena = captured.arena, .value = .{
+    const snapshot = if (disclosure.snapshot)
+        try data.state_image.decodeGraph(a, checkpoint)
+    else
+        null;
+    return .{ .arena = captured.arena, .snapshot_owner = snapshot, .value = .{
         .metadata = captured.metadata,
         .value_coverage = captured.value_coverage,
         .values = captured.values,
         .structures = captured.structures,
         .schemas = schemas,
         .blobs = blobs,
+        .snapshot = if (snapshot) |owned| owned.state else null,
     } };
+}
+
+fn validateSnapshotDisclosure(disclosure: Disclosure) !void {
+    if (!disclosure.snapshot) return;
+    if (disclosure.nodes != null or disclosure.values != .nodes or disclosure.blobs.len != 0)
+        return error.InvalidDisclosure;
+    for (disclosure.values.nodes) |selected| if (!selected) return error.InvalidDisclosure;
 }
 
 fn valueSchemas(

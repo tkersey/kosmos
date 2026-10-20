@@ -306,6 +306,15 @@ fn inspectOuterView(
     defer view.deinit();
     try std.testing.expectEqual(.outer_execution, view.value.capsule.kind);
     try std.testing.expectEqual(.not_requested, view.value.state.value_coverage);
+    try std.testing.expectEqual(null, view.value.state.snapshot);
+    try std.testing.expectError(error.InvalidDisclosure, capsule.inspectOuter(
+        a,
+        owner.guest.admitted(),
+        selected,
+        bytes,
+        .{ .snapshot = true },
+        @splat(23),
+    ));
     try std.testing.expectEqualDeep(
         owner.guest.admitted().identity(),
         view.value.capsule.guest.identity,

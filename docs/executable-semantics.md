@@ -213,6 +213,13 @@ own their disclosed data. Outer-capsule inspection exposes the selected
 runtime's private execution state under a separate binding; it is not a
 committed guest cut.
 
+Complete guest snapshots require explicit `snapshot` disclosure together with
+all graph nodes and all node values. The returned optional state owns its data
+and reconstructs the exact canonical checkpoint under the same binding. Partial
+scopes, bounded blob slices and outer-capsule snapshot requests are rejected.
+The default path carries no snapshot and makes no full-payload copy. Disclosing
+this state supplies analysis data; it grants no restore, execution or custody right.
+
 `RuntimeAnalysis.interpretation` builds an ordinary pure driver with an explicit
 sequence of assumed replies, request history, guest-work allowance and stopping
 disposition. It can start from admitted arguments or an admitted snapshot.
