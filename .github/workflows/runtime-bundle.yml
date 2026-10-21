@@ -98,7 +98,7 @@ jobs:
           fi
           case "${{ matrix.lane }}" in
             sessions) group=behavior; expected=54 ;;
-            session-ownership) group=ownership; expected=16 ;;
+            session-ownership) group=ownership; expected=17 ;;
             source-regressions) group=regressions; expected=17 ;;
           esac
           zig build build-session-check -Dsession-group="$group" \
