@@ -4,7 +4,7 @@
 auditor self-tests and committed-change ratchet must pass along with all existing
 runtime qualification lanes. `Complete qualification` requires both results.
 Runtime qualification retains its 600-second workflow budget; TigerStyle is
-exempt from that budget and has an independent 45-minute job timeout.
+exempt from that budget and has an independent 10-minute job timeout.
 
 The native roots preserve the evaluator and language contracts:
 
