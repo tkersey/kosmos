@@ -457,7 +457,7 @@ test "projection cache preserves sparse reverse random reads and rejects mismatc
 }
 
 fn sparseProjectionArguments(
-    admitted: data.program_image.Admitted,
+    admitted: *const data.program_image.Admitted,
     sequence: u64,
     input: []const u8,
 ) ![]u8 {
