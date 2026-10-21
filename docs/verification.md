@@ -150,6 +150,12 @@ is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional
 ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
 Zig's input hashes and the dependency admission guards remain authoritative.
+The native lane compiles its existing test artifacts and independently rebuilt
+core before retaining the bounded compiler cache. It then executes the original
+check roots, so a later test timeout does not discard completed compilation.
+The Zig installation uses a stable tool-cache path because dependency extraction
+includes `PATH` in its input identity. Neither cache restoration nor successful
+compilation substitutes for completed tests.
 The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
 artifact whose source correspondence the native semantic lane checks. All lanes
 retain full runtime artifact and guest-state admission.

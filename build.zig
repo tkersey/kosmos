@@ -258,6 +258,8 @@ fn configureStorageChecks(
         .imports = &.{.{ .name = "horos_data", .module = dependencies.host_data }},
     }) });
     const run_native_tests = b.addRunArtifact(tests);
+    b.step("build-storage-check", "Build the native storage test artifact")
+        .dependOn(&tests.step);
     run_native_tests.has_side_effects = true;
     b.step("check-storage", "Check current private storage and allocation contracts")
         .dependOn(&run_native_tests.step);
@@ -658,6 +660,8 @@ fn configureDriver(
         } },
     }) });
     const run_driver_tests = b.addRunArtifact(driver_tests);
+    b.step("build-semantic-driver-check", "Build the native semantic driver test artifact")
+        .dependOn(&driver_tests.step);
     run_driver_tests.has_side_effects = true;
     b.step(
         "check-semantic-driver",
@@ -686,6 +690,8 @@ fn configureSemantics(
         }, .{ .name = "horos", .module = host_modules.horos } },
     }) });
     const run_semantic_tests = b.addRunArtifact(semantic_tests);
+    b.step("build-semantics-check", "Build the native semantic correspondence test artifact")
+        .dependOn(&semantic_tests.step);
     run_semantic_tests.has_side_effects = true;
     b.step("check-semantics", "Check portable semantics against the immutable historical evaluator")
         .dependOn(&run_semantic_tests.step);
@@ -1153,6 +1159,8 @@ fn configureQualification(
         }),
     });
     const borrow_check = b.addRunArtifact(borrow_probe);
+    b.step("build-zig17-check", "Build the pointer-borrow diagnostic artifact")
+        .dependOn(&borrow_probe.step);
     borrow_check.has_side_effects = true;
     borrow_check.addArg("check");
     borrow_check.addArtifactArg2(borrow_probe, .{ .make_absolute = true });
