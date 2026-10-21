@@ -836,7 +836,19 @@ test "generated transformer reads actual generic semantic source" {
     var proposed = try runGenerated(&producer, input);
     defer proposed.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposed.value.steps.len);
-    try validateGenerated(original, proposed.value, &.{});
+    try std.testing.expectError(error.Capacity, validateGeneratedWithBudget(
+        original,
+        proposed.value,
+        &.{},
+        1_000_000,
+    ));
+    const allocated_bytes = try validateGeneratedWithBudget(
+        original,
+        proposed.value,
+        &.{},
+        (compiler.ValidationPolicy{}).work,
+    );
+    std.debug.print("generated source decoding allocated_bytes={d}\n", .{allocated_bytes});
 }
 
 test "indexed generated layout reuses exact source facts and rejects omitted users" {
@@ -938,17 +950,32 @@ fn validateGenerated(
     proposed: @import("semantic/compiler.zig").RecordProposal,
     private_schemas: []const u64,
 ) !void {
+    _ = try validateGeneratedWithBudget(
+        original,
+        proposed,
+        private_schemas,
+        (@import("semantic/compiler.zig").ValidationPolicy{}).work,
+    );
+}
+
+fn validateGeneratedWithBudget(
+    original: source.Module,
+    proposed: @import("semantic/compiler.zig").RecordProposal,
+    private_schemas: []const u64,
+    allocation_bytes_max: usize,
+) !usize {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
     const evidence = try storage.alloc(source.relation.Step, proposed.steps.len);
-    var remaining: usize = 1_000_000;
+    var remaining = allocation_bytes_max;
     for (proposed.steps, evidence) |record, *step|
         step.* = try source.relation.decodeRecordStep(storage, record, &remaining);
     try source.relation.validate(a, original, proposed.selected, evidence, .{
         .private_schemas = private_schemas,
         .work = 64_000_000,
     });
+    return allocation_bytes_max - remaining;
 }
 
 fn expectTransformedDynamic(original: source.Module, selected: source.Module, key: u64) !void {
