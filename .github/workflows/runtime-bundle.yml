@@ -31,6 +31,7 @@ jobs:
           version: '0.17.0'
           mirror: https://zigmirror.com
           use-cache: false
+          use-tool-cache: true
       - name: Check committed Zig changes and the native auditor
         env:
           TIGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'd777cfa402da97ff2299686f8365324b2f9b368c' }}
@@ -56,6 +57,7 @@ jobs:
           version: '0.17.0'
           mirror: https://zigmirror.com
           use-cache: false
+          use-tool-cache: true
       - name: Check source formatting before compilation
         run: |
           git ls-files '*.zig' | xargs zig fmt --check
