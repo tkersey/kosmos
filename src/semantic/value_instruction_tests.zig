@@ -267,6 +267,256 @@ fn checkProjectionCacheResult(
     try std.testing.expectEqualSlices(u8, expected, actual);
 }
 
+const SparseProjectionFixture = struct {
+    const cache = @import("projection_cache.zig");
+    const Id = data.program.Id;
+    const indices = [_]u64{ 5, 7, 9, 3, 8, 4, 256, 0, 7 };
+    const Result = struct {
+        values: [indices.len][]const u8,
+        predecessors: [indices.len]?cache.Predecessor,
+        collision: ?cache.Predecessor,
+        wrong_blob: ?cache.Predecessor,
+        wrong_schema: ?cache.Predecessor,
+        wrong_kind: ?cache.Predecessor,
+    };
+    const Reads = struct {
+        results: [indices.len]Id,
+        priors: [indices.len]Id,
+        bytes: [indices.len]Id,
+    };
+
+    fn build(f: ProjectionCacheFixture) !source.Module {
+        const e = f.e;
+        const b = e.b;
+        const optional = try projection.schema(?cache.Predecessor, b);
+        const output = try projection.schema(Result, b);
+        const main = try b.declare(&.{ f.m.program, f.m.state, f.v.value }, output, &.{}, &.{});
+        const initial = try b.variable(f.m.schema);
+        const live = try e.param(main, 2);
+        var reads: Reads = undefined;
+        for (&reads.results, &reads.priors, &reads.bytes) |*result, *prior, *bytes| {
+            result.* = try b.variable(f.v.result);
+            prior.* = try b.variable(optional);
+            bytes.* = try b.variable(try b.schema(.bytes));
+        }
+        var body = try assemble(f, reads, live, optional, output);
+        var i = indices.len;
+        while (i != 0) {
+            i -= 1;
+            const prior = if (i == 0) try b.reference(initial) else try e.field(
+                try b.reference(reads.results[i - 1]),
+                0,
+            );
+            const read = try b.reference(reads.results[i]);
+            const index = try b.constant(u64, indices[i]);
+            body = try b.bind(reads.bytes[i], try e.call(f.v.bytes, &.{
+                try e.field(read, 0), try e.field(read, 1),
+            }), body);
+            body = try b.bind(reads.results[i], try e.call(f.read, &.{ prior, live, index }), body);
+            body = try b.bind(reads.priors[i], try cache.predecessor(
+                e,
+                f.m,
+                prior,
+                live,
+                index,
+            ), body);
+        }
+        try b.define(main, try b.bind(initial, try e.call(f.m.hydrate, &.{
+            try e.param(main, 0), try e.param(main, 1),
+        }), body));
+        return b.module(main, e.unit);
+    }
+
+    fn assemble(f: ProjectionCacheFixture, reads: Reads, live: Id, optional: Id, output: Id) !Id {
+        const e = f.e;
+        const b = e.b;
+        var byte_values: [indices.len]Id = undefined;
+        var prior_values: [indices.len]Id = undefined;
+        for (reads.bytes, reads.priors, 0..) |bytes, prior, i| {
+            byte_values[i] = try b.reference(bytes);
+            prior_values[i] = try b.reference(prior);
+        }
+        var checks: [4]Id = undefined;
+        var checked: [4]Id = undefined;
+        for (&checks, &checked) |*check, *value| {
+            check.* = try b.variable(optional);
+            value.* = try b.reference(check.*);
+        }
+        const body = try b.pure(try e.tuple(output, &.{
+            try b.primitive(
+                try projection.schema([indices.len][]const u8, b),
+                .sequence,
+                &byte_values,
+                0,
+            ),
+            try b.primitive(
+                try projection.schema([indices.len]?cache.Predecessor, b),
+                .sequence,
+                &prior_values,
+                0,
+            ),
+            checked[0],
+            checked[1],
+            checked[2],
+            checked[3],
+        }));
+        const last = try e.field(try b.reference(reads.results[indices.len - 1]), 0);
+        return checkKeys(f, last, live, checks, body);
+    }
+
+    fn checkKeys(f: ProjectionCacheFixture, last: Id, live: Id, checks: [4]Id, body: Id) !Id {
+        const e = f.e;
+        const b = e.b;
+        const replaced = try b.variable(f.m.cache.schema);
+        const bad_machine = try e.replace(
+            last,
+            @backingInt(@import("machine.zig").Field.cache),
+            try b.reference(replaced),
+        );
+        const bad_entry = try e.tuple(f.m.cache.entry, &.{
+            e.one,
+            try e.field(live, 0),
+            try b.constant(u64, 6),
+            try b.constant(u64, @backingInt(cache.Kind.field)),
+            try e.literal(cache.Range, .{ .schema = 0, .start = 1, .end = 2 }),
+        });
+        const other_blob = try e.replace(live, 1, try e.variant(
+            b.schemas.items[@intCast(f.v.value)].product[1],
+            @backingInt(data.graph.ValueTag.blob),
+            try e.literal(data.graph.BlobRef, .{ .id = 0 }),
+        ));
+        const other_schema = try e.replace(
+            live,
+            0,
+            try e.binary(.integer_add, try e.field(live, 0), e.one),
+        );
+        const target = try b.constant(u64, 257);
+        var next = try b.bind(checks[3], try cache.predecessor(
+            e,
+            f.m,
+            bad_machine,
+            live,
+            target,
+        ), body);
+        next = try b.bind(replaced, try e.call(f.m.cache.entries.set, &.{
+            try f.m.cache.entries.empty(e), e.zero, bad_entry,
+        }), next);
+        next = try b.bind(checks[2], try cache.predecessor(
+            e,
+            f.m,
+            last,
+            other_schema,
+            target,
+        ), next);
+        next = try b.bind(checks[1], try cache.predecessor(e, f.m, last, other_blob, target), next);
+        return b.bind(checks[0], try cache.predecessor(e, f.m, last, live, target), next);
+    }
+};
+
+test "projection cache preserves sparse reverse random reads and rejects mismatched keys" {
+    const base = @import("../base/session.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const bytes = try b.schema(.bytes);
+    const sequence = try b.schema(.{ .seq = bytes });
+    const main = try b.declare(&.{sequence}, sequence, &.{}, &.{});
+    try b.define(main, try b.pure(try b.reference(b.parameter(main, 0))));
+    const guest_image = try support.encode(b.module(main, try b.scalar(void)));
+    defer a.free(guest_image);
+    const admitted = try data.program_image.Admitted.decode(a, guest_image);
+    defer admitted.deinit();
+    var storage: [257][18]u8 = undefined;
+    var elements: [257][]const u8 = undefined;
+    for (&storage, &elements, 0..) |*element, *slice, i| {
+        @memset(element, @truncate(i));
+        element[1] = @truncate(i >> 8);
+        slice.* = element[0 .. 16 + i % 3];
+    }
+    const input = try projection.encode([]const []const u8, a, &elements);
+    defer a.free(input);
+    try std.testing.expect(input.len >= 4096);
+    const arguments = try sparseProjectionArguments(admitted, sequence, input);
+    defer a.free(arguments);
+    var authored = source.Builder.init(a);
+    defer authored.deinit();
+    const image = try support.encode(try SparseProjectionFixture.build(
+        try ProjectionCacheFixture.init(&authored),
+    ));
+    defer a.free(image);
+    var session = try base.Session.initImage(a, image, arguments, .{});
+    defer session.deinit();
+    const outcome = try session.run(null);
+    try std.testing.expect(outcome == .completed);
+    var result = try projection.decode(
+        SparseProjectionFixture.Result,
+        a,
+        try session.bytes(&outcome.completed),
+    );
+    defer result.deinit();
+    try checkSparseProjection(result.value, &elements, input.len, bytes);
+}
+
+fn sparseProjectionArguments(
+    admitted: data.program_image.Admitted,
+    sequence: u64,
+    input: []const u8,
+) ![]u8 {
+    const program = try projection.programBytes(a, admitted);
+    defer a.free(program);
+    const value: data.graph.Value = .{ .schema = sequence, .body = .{ .blob = .{ .id = 1 } } };
+    const state = try projection.encode(data.process_state.State, a, .{
+        .program_identity = admitted.identity(),
+        .status = .completed,
+        .roots = .{ .exit = .{ .id = 0 } },
+        .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = value } } } }},
+        .blobs = &.{
+            .{ .schema = sequence, .bytes = input },
+            .{ .schema = sequence, .bytes = input },
+        },
+    });
+    defer a.free(state);
+    const encoded_value = try projection.encode(data.graph.Value, a, value);
+    defer a.free(encoded_value);
+    return std.mem.concat(a, u8, &.{ program, state, encoded_value });
+}
+
+fn checkSparseProjection(
+    result: SparseProjectionFixture.Result,
+    elements: []const []const u8,
+    length: usize,
+    schema: u64,
+) !void {
+    const cache = @import("projection_cache.zig");
+    var ranges: [257]cache.Range = undefined;
+    var offset: u64 = 2;
+    for (elements, &ranges) |element, *range| {
+        const encoded = try projection.encode([]const u8, a, element);
+        defer a.free(encoded);
+        range.* = .{ .schema = schema, .start = offset, .end = offset + encoded.len };
+        offset = range.end;
+    }
+    try std.testing.expectEqual(length, offset);
+    const expected = [_]?u64{ null, 5, 7, null, 7, 3, 9, null, 5 };
+    for (SparseProjectionFixture.indices, expected, 0..) |index, prior_index, i| {
+        const encoded = try projection.encode([]const u8, a, elements[@intCast(index)]);
+        defer a.free(encoded);
+        try std.testing.expectEqualSlices(u8, encoded, result.values[i]);
+        if (prior_index) |selected| {
+            try std.testing.expectEqualDeep(cache.Predecessor{
+                .index = selected,
+                .range = ranges[@intCast(selected)],
+            }, result.predecessors[i].?);
+        } else try std.testing.expect(result.predecessors[i] == null);
+    }
+    try std.testing.expectEqualDeep(cache.Predecessor{
+        .index = 9,
+        .range = ranges[9],
+    }, result.collision.?);
+    try std.testing.expect(result.wrong_blob == null);
+    try std.testing.expect(result.wrong_schema == null);
+    try std.testing.expect(result.wrong_kind == null);
+}
+
 test "authored lexical closures and bounded data preserve every native cut" {
     var core = try support.prepareCore();
     defer core.deinit();

@@ -117,6 +117,30 @@ fn cachedRange(
     const from_start = try e.call(codec.skip_many, &.{
         program, element, bytes, try e.field(encoded, 1), index,
     });
+    const cache = @import("projection_cache.zig");
+    const point = try projection.schema(cache.Predecessor, e.b);
+    const sparse_optional = try e.b.schema(.{ .sum = &.{ e.unit, point } });
+    const sparse = try e.b.variable(sparse_optional);
+    const sparse_absent = try e.b.variable(e.unit);
+    const sparse_present = try e.b.variable(point);
+    const previous = try e.b.reference(sparse_present);
+    const remaining = try e.binary(.integer_sub, try e.binary(
+        .integer_sub,
+        index,
+        try e.field(previous, 0),
+    ), e.one);
+    const from_sparse = try e.b.bind(sparse, try cache.predecessor(
+        e,
+        m,
+        input,
+        value,
+        index,
+    ), try e.b.term(.{ .match_sum = .{ .value = try e.b.reference(sparse), .cases = &.{
+        .{ .variable = sparse_absent, .body = from_start },
+        .{ .variable = sparse_present, .body = try e.call(codec.skip_many, &.{
+            program, element, bytes, try e.field(try e.field(previous, 1), 2), remaining,
+        }) },
+    } } }));
     const optional = try e.b.schema(.{ .sum = &.{ e.unit, m.cache.range } });
     const prior = try e.b.variable(optional);
     const absent = try e.b.variable(e.unit);
@@ -128,7 +152,7 @@ fn cachedRange(
         value,
         try e.binary(.integer_sub, index, e.one),
     ), try e.b.term(.{ .match_sum = .{ .value = try e.b.reference(prior), .cases = &.{
-        .{ .variable = absent, .body = from_start },
+        .{ .variable = absent, .body = from_sparse },
         .{ .variable = present, .body = try e.b.pure(try e.field(try e.b.reference(present), 2)) },
     } } }));
     const start = try e.when(try e.binary(.equal, index, e.zero), from_start, seek);

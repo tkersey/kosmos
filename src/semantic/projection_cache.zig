@@ -10,6 +10,7 @@ const Error = source.Error;
 pub const Kind = enum(u64) { field, payload, element };
 pub const Definition = struct { entries: maps.Definition, entry: Id, schema: Id, range: Id };
 pub const Range = struct { schema: u64, start: u64, end: u64 };
+pub const Predecessor = struct { index: u64, range: Range };
 const Functions = struct { lookup: Id, remember: Id, optional: Id, result: Id };
 
 pub fn define(b: *source.Builder) Error!Definition {
@@ -82,6 +83,88 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
     return e.call(d.lookup, &.{
         input, value, index, try e.b.constant(u64, @backingInt(Kind.element)),
     });
+}
+
+pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
+    const b = e.b;
+    const cache = try b.specialization(
+        Id,
+        "kosmos.semantic.projection-cache-predecessor/1",
+        m.schema,
+    );
+    if (cache.cached) |saved| return e.call(saved, &.{ input, value, index });
+    const point = try projection.schema(Predecessor, b);
+    const optional = try b.schema(.{ .sum = &.{ e.unit, point } });
+    const graph_value = try projection.schema(data.graph.Value, b);
+    const entry = try b.declare(&.{ m.schema, graph_value, e.integer }, optional, &.{}, &.{});
+    const search = try b.declare(&.{
+        m.cache.schema, e.integer, e.integer, e.integer, optional,
+    }, optional, &.{}, &.{});
+    try emitPredecessor(e, m, point, optional, search);
+    const machine = try e.param(entry, 0);
+    const source_value = try e.param(entry, 1);
+    const absent = try e.variant(optional, 0, e.unit_value);
+    const found = try e.call(search, &.{
+        try m.field(e, machine, .cache), try blob(e, source_value),
+        try e.field(source_value, 0),    try e.param(entry, 2),
+        absent,
+    });
+    try b.define(entry, try eligible(e, m, machine, source_value, found, try b.pure(absent)));
+    return e.call(try cache.finish(b, entry), &.{ input, value, index });
+}
+
+fn emitPredecessor(
+    e: Author,
+    m: machines.Definition,
+    point: Id,
+    optional: Id,
+    search: Id,
+) Error!void {
+    const b = e.b;
+    const tree = try e.param(search, 0);
+    const source_blob = try e.param(search, 1);
+    const schema = try e.param(search, 2);
+    const target = try e.param(search, 3);
+    const best = try e.param(search, 4);
+    const nil = try b.variable(e.unit);
+    const leaf = try b.variable(m.cache.entries.entry);
+    const fork = try b.variable(m.cache.entries.branch);
+    const entry = try e.field(try b.reference(leaf), 1);
+    const index = try e.field(entry, 2);
+    const keep = try b.pure(best);
+    const candidate = try b.pure(try e.variant(optional, 1, try e.tuple(point, &.{
+        index, try e.field(entry, 4),
+    })));
+    const absent = try b.variable(e.unit);
+    const present = try b.variable(point);
+    var choose = try b.term(.{ .match_sum = .{ .value = best, .cases = &.{
+        .{ .variable = absent, .body = candidate },
+        .{ .variable = present, .body = try e.when(
+            try e.binary(.less, try e.field(try b.reference(present), 0), index),
+            candidate,
+            keep,
+        ) },
+    } } });
+    choose = try e.when(try e.binary(.less, index, target), choose, keep);
+    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(Kind.element)) };
+    const fields = [_]usize{ 0, 1, 3 };
+    for (keys, fields) |key, field_index| choose = try e.when(
+        try e.binary(.equal, try e.field(entry, field_index), key),
+        choose,
+        keep,
+    );
+    const node = try b.reference(fork);
+    const left = try b.variable(optional);
+    const branch = try b.bind(left, try e.call(search, &.{
+        try e.field(node, 1), source_blob, schema, target, best,
+    }), try e.call(search, &.{
+        try e.field(node, 2), source_blob, schema, target, try b.reference(left),
+    }));
+    try b.define(search, try b.term(.{ .match_sum = .{ .value = tree, .cases = &.{
+        .{ .variable = nil, .body = keep },
+        .{ .variable = leaf, .body = choose },
+        .{ .variable = fork, .body = branch },
+    } } }));
 }
 
 fn functions(e: Author, m: machines.Definition) Error!Functions {

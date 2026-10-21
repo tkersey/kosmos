@@ -62,6 +62,12 @@ the exact source blob, schema, coordinate and operation. Hits still create the
 same guest values and allocations. Collection first establishes live blobs,
 then drops dead cache entries and remaps surviving keys. Public projection omits
 the cache and hydration starts it empty; exact outer execution retains it.
+On a sequence miss, traversal can resume after the greatest retained earlier
+coordinate with the same blob, schema and element operation. Backward reads and
+collisions preserve these exact-key checks; the search adds no retained entries.
+Repeated scalar skips use checked count-times-width arithmetic. Variable-width
+skips retain their order and reuse one resolved schema descriptor. Zero counts
+still avoid schema access; zero-width schemas avoid descriptor access.
 
 After `blob_length` retires a backing of at least 64 KiB from the current frame,
 the authored transition runs ordinary reachability collection. A surviving direct
