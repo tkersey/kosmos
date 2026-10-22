@@ -53,12 +53,11 @@ test "quarantined runtime preserves bounded phase progress without guest custody
     try std.testing.expectEqualSlices(u8, advanced.checkpoint, repeated.checkpoint);
 }
 
-test "experimental replies admit exact values before consuming ready state" {
-    const retained = @import("packaged_runtime").bytes;
-    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
-    defer runtime.deinit();
+test "experimental replies use retained projections without candidate recovery" {
     const image = try unitRequestImage();
     defer a.free(image);
+    var runtime = try failingRecoveryCandidate(image);
+    defer runtime.deinit();
     var oracle = try @import("native_baseline").Session.initImage(a, image, &.{});
     defer oracle.deinit();
     try std.testing.expect(try oracle.run(null) == .requested);
@@ -87,6 +86,8 @@ test "experimental replies admit exact values before consuming ready state" {
             candidate.deinit();
             candidate = restored;
         }
+        try std.testing.expectError(error.InvalidRecovery, candidate.execution.checkpoint(a));
+        try rejectNonprojectionReply(image, &runtime, ready);
         try std.testing.expectError(
             error.NonCanonical,
             candidate.begin(.{ .answer = &.{255} }, 10),
@@ -100,6 +101,64 @@ test "experimental replies admit exact values before consuming ready state" {
         defer completed.deinit();
         try std.testing.expectEqualSlices(u8, expected, completed.checkpoint);
     }
+}
+
+fn failingRecoveryCandidate(image: []const u8) !artifact.Admitted {
+    const compiler = @import("compiler.zig");
+    const retained = @import("packaged_runtime").bytes;
+    var root = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer root.deinit();
+    var exported = try compiler.exportSource(a, &root);
+    defer exported.deinit();
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const b = &exported.definition.builder;
+    var helpers = exported.definition.helpers;
+    const projector = b.functions.items[@intCast(helpers[0])];
+    try std.testing.expectEqual(@as(usize, 1), projector.parameters.len);
+    const input = b.variables.items[@intCast(projector.parameters[0])];
+    helpers[0] = try b.declare(&.{input}, projector.result, &.{}, &.{});
+    try b.define(helpers[0], try b.term(.{ .fail = try b.constant(void, {}) }));
+    const bytes = try compiler.deriveRecord(a, &root, guest, .{
+        .selected = exported.definition.module(),
+        .steps = &.{},
+        .interfaces = .{
+            .roles = exported.value.selected_roles,
+            .entries = exported.value.selected_entries,
+            .helpers = helpers,
+            .layout = .{},
+            .input = .program_and_initial,
+        },
+    }, .{ .horos_package = root.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    return artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+}
+
+fn rejectNonprojectionReply(
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+    ready: []const u8,
+) !void {
+    var observed = try experiment.Experiment.restore(a, image, runtime, ready);
+    defer observed.deinit();
+    var event = try observed.execution.exchange(.observe);
+    defer event.deinit();
+    const checkpoint = try observed.execution.outer.checkpoint(a);
+    defer a.free(checkpoint);
+    var record = try projection.decode(experiment.Record, a, ready);
+    defer record.deinit();
+    record.value.checkpoint = checkpoint;
+    const bytes = try projection.encode(experiment.Record, a, record.value);
+    defer a.free(bytes);
+    var restored = try experiment.Experiment.restore(a, image, runtime, bytes);
+    defer restored.deinit();
+    try std.testing.expectError(
+        error.InvalidServiceEvent,
+        restored.begin(.{ .answer = &.{} }, 10),
+    );
+    const unchanged = try restored.checkpointOuter(a);
+    defer a.free(unchanged);
+    try std.testing.expectEqualSlices(u8, bytes, unchanged);
 }
 
 fn unitRequestImage() ![]u8 {

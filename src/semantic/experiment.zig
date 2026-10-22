@@ -74,6 +74,7 @@ pub const Experiment = struct {
 
     pub fn begin(self: *Experiment, control: Control, guest_quantum: u64) !void {
         if (self.phase != .ready) return error.OperationInProgress;
+        if (control == .answer) try self.execution.prepareProjectedReply();
         try self.execution.submit(.{ .advance = .{
             .control = control,
             .quantum = guest_quantum,

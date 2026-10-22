@@ -296,7 +296,43 @@ pub const Driver = struct {
         }
         var projected = try self.projectState();
         defer projected.deinit();
-        const actual = projected.state;
+        return self.pendingFromState(a, projected.state, materialize);
+    }
+
+    pub fn prepareProjectedReply(self: *Driver) !void {
+        if (self.closed or self.operation != null or self.last_cut == null or
+            self.last_cut.?.status != .parked) return error.InvalidState;
+        const actual = try self.outer.observe();
+        if (actual != .requested or actual.requested.effect != 0 or !std.mem.eql(
+            u8,
+            self.outer.program.effects[0].identity,
+            service.identity,
+        ))
+            return error.InvalidServiceEvent;
+        var event = try projection.decode(
+            service.Event,
+            self.allocator,
+            try self.outer.bytes(&actual.requested.payload),
+        );
+        defer event.deinit();
+        if (event.value != .projection) return error.InvalidServiceEvent;
+        var canonical = try data.state_image.canonicalize(self.allocator, event.value.projection);
+        defer canonical.deinit();
+        try data.state_admission.validateAdmitted(
+            self.allocator,
+            self.guest.admitted(),
+            canonical.state,
+        );
+        var pending = try self.pendingFromState(self.allocator, canonical.state, false);
+        defer pending.deinit();
+    }
+
+    fn pendingFromState(
+        self: *Driver,
+        a: std.mem.Allocator,
+        actual: data.process_state.State,
+        materialize: bool,
+    ) !base.Pending {
         if (actual.status != .parked) return error.InvalidState;
         const reference = actual.roots.pending orelse return error.InvalidState;
         const pending = actual.nodes[@intCast(reference.id)].record.pending;
