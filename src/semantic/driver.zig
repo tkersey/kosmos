@@ -162,6 +162,8 @@ pub const Driver = struct {
     /// command. A failed submission leaves the previous event retryable.
     pub fn submit(self: *Driver, command: service.Command) !void {
         if (self.closed or self.operation != null) return error.OperationInProgress;
+        if (command == .advance and command.advance.control == .answer)
+            try self.admitAnswer(command.advance.control.answer);
         const revision = try std.math.add(u64, self.revision, 1);
         const bytes = try projection.encode(service.Command, self.allocator, command);
         errdefer self.allocator.free(bytes);
@@ -349,6 +351,18 @@ pub const Driver = struct {
         return ExpectedReply.fromRequest(pending.request);
     }
 
+    fn admitAnswer(self: *Driver, bytes: []const u8) !void {
+        const expected = try self.currentExpected();
+        const admitted = self.guest.admitted();
+        const program = admitted.program();
+        if (expected.effect >= program.effects.len) return error.InvalidResult;
+        const effect = program.effects[@intCast(expected.effect)];
+        try data.admission.value(self.allocator, program.schemas, admitted.schemaFacts(), .{
+            .schema = effect.result,
+            .bytes = bytes,
+        });
+    }
+
     /// ERS3 is checked against the real guest request and result schema before
     /// the value enters the private source service. The bridge has no grant.
     pub fn reply(self: *Driver, bytes: []const u8, quantum: u64) !void {
@@ -373,14 +387,6 @@ pub const Driver = struct {
             &response.value.request_identity,
             &expected.identity,
         )) return error.InvalidResult;
-        const admitted = self.guest.admitted();
-        const program = admitted.program();
-        if (expected.effect >= program.effects.len) return error.InvalidResult;
-        const effect = program.effects[@intCast(expected.effect)];
-        try data.admission.value(self.allocator, program.schemas, admitted.schemaFacts(), .{
-            .schema = effect.result,
-            .bytes = response.value.value,
-        });
         try self.submit(.{ .advance = .{
             .control = .{ .answer = response.value.value },
             .quantum = quantum,

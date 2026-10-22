@@ -159,8 +159,8 @@ compilation substitutes for completed tests.
 The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
 artifact whose source correspondence the native semantic lane checks. All lanes
 retain full runtime artifact and guest-state admission.
-The workflow-dispatch `compiler-cache=false` input disables compiler restoration
-for a cold measurement. Every runtime lane has at most ten minutes. The runtime
+Matching compiler artifacts are restored and missing inputs are rebuilt; every
+selected test still executes. Every runtime lane has at most ten minutes. The runtime
 budget gate checks elapsed time from workflow start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed.

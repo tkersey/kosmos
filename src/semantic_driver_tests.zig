@@ -768,6 +768,24 @@ fn answerPumpRequest(pump: *driver.Driver, expected: *native.Session) !void {
     const value: []const u8 = if (expected.program.schemas[
         @intCast(effect.result)
     ] == .unit) &.{} else &.{ 41, 0, 0, 0, 0, 0, 0, 0 };
+    const malformed = try a.alloc(u8, value.len + 1);
+    defer a.free(malformed);
+    @memcpy(malformed[0..value.len], value);
+    malformed[value.len] = 255;
+    const before = try pump.outer.checkpoint(a);
+    defer a.free(before);
+    const revision = pump.revision;
+    const invalid: @import("semantic/service.zig").Command = .{ .advance = .{
+        .control = .{ .answer = malformed },
+        .quantum = 0,
+    } };
+    try std.testing.expectError(error.NonCanonical, pump.submit(invalid));
+    try std.testing.expectError(error.NonCanonical, pump.exchange(invalid));
+    const after = try pump.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqual(revision, pump.revision);
+    try std.testing.expect(pump.operation == null);
     var wrong = request.request.request_identity;
     wrong[0] ^= 1;
     const rejected = try data.invocation.encodeOwned(data.invocation.Result, a, .{

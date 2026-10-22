@@ -53,6 +53,68 @@ test "quarantined runtime preserves bounded phase progress without guest custody
     try std.testing.expectEqualSlices(u8, advanced.checkpoint, repeated.checkpoint);
 }
 
+test "experimental replies admit exact values before consuming ready state" {
+    const retained = @import("packaged_runtime").bytes;
+    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer runtime.deinit();
+    const image = try unitRequestImage();
+    defer a.free(image);
+    var oracle = try @import("native_baseline").Session.initImage(a, image, &.{});
+    defer oracle.deinit();
+    try std.testing.expect(try oracle.run(null) == .requested);
+    const before = try oracle.checkpoint(a);
+    defer a.free(before);
+    var pending = try oracle.pendingBinding(a, false);
+    defer pending.deinit();
+    const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+        .request_identity = pending.request.request_identity,
+        .value = &.{},
+    });
+    defer a.free(reply);
+    try oracle.answer(reply);
+    try std.testing.expect(try oracle.run(null) == .completed);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    for ([_]bool{ false, true }) |restore_ready| {
+        var candidate = try experiment.Experiment.init(a, image, &runtime, before);
+        defer candidate.deinit();
+        var initialized = try finishExperiment(&candidate, image, &runtime);
+        defer initialized.deinit();
+        const ready = try candidate.checkpointOuter(a);
+        defer a.free(ready);
+        if (restore_ready) {
+            const restored = try experiment.Experiment.restore(a, image, &runtime, ready);
+            candidate.deinit();
+            candidate = restored;
+        }
+        try std.testing.expectError(error.NonCanonical, candidate.begin(.{ .answer = &.{255} }, 10));
+        const unchanged = try candidate.checkpointOuter(a);
+        defer a.free(unchanged);
+        try std.testing.expectEqualSlices(u8, ready, unchanged);
+        try std.testing.expectEqual(.ready, candidate.phase);
+        try candidate.begin(.{ .answer = &.{} }, 10);
+        var completed = try finishExperiment(&candidate, image, &runtime);
+        defer completed.deinit();
+        try std.testing.expectEqualSlices(u8, expected, completed.checkpoint);
+    }
+}
+
+fn unitRequestImage() ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{ .identity = "unit", .payload = unit, .result = unit });
+    const entry = try b.declare(&.{}, unit, &.{effect}, &.{});
+    const request = try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.constant(void, {}),
+    } });
+    try b.define(entry, try b.bind(try b.variable(unit), request, try b.pure(
+        try b.constant(void, {}),
+    )));
+    return support.encode(b.module(entry, unit));
+}
+
 fn checkExperimentCommands(
     candidate: *experiment.Experiment,
     image: []const u8,
