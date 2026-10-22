@@ -87,7 +87,10 @@ test "experimental replies admit exact values before consuming ready state" {
             candidate.deinit();
             candidate = restored;
         }
-        try std.testing.expectError(error.NonCanonical, candidate.begin(.{ .answer = &.{255} }, 10));
+        try std.testing.expectError(
+            error.NonCanonical,
+            candidate.begin(.{ .answer = &.{255} }, 10),
+        );
         const unchanged = try candidate.checkpointOuter(a);
         defer a.free(unchanged);
         try std.testing.expectEqualSlices(u8, ready, unchanged);
