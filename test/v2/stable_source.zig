@@ -624,9 +624,7 @@ fn residentFailureSweep(
     );
     var failed_after_mutation = false;
     for (0..allocation_count + 1) |failures| {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{
-            .resize_fail_index = 0,
-        });
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
         var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
         var statistics: std.meta.Child(

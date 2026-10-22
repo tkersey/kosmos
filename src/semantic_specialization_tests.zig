@@ -851,6 +851,86 @@ test "generated transformer reads actual generic semantic source" {
     std.debug.print("generated source decoding allocated_bytes={d}\n", .{allocated_bytes});
 }
 
+fn emittedReferenceModule(b: *source.Builder, failure: bool) !source.Module {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const effect = try b.effect(.{
+        .identity = "source-reference/dispose",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const resumption = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const dispose = try b.declare(&.{resumption}, unit, &.{}, &.{});
+    try b.define(dispose, try b.term(.{ .dispose = try b.reference(b.parameter(dispose, 0)) }));
+    const entry = try b.declare(
+        if (failure) &.{ word, word } else &.{},
+        if (failure) word else unit,
+        &.{},
+        &.{},
+    );
+    const value = if (failure) try b.value(.{
+        .schema = word,
+        .expression = .{ .primitive = .{
+            .opcode = .integer_div,
+            .operands = &.{
+                try b.reference(b.parameter(entry, 0)),
+                try b.reference(b.parameter(entry, 1)),
+            },
+            .failures = &.{
+                .{ .kind = .arithmetic_overflow, .value = 0 },
+                .{ .kind = .division_by_zero, .value = 0 },
+            },
+        } },
+    }) else try b.primitive(unit, .constant, &.{}, 0);
+    try b.define(entry, try b.pure(value));
+    return b.module(entry, unit);
+}
+
+test "source references include emitted constants and failure literals" {
+    const compiler = @import("semantic/compiler.zig");
+    const relocation = source.relation.Relocation;
+    for ([_]bool{ false, true }) |failure| {
+        var builder = source.Builder.init(a);
+        defer builder.deinit();
+        const module = try emittedReferenceModule(&builder, failure);
+        try std.testing.expectEqual(@as(usize, 0), module.constants.len);
+        var compiled = try source.lower(a, module);
+        defer compiled.deinit();
+        try std.testing.expectEqual(@as(usize, 1), compiled.program.constants.len);
+        var references = try compiler.sourceReferences(a, module);
+        defer references.deinit();
+        try std.testing.expectEqualSlices(
+            u8,
+            &(try compiler.sourceModule(module)).digest,
+            &references.value.source,
+        );
+        const constants = references.value.users[@backingInt(relocation.Kind.constant)];
+        try std.testing.expectEqual(@as(usize, 1), constants.len);
+        const expected: []const relocation.Reference = &.{
+            .{ .kind = .value, .id = module.values.len - 1 },
+            .{ .kind = .term, .id = 0 },
+        };
+        try std.testing.expectEqualDeep(expected, constants[0]);
+        const unit_users = references.value.users[@backingInt(relocation.Kind.schema)][0];
+        var constant_schema = false;
+        for (unit_users) |reference| {
+            constant_schema = constant_schema or std.meta.eql(reference, relocation.Reference{
+                .kind = .constant,
+                .id = 0,
+            });
+        }
+        try std.testing.expect(constant_schema);
+    }
+}
+
 test "indexed generated layout reuses exact source facts and rejects omitted users" {
     const compiler = @import("semantic/compiler.zig");
     const transformation = @import("semantic/transformation.zig");
