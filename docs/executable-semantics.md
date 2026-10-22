@@ -234,6 +234,11 @@ later hypothetical continuation. Generated source may instead compose disclosed
 pure functions into its own interpretation. Neither source admission nor an
 analysis result grants guest acquisition, settlement or custody.
 
+The legacy `hypotheticalReply` helper stops before applying a reply when its
+guest-work allowance is exhausted. The multi-reply interpretation applies supplied
+replies at pending requests without consuming guest work, including a retained
+request with zero allowance; further guest steps still require remaining allowance.
+
 ## Evidence and physical limits
 
 The pure hypothetical-reply example admits argument and reply bytes against the

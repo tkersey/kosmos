@@ -5,6 +5,7 @@ const machines = @import("machine.zig");
 const edges = @import("edges.zig");
 const Id = data.program.Id;
 const Author = @import("author.zig").Author;
+const ReplyBoundary = enum { pending_request, guest_quantum };
 
 pub const Input = struct { arguments: []const u8, assumed_reply: []const u8, guest_quantum: u64 };
 pub const Output = struct {
@@ -63,6 +64,15 @@ pub fn define(
     guest: *const data.program_image.Admitted,
     snapshot: ?projection.State,
 ) !Definition {
+    return defineWithReplyBoundary(b, guest, snapshot, .pending_request);
+}
+
+fn defineWithReplyBoundary(
+    b: *source.Builder,
+    guest: *const data.program_image.Admitted,
+    snapshot: ?projection.State,
+    reply_boundary: ReplyBoundary,
+) !Definition {
     var admitted_snapshot: ?data.state_image.Owned = null;
     defer if (admitted_snapshot) |*owned| owned.deinit();
     if (snapshot) |state| {
@@ -93,7 +103,7 @@ pub fn define(
         .output = output,
         .guest = guest.identity(),
     };
-    try defineAdvance(e, d);
+    try defineAdvance(e, d, reply_boundary);
     const initial_state = if (admitted_snapshot) |owned| owned.state else null;
     try defineEntry(e, d, projected.value, initial_state);
     return d;
@@ -103,7 +113,7 @@ pub fn hypotheticalReply(
     b: *source.Builder,
     guest: *const data.program_image.Admitted,
 ) !source.ast.Module {
-    const d = try define(b, guest, null);
+    const d = try defineWithReplyBoundary(b, guest, null, .guest_quantum);
     const e = try Author.init(b);
     const output_schema = try projection.schema(Output, b);
     const entry = try b.declare(&.{try projection.schema(Input, b)}, output_schema, &.{}, &.{});
@@ -190,7 +200,7 @@ fn finish(e: Author, d: Definition, stopping: Stop) !Id {
     return b.bind(observed, try e.call(d.observe, &.{machine}), projected);
 }
 
-fn defineAdvance(e: Author, d: Definition) !void {
+fn defineAdvance(e: Author, d: Definition, reply_boundary: ReplyBoundary) !void {
     const b = e.b;
     const input = try e.param(d.advance, 0);
     const machine = try e.param(d.advance, 1);
@@ -214,7 +224,15 @@ fn defineAdvance(e: Author, d: Definition) !void {
     const assumptions = try e.field(input, 1);
     const count = try b.primitive(e.integer, .sequence_length, &.{assumptions}, 0);
     const unavailable = try finish(e, d, .missing_assumption);
-    const parked = try e.when(try e.binary(.less, applied, count), try assume(e, d), unavailable);
+    const reply = try e.when(try e.binary(.less, applied, count), try assume(e, d), unavailable);
+    const parked = switch (reply_boundary) {
+        .pending_request => reply,
+        .guest_quantum => try e.when(
+            try e.binary(.less, e.zero, remaining),
+            reply,
+            try finish(e, d, .quantum),
+        ),
+    };
     var body = try finish(e, d, .terminal);
     inline for ([_]data.process_state.Status{ .active, .unwinding, .parked, .yielded }) |selected| {
         const next = switch (selected) {

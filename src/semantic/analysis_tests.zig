@@ -34,6 +34,10 @@ test "hypothetical reply interpretation runs ordinary source without consuming a
     try std.testing.expectEqual(@as(usize, 0), compiled.program.effects.len);
     const code = try support.encodeCompiled(&compiled);
     defer a.free(code);
+    for ([_]u64{ 0, 1, 2, 3, 8 }) |quantum| {
+        for ([_][]const u8{ &.{}, &encodedInteger(5) }) |reply|
+            try expectBudgetedHypothetical(code, image, &arguments, quantum, reply);
+    }
     try expectHypotheticalReplies(code, guest, &arguments, &live);
     try expectMalformedReplies(code, guest, &arguments);
     const after = try live.checkpoint(a);
@@ -101,6 +105,69 @@ test "hypothetical analysis admits both arguments and the actual pending reply s
             try std.testing.expect(result.value.observation == .completed);
             try std.testing.expectEqualSlices(u8, &.{expected}, result.value.observation.completed);
         } else try std.testing.expect(outcome == .failed);
+    }
+}
+
+fn expectBudgetedHypothetical(
+    code: []const u8,
+    image: []const u8,
+    arguments: []const u8,
+    quantum: u64,
+    reply: []const u8,
+) !void {
+    var reference = try @import("native_baseline").Session.initImage(a, image, arguments);
+    defer reference.deinit();
+    var expected = try reference.run(quantum);
+    const applied = expected == .requested and reference.transitions < quantum;
+    if (applied and reply.len != 0) {
+        var pending = try reference.pendingRequest(a);
+        defer pending.deinit();
+        const response = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+            .request_identity = pending.request.request_identity,
+            .value = reply,
+        });
+        defer a.free(response);
+        try reference.answer(response);
+        expected = try reference.run(quantum - reference.transitions);
+    }
+    const input = try projection.encode(analysis.Input, a, .{
+        .arguments = arguments,
+        .assumed_reply = reply,
+        .guest_quantum = quantum,
+    });
+    defer a.free(input);
+    var experiment = try base.Session.initImage(a, code, input, .{});
+    defer experiment.deinit();
+    const outcome = try experiment.run(null);
+    if (applied and reply.len == 0) {
+        try std.testing.expect(outcome == .failed);
+        return;
+    }
+    try std.testing.expect(outcome == .completed);
+    var result = try projection.decode(
+        analysis.Output,
+        a,
+        try experiment.bytes(&outcome.completed),
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(applied, result.value.assumption_applied);
+    try std.testing.expectEqual(reference.transitions, result.value.guest_work);
+    try std.testing.expectEqualStrings(@tagName(expected), @tagName(result.value.observation));
+    switch (expected) {
+        .requested => |request| {
+            try std.testing.expectEqual(request.effect, result.value.observation.requested.effect);
+            try std.testing.expectEqualSlices(
+                u8,
+                try reference.bytes(&request.payload),
+                result.value.observation.requested.payload,
+            );
+        },
+        .completed => |value| try std.testing.expectEqualSlices(
+            u8,
+            try reference.bytes(&value),
+            result.value.observation.completed,
+        ),
+        else => {},
     }
 }
 
@@ -341,6 +408,13 @@ fn expectResumedAlternative(
     defer a.free(code);
     const five = encodedInteger(5);
     const nine = encodedInteger(9);
+    var stopped = try runInterpretation(code, &.{&five}, 0);
+    defer stopped.deinit();
+    try std.testing.expectEqual(.quantum, stopped.value.stopping);
+    try std.testing.expectEqual(@as(u64, 1), stopped.value.applied);
+    try std.testing.expectEqual(@as(u64, 0), stopped.value.guest_work);
+    try std.testing.expectEqual(@as(usize, 1), stopped.value.requests.len);
+    try std.testing.expect(stopped.value.observation == .progressed);
     for ([_][]const u8{ &five, &nine }, [_]u64{ 16, 20 }) |reply, expected| {
         var result = try runInterpretation(code, &.{reply}, 100);
         defer result.deinit();
