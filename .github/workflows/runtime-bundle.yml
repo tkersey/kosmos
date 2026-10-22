@@ -76,10 +76,15 @@ jobs:
           mkdir -p .zig-cache/tmp
       - name: Compile native qualification and independently rebuild the core
         if: matrix.lane == 'native'
-        run: >-
-          zig build build-storage-check build-semantic-driver-check build-semantics-check
-          build-zig17-check
-          -Doptimize=safe --summary all
+        run: |
+          nproc
+          free -m
+          vmstat -w 30 &
+          observer=$!
+          trap 'kill "$observer" 2>/dev/null || true' EXIT
+          /usr/bin/time -v zig build build-storage-check build-semantic-driver-check \
+            build-semantics-check build-zig17-check \
+            -Doptimize=safe --summary all --verbose
       - name: Admit completed native compilation before execution
         id: native_cache_size
         if: matrix.lane == 'native'
