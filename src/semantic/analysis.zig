@@ -140,10 +140,16 @@ fn defineEntry(
     const input = try e.param(d.entry, 0);
     const projected = try e.literal(projection.Program, program);
     const machine = try b.variable(d.machine.schema);
-    const initial = if (snapshot) |state|
-        try e.call(d.machine.hydrate, &.{ projected, try e.literal(projection.State, state) })
-    else
-        try e.call(d.lifecycle.initialize, &.{ projected, try e.field(input, 0) });
+    const initial = if (snapshot) |state| retained: {
+        const hydrate = try e.call(d.machine.hydrate, &.{
+            projected, try e.literal(projection.State, state),
+        });
+        if (state.status != .yielded) break :retained hydrate;
+        const yielded = try b.variable(d.machine.schema);
+        break :retained try b.bind(yielded, hydrate, try e.call(d.lifecycle.resume_yield, &.{
+            try b.reference(yielded),
+        }));
+    } else try e.call(d.lifecycle.initialize, &.{ projected, try e.field(input, 0) });
     const start = try b.bind(machine, initial, try e.call(d.advance, &.{
         input,
         try b.reference(machine),

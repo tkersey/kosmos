@@ -242,6 +242,59 @@ test "constructed interpretation retains alternatives and resumes missing assump
     try expectSnapshotBinding(guest, unfinished.value.state);
 }
 
+test "constructed interpretation resumes retained yields and stops at subsequent yields" {
+    var guest_builder = source.Builder.init(a);
+    defer guest_builder.deinit();
+    const entry = try guest_builder.declare(&.{}, try guest_builder.scalar(u64), &.{}, &.{});
+    const completed = try guest_builder.pure(try guest_builder.constant(u64, 42));
+    const second = try guest_builder.term(.{ .yield_then = completed });
+    try guest_builder.define(entry, try guest_builder.term(.{ .yield_then = second }));
+    const image = try support.encode(guest_builder.module(entry, try guest_builder.scalar(void)));
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    var first = try interpretSnapshot(guest, null);
+    defer first.deinit();
+    try expectYieldedInterpretation(first.value);
+    var second_result = try interpretSnapshot(guest, first.value.state);
+    defer second_result.deinit();
+    try expectYieldedInterpretation(second_result.value);
+    var final_result = try interpretSnapshot(guest, second_result.value.state);
+    defer final_result.deinit();
+    try std.testing.expectEqual(.terminal, final_result.value.stopping);
+    try std.testing.expect(final_result.value.guest_work > 0);
+    try std.testing.expectEqual(@as(u64, 0), final_result.value.applied);
+    try std.testing.expectEqual(@as(usize, 0), final_result.value.requests.len);
+    try expectInterpretationValue(final_result.value, 42);
+    var repeated = try interpretSnapshot(guest, first.value.state);
+    defer repeated.deinit();
+    try expectYieldedInterpretation(repeated.value);
+    const second_bytes = try data.state_image.emit(a, second_result.value.state);
+    defer a.free(second_bytes);
+    const repeated_bytes = try data.state_image.emit(a, repeated.value.state);
+    defer a.free(repeated_bytes);
+    try std.testing.expectEqualSlices(u8, second_bytes, repeated_bytes);
+}
+
+fn interpretSnapshot(
+    guest: *const data.program_image.Admitted,
+    state: ?projection.State,
+) !projection.Owned(analysis.InterpretationOutput) {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const code = try support.encode(try analysis.interpretation(&builder, guest, state));
+    defer a.free(code);
+    return runInterpretation(code, &.{}, 100);
+}
+
+fn expectYieldedInterpretation(result: analysis.InterpretationOutput) !void {
+    try std.testing.expectEqual(.yielded, result.stopping);
+    try std.testing.expectEqual(.yielded, result.state.status);
+    try std.testing.expect(result.guest_work > 0);
+    try std.testing.expectEqual(@as(u64, 0), result.applied);
+    try std.testing.expectEqual(@as(usize, 0), result.requests.len);
+}
+
 fn encodedInteger(value: u64) [8]u8 {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, value, .little);

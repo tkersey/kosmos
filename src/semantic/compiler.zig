@@ -612,7 +612,7 @@ fn addAnchor(
         if (!found) return; // unreachable original functions have no final slots
     }
     try anchors.append(a, .{
-        .function = final_function.?,
+        .function = final_function orelse return error.InvalidRecovery,
         .role = selector.role,
         .parameters = try parameters.toOwnedSlice(a),
     });

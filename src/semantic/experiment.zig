@@ -184,7 +184,7 @@ pub const Experiment = struct {
         if (!std.mem.eql(u8, encoded, capsule)) return error.NonCanonicalExperiment;
         var prepared = try Prepared.init(a, image);
         defer prepared.deinit();
-        try validateRecord(record.value, runtime, prepared.core.?.admitted());
+        try validateRecord(a, record.value, runtime, prepared.core.?.admitted());
         var execution = try restoreExecution(a, &prepared, runtime, record.value);
         errdefer execution.deinit();
         return .{
@@ -198,6 +198,7 @@ pub const Experiment = struct {
 };
 
 fn validateRecord(
+    a: std.mem.Allocator,
     record: Record,
     runtime: *const artifact.Admitted,
     guest: *const data.program_image.Admitted,
@@ -218,10 +219,24 @@ fn validateRecord(
     if (record.operation != expected or
         (record.phase == .projecting) != (record.observation.len != 0))
         return error.InvalidExperiment;
-    if (record.phase == .initializing and record.stage != .initialized)
+    if (record.phase == .initializing) {
+        if (record.stage != .initialized or record.command.len != 0 or
+            record.last_cut != null or record.guest_revision != 0)
+            return error.InvalidExperiment;
+        return;
+    }
+    if (record.last_cut == null or
+        (record.phase == .advancing and record.stage != .advanced) or record.command.len == 0)
         return error.InvalidExperiment;
-    if (record.phase != .initializing and record.last_cut == null)
-        return error.InvalidExperiment;
+    var command = try projection.decode(service.Command, a, record.command);
+    defer command.deinit();
+    const tag: std.meta.Tag(service.Command) = switch (record.phase) {
+        .advancing => .advance,
+        .observing => .observe,
+        .projecting, .ready => .project,
+        .initializing => unreachable,
+    };
+    if (std.meta.activeTag(command.value) != tag) return error.InvalidExperiment;
 }
 
 fn restoreExecution(

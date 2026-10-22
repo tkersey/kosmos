@@ -932,11 +932,123 @@ test "source candidates keep exact checked ancestry through retained guest switc
         return err;
     };
     try expectRejectedCandidate(&root, guest, exported.value.selected.module);
+    try expectGuestRestriction(&root, guest, exported.value.selected.module);
+    try expectRejectedRoleSelectors(&root, guest, &exported);
+    try expectEvidencePolicy(&root, guest, exported.value.selected.module);
     try std.testing.expectError(error.RelationLimit, compiler.validateWithPolicy(
         a,
         &candidate,
         .{ .work = 1 },
     ));
+    try compiler.validateWithPolicy(a, &candidate, .{ .work = std.math.maxInt(u64) });
+}
+
+fn identityCandidate(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    selected: source.ast.Module,
+) !artifact.Admitted {
+    const compiler = @import("semantic/compiler.zig");
+    const bytes = try compiler.derive(a, root, guest, .{
+        .selected = selected,
+        .steps = &.{},
+    }, .{ .horos_package = root.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    return artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+}
+
+fn expectGuestRestriction(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    selected: source.ast.Module,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var parent = try identityCandidate(root, guest, selected);
+    defer parent.deinit();
+    try compiler.validateAgainst(a, &parent, root);
+    var same_guest = try identityCandidate(&parent, guest, selected);
+    defer same_guest.deinit();
+    try compiler.validateAgainst(a, &same_guest, &parent);
+    var program = guest.program();
+    const constants = try a.dupe(data.program.Literal, program.constants);
+    defer a.free(constants);
+    constants[0].bytes = &std.mem.toBytes(@as(u64, 8));
+    program.constants = constants;
+    const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+    defer a.free(image);
+    _ = try data.program_image.encode(a, program, image);
+    const other = try data.program_image.Admitted.decode(a, image);
+    defer other.deinit();
+    try std.testing.expectError(error.GuestIdentityMismatch, identityCandidate(
+        &parent,
+        other,
+        selected,
+    ));
+    var unrelated = try identityCandidate(root, other, selected);
+    defer unrelated.deinit();
+    try compiler.validateAgainst(a, &unrelated, root);
+    var bundle = unrelated.content.value;
+    bundle.lineage.?.parent = parent.identity;
+    const bytes = try artifact.encode(a, bundle);
+    defer a.free(bytes);
+    var reparented = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer reparented.deinit();
+    try std.testing.expectError(error.GuestIdentityMismatch, compiler.validateAgainst(
+        a,
+        &reparented,
+        &parent,
+    ));
+}
+
+fn expectRejectedRoleSelectors(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    exported: *const @import("semantic/compiler.zig").ExportedSource,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    const roles = try a.dupe(compiler.SourceRole, exported.value.selected_roles);
+    defer a.free(roles);
+    var helpers: [4]data.program.Id = undefined;
+    for (exported.value.helpers, 0..) |helper, i| helpers[i] = helper.source.module.entry;
+    for (0..3) |mutation| {
+        roles[0] = exported.value.selected_roles[0];
+        switch (mutation) {
+            0 => roles[0].ordinals = &.{},
+            1 => roles[0].function = std.math.maxInt(data.program.Id),
+            2 => roles[0].ordinals = &.{std.math.maxInt(u32)},
+            else => unreachable,
+        }
+        try std.testing.expectError(error.InvalidRecovery, compiler.deriveRecord(a, root, guest, .{
+            .selected = exported.value.selected.module,
+            .steps = &.{},
+            .interfaces = .{
+                .roles = roles,
+                .entries = exported.value.selected_entries,
+                .helpers = helpers,
+                .layout = .{},
+                .input = .program_and_initial,
+            },
+        }, .{ .horos_package = root.content.value.manifest.compiler.horos_package }));
+    }
+}
+
+fn expectEvidencePolicy(
+    root: *const artifact.Admitted,
+    guest: *const data.program_image.Admitted,
+    selected: source.ast.Module,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    var steps: [64]source.relation.Step = undefined;
+    for (&steps) |*step| step.* = .{ .successor = selected, .rule = .identity };
+    const bytes = try compiler.derive(a, root, guest, .{
+        .selected = selected,
+        .steps = &steps,
+    }, .{ .horos_package = root.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer candidate.deinit();
+    try std.testing.expectError(error.Capacity, compiler.validate(a, &candidate));
+    try compiler.validateWithPolicy(a, &candidate, .{ .work = 1_000_000_000 });
 }
 
 test "generated scalar candidates measure actual evaluator work on identical guest cuts" {

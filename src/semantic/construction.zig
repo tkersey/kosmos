@@ -273,7 +273,15 @@ fn selectedModule(evidence: Evidence, original: source.ast.Module) source.ast.Mo
 }
 
 pub fn decodeEvidence(a: std.mem.Allocator, bytes: []const u8) !Evidence {
-    var remaining: usize = (ValidationPolicy{}).work;
+    return decodeEvidenceWithPolicy(a, bytes, .{});
+}
+
+fn decodeEvidenceWithPolicy(
+    a: std.mem.Allocator,
+    bytes: []const u8,
+    policy: ValidationPolicy,
+) !Evidence {
+    var remaining = std.math.cast(usize, policy.work) orelse std.math.maxInt(usize);
     if (bytes.len > remaining) return error.RelationLimit;
     var reader: data.wire.Reader = .{ .input = bytes };
     const stored = try data.record.readBounded(StoredEvidence, &reader, a, &remaining);
@@ -559,9 +567,7 @@ pub fn derive(
     var exported = try compiler.exportBuiltinSource(storage, &root);
     defer exported.deinit();
     if (prior) |evidence| _ = try validateExported(storage, ancestor, &exported, evidence, .{});
-    if (ancestor.content.value.guest) |expected| {
-        if (!std.mem.eql(u8, &expected, &guest.identity())) return error.GuestIdentityMismatch;
-    }
+    try validateGuestScope(ancestor.content.value.guest, guest.identity());
     const prefix = if (prior) |evidence| evidence.steps else &.{};
     const steps = try std.mem.concat(storage, relation.Step, &.{ prefix, proposal.steps });
     const mapping = try transport(
@@ -626,6 +632,13 @@ pub fn deriveRecord(
 
 const Validated = struct { mapping: Mapping, parameters: []const source.RecoveryBinding };
 
+fn validateGuestScope(ancestor: ?artifact.Digest, successor: ?artifact.Digest) !void {
+    if (ancestor) |expected| {
+        const actual = successor orelse return error.GuestIdentityMismatch;
+        if (!std.mem.eql(u8, &expected, &actual)) return error.GuestIdentityMismatch;
+    }
+}
+
 fn validateIdentity(
     candidate: *const artifact.Admitted,
     root: *const compiler.ExportedSource,
@@ -646,9 +659,7 @@ fn validateIdentity(
         return error.InvalidAncestor;
     if (bundle.guest == null or !std.mem.eql(u8, &bundle.guest.?, &guest.identity()))
         return error.GuestIdentityMismatch;
-    if (root.retained.content.value.guest) |bound| {
-        if (!std.mem.eql(u8, &bound, &guest.identity())) return error.GuestIdentityMismatch;
-    }
+    try validateGuestScope(root.retained.content.value.guest, guest.identity());
 }
 
 fn validateHelpers(
@@ -744,7 +755,11 @@ pub fn validate(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const evidence = try decodeEvidence(scratch, candidate.content.value.evidence);
+    const evidence = try decodeEvidenceWithPolicy(
+        scratch,
+        candidate.content.value.evidence,
+        policy,
+    );
     var root = try rootArtifact(scratch, candidate, evidence);
     defer root.deinit();
     var exported = try compiler.exportBuiltinSource(scratch, &root);
@@ -768,6 +783,7 @@ pub fn validateAgainst(
     if (!std.mem.eql(u8, &lineage.parent, &ancestor.identity) or
         !std.mem.eql(u8, &lineage.root, &approvedRootIdentity(ancestor)))
         return error.InvalidAncestor;
+    try validateGuestScope(ancestor.content.value.guest, candidate.content.value.guest);
     try compiler.validate(a, ancestor);
     try validate(a, candidate, .{});
     var arena = std.heap.ArenaAllocator.init(a);

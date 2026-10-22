@@ -478,6 +478,16 @@ pub const Resident = struct {
     pub fn runtimeObservation(self: *Resident, a: std.mem.Allocator) !RuntimeObservation {
         const state = try self.enter();
         defer self.leave();
+        const uncached = state.session.driver.operation == null and state.session.view == null and
+            if (state.session.driver.last_cut) |cut|
+                cut.status != .active and cut.status != .unwinding
+            else
+                false;
+        var transaction: ?runtime.Session.Transaction = if (uncached)
+            try state.session.begin()
+        else
+            null;
+        errdefer if (transaction) |*active| active.rollback(&state.session);
         _ = try state.session.observe();
         const observation: @import("../semantic/observe.zig").Observation =
             if (state.session.view) |view| view.event.value.observation else .progressed;
@@ -486,6 +496,7 @@ pub const Resident = struct {
             a,
             observation,
         );
+        if (transaction) |*active| active.commit(&state.session);
         return .{
             .allocator = a,
             .observation = bytes,

@@ -26,6 +26,7 @@ test "quarantined runtime preserves bounded phase progress without guest custody
     defer a.free(before);
     var candidate = try experiment.Experiment.init(a, image, &runtime, before);
     defer candidate.deinit();
+    try checkExperimentCommands(&candidate, image, &runtime);
     var initialized = try finishExperiment(&candidate, image, &runtime);
     defer initialized.deinit();
     try std.testing.expectEqual(.initialized, initialized.stage);
@@ -41,6 +42,51 @@ test "quarantined runtime preserves bounded phase progress without guest custody
     try std.testing.expectEqualSlices(u8, expected, advanced.checkpoint);
     try std.testing.expectEqual(@as(u64, 2), advanced.guest_work);
     try std.testing.expectError(error.NoOperation, candidate.pump(1));
+    try checkExperimentCommands(&candidate, image, &runtime);
+    const ready = try candidate.checkpointOuter(a);
+    defer a.free(ready);
+    var restored = try experiment.Experiment.restore(a, image, &runtime, ready);
+    defer restored.deinit();
+    try restored.begin(.none, 0);
+    var repeated = try finishExperiment(&restored, image, &runtime);
+    defer repeated.deinit();
+    try std.testing.expectEqualSlices(u8, advanced.checkpoint, repeated.checkpoint);
+}
+
+fn checkExperimentCommands(
+    candidate: *experiment.Experiment,
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+) !void {
+    const service = @import("service.zig");
+    const bytes = try candidate.checkpointOuter(a);
+    defer a.free(bytes);
+    var decoded = try projection.decode(experiment.Record, a, bytes);
+    defer decoded.deinit();
+    const commands = [_]service.Command{
+        .{ .advance = .{ .control = .none, .quantum = 1 } }, .observe, .project, .finish,
+    };
+    const accepted: ?std.meta.Tag(service.Command) = switch (candidate.phase) {
+        .initializing => null,
+        .advancing => .advance,
+        .observing => .observe,
+        .projecting, .ready => .project,
+    };
+    for (commands) |command| {
+        if (accepted == std.meta.activeTag(command)) continue;
+        const command_bytes = try projection.encode(service.Command, a, command);
+        defer a.free(command_bytes);
+        var record = decoded.value;
+        record.command = command_bytes;
+        const invalid = try projection.encode(experiment.Record, a, record);
+        defer a.free(invalid);
+        try std.testing.expectError(error.InvalidExperiment, experiment.Experiment.restore(
+            a,
+            image,
+            runtime,
+            invalid,
+        ));
+    }
 }
 
 fn finishExperiment(
@@ -58,6 +104,7 @@ fn finishExperiment(
         const index = @backingInt(phase);
         if (retained[index]) continue;
         retained[index] = true;
+        try checkExperimentCommands(candidate, image, runtime);
         const bytes = try candidate.checkpointOuter(a);
         defer a.free(bytes);
         var restored = try experiment.Experiment.restore(a, image, runtime, bytes);
