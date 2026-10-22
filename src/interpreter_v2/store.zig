@@ -94,7 +94,7 @@ pub const Store = struct {
     blobs: std.ArrayList(g.Blob) = .empty,
     blob_alive: std.ArrayList(bool) = .empty,
     free_blobs: std.ArrayList(usize) = .empty,
-    interned: std.HashMapUnmanaged(g.Blob, usize, BlobContext, 80) = .empty,
+    interned: std.HashMapUnmanaged(BlobKey, usize, BlobContext, 80) = .empty,
     marks: std.ArrayList(bool) = .empty,
     blob_marks: std.ArrayList(bool) = .empty,
     pending: std.ArrayList(data.graph_order.Reference) = .empty,
@@ -261,7 +261,7 @@ pub const Store = struct {
         self.intern_retirements = 0;
         for (self.blob_alive.items, 0..) |alive, id| {
             if (alive) {
-                self.interned.putAssumeCapacity(self.blobs.items[id], id);
+                self.interned.putAssumeCapacity(BlobKey.init(self.blobs.items[id]), id);
             } else self.free_blobs.appendAssumeCapacity(id);
         }
         journal.deinit(self.allocator);
@@ -467,7 +467,7 @@ pub const Store = struct {
             return .{ .schema = value.schema, .body = .{ .scalar = scalar } };
         }
         const key: g.Blob = .{ .schema = value.schema, .bytes = value.bytes };
-        if (self.interned.get(key)) |id| return .{
+        if (self.interned.get(BlobKey.init(key))) |id| return .{
             .schema = value.schema,
             .body = .{ .blob = .{ .id = id } },
         };
@@ -498,7 +498,7 @@ pub const Store = struct {
             return .{ .schema = schema, .body = .{ .scalar = scalar } };
         }
         const value: g.Blob = .{ .schema = schema, .bytes = bytes };
-        if (self.interned.get(value)) |id| {
+        if (self.interned.get(BlobKey.init(value))) |id| {
             if (self.statistics) |statistics| statistics.owned_blob_bytes +|= bytes.len;
             self.allocator.free(bytes);
             return .{ .schema = schema, .body = .{ .blob = .{ .id = id } } };
@@ -525,7 +525,7 @@ pub const Store = struct {
             self.blob_alive.appendAssumeCapacity(true);
             break :blk id;
         };
-        self.interned.putAssumeCapacity(copied, id);
+        self.interned.putAssumeCapacity(BlobKey.init(copied), id);
         return .{ .schema = copied.schema, .body = .{ .blob = .{ .id = id } } };
     }
 
@@ -578,11 +578,12 @@ pub const Store = struct {
                 continue;
             }
             const blob: g.Blob = .{ .schema = item.schema, .bytes = item.bytes };
-            const id = self.interned.get(blob) orelse fresh: {
+            const key = BlobKey.init(blob);
+            const id = self.interned.get(key) orelse fresh: {
                 const id = self.blobs.items.len;
                 self.blobs.appendAssumeCapacity(blob);
                 self.blob_alive.appendAssumeCapacity(true);
-                self.interned.putAssumeCapacity(blob, id);
+                self.interned.putAssumeCapacity(key, id);
                 flags[id] = true;
                 break :fresh id;
             };
@@ -617,7 +618,7 @@ pub const Store = struct {
         for (state_.blobs, 0..) |blob, id| {
             self.blobs.appendAssumeCapacity(blob);
             self.blob_alive.appendAssumeCapacity(true);
-            self.interned.putAssumeCapacity(blob, id);
+            self.interned.putAssumeCapacity(BlobKey.init(blob), id);
         }
         @memset(node_flags, true);
         @memset(blob_flags, true);
@@ -654,8 +655,8 @@ pub const Store = struct {
             };
             errdefer self.allocator.free(copy.bytes);
             _ = try self.holdBlob(id);
-            _ = self.interned.remove(previous);
-            self.interned.putAssumeCapacity(copy, id);
+            _ = self.interned.remove(BlobKey.init(previous));
+            self.interned.putAssumeCapacity(BlobKey.init(copy), id);
             self.blobs.items[id] = copy;
             self.borrowed_blobs[id] = false;
             if (self.statistics) |statistics| statistics.copied_blob_bytes +|= copy.bytes.len;
@@ -820,12 +821,22 @@ pub const Store = struct {
     }
 };
 
-const BlobContext = struct {
-    pub fn hash(_: BlobContext, value: g.Blob) u64 {
-        return std.hash.Wyhash.hash(value.schema, value.bytes);
+const BlobKey = struct {
+    blob: g.Blob,
+    hash: u64,
+
+    fn init(blob: g.Blob) BlobKey {
+        return .{ .blob = blob, .hash = std.hash.Wyhash.hash(blob.schema, blob.bytes) };
     }
-    pub fn eql(_: BlobContext, left: g.Blob, right: g.Blob) bool {
-        return left.schema == right.schema and std.mem.eql(u8, left.bytes, right.bytes);
+};
+
+const BlobContext = struct {
+    pub fn hash(_: BlobContext, value: BlobKey) u64 {
+        return value.hash;
+    }
+    pub fn eql(_: BlobContext, left: BlobKey, right: BlobKey) bool {
+        return left.blob.schema == right.blob.schema and
+            std.mem.eql(u8, left.blob.bytes, right.blob.bytes);
     }
 };
 
