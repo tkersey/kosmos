@@ -624,7 +624,9 @@ fn residentFailureSweep(
     );
     var failed_after_mutation = false;
     for (0..allocation_count + 1) |failures| {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var failing = testing.FailingAllocator.init(testing.allocator, .{
+            .resize_fail_index = 0,
+        });
         var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
         var statistics: std.meta.Child(
@@ -4630,7 +4632,9 @@ fn residentTransitionAllocations(
     control: horos.data.invocation.Control,
     checkpoint_mode: bool,
 ) !usize {
-    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var counting = testing.FailingAllocator.init(testing.allocator, .{
+        .resize_fail_index = 0,
+    });
     var resident = try fixture.restore(counting.allocator(), prepared);
     defer releaseResident(&resident);
     var statistics: std.meta.Child(
