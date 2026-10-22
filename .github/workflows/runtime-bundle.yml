@@ -158,6 +158,8 @@ jobs:
       - name: Install only the browser boundary's tools
         if: matrix.lane == 'portable'
         run: |
+          grep -Fq 'https://archive.ubuntu.com/ubuntu/' /etc/apt/apt-mirrors.txt
+          sudo sed -i '\|^http://azure\.archive\.ubuntu\.com/ubuntu/|d' /etc/apt/apt-mirrors.txt
           npm ci --ignore-scripts --prefix test/current/browser-tools
           node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
