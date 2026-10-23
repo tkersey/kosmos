@@ -20,6 +20,7 @@ pub const State = data.process_state.State;
 pub const Error = wire.Error || std.mem.Allocator.Error || error{InvalidValue};
 
 pub fn schema(comptime T: type, builder: *source.Builder) source.Error!data.program.Id {
+    @setEvalBranchQuota(10_000);
     return native.lower(native.info(T), builder);
 }
 
