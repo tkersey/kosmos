@@ -1065,7 +1065,12 @@ fn expectEvidencePolicy(
     defer a.free(bytes);
     var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer candidate.deinit();
-    try std.testing.expectError(error.Capacity, compiler.validate(a, &candidate));
+    if (compiler.validate(a, &candidate)) {
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.Capacity, error.RelationLimit => {},
+        else => return err,
+    }
     try compiler.validateWithPolicy(a, &candidate, .{ .work = 1_000_000_000 });
 }
 

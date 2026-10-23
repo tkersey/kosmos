@@ -386,97 +386,104 @@ fn validationWalk(e: Author, m: machines.Definition) Error!Id {
 
 fn validationOrder(e: Author, m: machines.Definition) Error!Id {
     const b = e.b;
-    const buckets = try maps.define(b, m.cache.entries.entries);
-    const collect = try validationBuckets(e, m, buckets);
-    const flatten = try validationFlatten(e, m, buckets);
-    const entry = try b.declare(&.{m.cache.entries.entries}, m.cache.entries.entries, &.{}, &.{});
-    const grouped = try b.variable(buckets.tree);
-    const listed = try b.variable(buckets.entries);
-    const flattened = try e.call(flatten, &.{
-        try b.reference(listed),
-        e.zero,
-        try b.primitive(m.cache.entries.entries, .sequence, &.{}, 0),
-    });
-    const ordered = try b.bind(
-        listed,
-        try e.call(buckets.to_sequence, &.{try b.reference(grouped)}),
-        flattened,
-    );
-    try b.define(entry, try b.bind(grouped, try e.call(collect, &.{
-        try e.param(entry, 0), e.zero, try buckets.empty(e),
-    }), ordered));
+    const sequence = m.cache.entries.entries;
+    const entry = try b.declare(&.{sequence}, sequence, &.{}, &.{});
+    const sort = try validationSort(e, sequence);
+    const entries = try e.param(entry, 0);
+    const count = try b.primitive(e.integer, .sequence_length, &.{entries}, 0);
+    try b.define(entry, try e.call(sort, &.{ entries, e.zero, count }));
     return entry;
 }
 
-fn validationBuckets(e: Author, m: machines.Definition, buckets: maps.Definition) Error!Id {
+fn validationSort(e: Author, sequence: Id) Error!Id {
     const b = e.b;
-    const loop = try b.declare(&.{
-        m.cache.entries.entries, e.integer, buckets.tree,
-    }, buckets.tree, &.{}, &.{});
-    const entries = try e.param(loop, 0);
-    const index = try e.param(loop, 1);
-    const output = try e.param(loop, 2);
-    const pair = try e.required(entries, index);
-    const coordinate = try e.field(try e.field(pair, 1), 2);
-    const found = try b.variable(buckets.optional);
-    const absent = try b.variable(e.unit);
-    const present = try b.variable(m.cache.entries.entries);
-    const bucket = try b.variable(m.cache.entries.entries);
-    const updated = try b.variable(buckets.tree);
-    const selected = try b.term(.{ .match_sum = .{ .value = try b.reference(found), .cases = &.{
-        .{ .variable = absent, .body = try b.pure(try b.primitive(
-            m.cache.entries.entries,
-            .sequence,
-            &.{pair},
-            0,
-        )) },
-        .{ .variable = present, .body = try b.pure(try b.primitive(
-            m.cache.entries.entries,
-            .sequence_append,
-            &.{ try b.reference(present), pair },
-            0,
-        )) },
-    } } });
-    const next = try b.bind(updated, try e.call(buckets.set, &.{
-        output, coordinate, try b.reference(bucket),
-    }), try e.call(loop, &.{
-        entries, try e.binary(.integer_add, index, e.one), try b.reference(updated),
-    }));
-    const visit = try b.bind(
-        found,
-        try e.call(buckets.get, &.{ output, coordinate }),
-        try b.bind(bucket, selected, next),
+    const sort = try b.declare(&.{ sequence, e.integer, e.integer }, sequence, &.{}, &.{});
+    const merge = try validationMerge(e, sequence);
+    const entries = try e.param(sort, 0);
+    const start = try e.param(sort, 1);
+    const count = try e.param(sort, 2);
+    const left_count = try e.binary(.integer_div, count, try b.constant(u64, 2));
+    const left = try b.variable(sequence);
+    const right = try b.variable(sequence);
+    const empty = try b.primitive(sequence, .sequence, &.{}, 0);
+    const combined = try e.call(merge, &.{
+        try b.reference(left), try b.reference(right), e.zero, e.zero, empty,
+    });
+    const right_sorted = try e.call(sort, &.{
+        entries,
+        try e.binary(.integer_add, start, left_count),
+        try e.binary(.integer_sub, count, left_count),
+    });
+    const halves = try b.bind(
+        left,
+        try e.call(sort, &.{ entries, start, left_count }),
+        try b.bind(right, right_sorted, combined),
     );
-    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
-        e.integer,
-        .sequence_length,
-        &.{entries},
+    const singleton = try b.pure(try b.primitive(
+        sequence,
+        .sequence,
+        &.{try e.required(entries, start)},
         0,
-    )), visit, try b.pure(output)));
-    return loop;
+    ));
+    const nonempty = try e.when(try e.binary(.equal, count, e.one), singleton, halves);
+    try b.define(sort, try e.when(
+        try e.binary(.equal, count, e.zero),
+        try b.pure(empty),
+        nonempty,
+    ));
+    return sort;
 }
 
-fn validationFlatten(e: Author, m: machines.Definition, buckets: maps.Definition) Error!Id {
+fn validationMerge(e: Author, sequence: Id) Error!Id {
     const b = e.b;
-    const loop = try b.declare(&.{
-        buckets.entries, e.integer, m.cache.entries.entries,
-    }, m.cache.entries.entries, &.{}, &.{});
-    const entries = try e.param(loop, 0);
-    const index = try e.param(loop, 1);
-    const output = try e.param(loop, 2);
-    const next = try e.call(loop, &.{
-        entries, try e.binary(.integer_add, index, e.one),
-        try b.primitive(m.cache.entries.entries, .sequence_concat, &.{
-            output, try e.field(try e.required(entries, index), 1),
-        }, 0),
+    const merge = try b.declare(&.{
+        sequence, sequence, e.integer, e.integer, sequence,
+    }, sequence, &.{}, &.{});
+    const left = try e.param(merge, 0);
+    const right = try e.param(merge, 1);
+    const left_index = try e.param(merge, 2);
+    const right_index = try e.param(merge, 3);
+    const output = try e.param(merge, 4);
+    const left_pair = try e.required(left, left_index);
+    const right_pair = try e.required(right, right_index);
+    const take_left = try e.call(merge, &.{
+        left,
+        right,
+        try e.binary(.integer_add, left_index, e.one),
+        right_index,
+        try b.primitive(sequence, .sequence_append, &.{ output, left_pair }, 0),
     });
-    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
+    const take_right = try e.call(merge, &.{
+        left,
+        right,
+        left_index,
+        try e.binary(.integer_add, right_index, e.one),
+        try b.primitive(sequence, .sequence_append, &.{ output, right_pair }, 0),
+    });
+    const left_remaining = try e.binary(.less, left_index, try b.primitive(
         e.integer,
         .sequence_length,
-        &.{entries},
+        &.{left},
         0,
-    )), next, try b.pure(output)));
-    return loop;
+    ));
+    const right_remaining = try e.binary(.less, right_index, try b.primitive(
+        e.integer,
+        .sequence_length,
+        &.{right},
+        0,
+    ));
+    const right_earlier = try e.binary(
+        .less,
+        try e.field(try e.field(right_pair, 1), 2),
+        try e.field(try e.field(left_pair, 1), 2),
+    );
+    const choose = try e.when(right_earlier, take_right, take_left);
+    try b.define(merge, try e.when(
+        left_remaining,
+        try e.when(right_remaining, choose, take_left),
+        try e.when(right_remaining, take_right, try b.pure(output)),
+    ));
+    return merge;
 }
 
 fn validationEntry(e: Author, m: machines.Definition) Error!Id {
