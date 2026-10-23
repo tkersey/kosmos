@@ -64,6 +64,7 @@ jobs:
           path: .zig-cache-upload
           key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
