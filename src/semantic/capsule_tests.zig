@@ -249,7 +249,13 @@ test "quarantined runtime preserves bounded phase progress without guest custody
     defer a.free(ready);
     var restored = try experiment.Experiment.restore(a, image, &runtime, ready);
     defer restored.deinit();
+    try checkCompletedSegment(&restored, &advanced);
+    try rejectMalformedCompletedSegment(image, &runtime, ready);
+    try std.testing.checkAllAllocationFailures(a, completedSegmentAllocations, .{&restored});
+    try checkCompletedSegment(&restored, &advanced);
     try restored.begin(.none, 0);
+    try std.testing.expectEqual(@as(usize, 0), restored.observation.len);
+    try std.testing.expectError(error.OperationInProgress, restored.completedSegment(a));
     var repeated = try finishExperiment(&restored, image, &runtime);
     defer repeated.deinit();
     try std.testing.expectEqualSlices(u8, advanced.checkpoint, repeated.checkpoint);
@@ -298,6 +304,7 @@ test "experimental replies use retained projections without candidate recovery" 
         defer a.free(unchanged);
         try std.testing.expectEqualSlices(u8, ready, unchanged);
         try std.testing.expectEqual(.ready, candidate.phase);
+        try checkCompletedSegment(&candidate, &initialized);
         try candidate.begin(.{ .answer = &.{} }, 10);
         var completed = try finishExperiment(&candidate, image, &runtime);
         defer completed.deinit();
@@ -352,15 +359,78 @@ fn rejectNonprojectionReply(
     record.value.checkpoint = checkpoint;
     const bytes = try projection.encode(experiment.Record, a, record.value);
     defer a.free(bytes);
-    var restored = try experiment.Experiment.restore(a, image, runtime, bytes);
-    defer restored.deinit();
     try std.testing.expectError(
         error.InvalidServiceEvent,
-        restored.begin(.{ .answer = &.{} }, 10),
+        experiment.Experiment.restore(a, image, runtime, bytes),
     );
-    const unchanged = try restored.checkpointOuter(a);
-    defer a.free(unchanged);
-    try std.testing.expectEqualSlices(u8, bytes, unchanged);
+}
+
+fn checkCompletedSegment(
+    candidate: *experiment.Experiment,
+    expected: *const experiment.Segment,
+) !void {
+    const before = try candidate.checkpointOuter(a);
+    defer a.free(before);
+    const transitions = candidate.execution.outer.transitions;
+    var completed = try candidate.completedSegment(a);
+    defer completed.deinit();
+    try std.testing.expectEqualSlices(u8, expected.checkpoint, completed.checkpoint);
+    try std.testing.expectEqualSlices(u8, expected.observation, completed.observation);
+    try std.testing.expectEqual(expected.guest_work, completed.guest_work);
+    try std.testing.expectEqual(expected.stage, completed.stage);
+    try std.testing.expect(completed.observation.ptr != candidate.observation.ptr);
+    try std.testing.expectEqual(transitions, candidate.execution.outer.transitions);
+    const after = try candidate.checkpointOuter(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+fn completedSegmentAllocations(
+    allocator: std.mem.Allocator,
+    candidate: *experiment.Experiment,
+) !void {
+    var completed = try candidate.completedSegment(allocator);
+    defer completed.deinit();
+    try std.testing.expectEqualSlices(u8, candidate.observation, completed.observation);
+}
+
+fn rejectMalformedCompletedSegment(
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+    ready: []const u8,
+) !void {
+    var decoded = try projection.decode(experiment.Record, a, ready);
+    defer decoded.deinit();
+    for (0..4) |index| {
+        var record = decoded.value;
+        const expected: anyerror = switch (index) {
+            0 => invalid: {
+                record.observation = &.{};
+                break :invalid error.InvalidExperiment;
+            },
+            1 => invalid: {
+                record.observation = &.{127};
+                break :invalid error.InvalidValue;
+            },
+            2 => invalid: {
+                record.guest_work += 1;
+                break :invalid error.InvalidExperiment;
+            },
+            3 => invalid: {
+                record.last_cut.?.status = .cancelled;
+                break :invalid error.InvalidServiceEvent;
+            },
+            else => unreachable,
+        };
+        const bytes = try projection.encode(experiment.Record, a, record);
+        defer a.free(bytes);
+        try std.testing.expectError(expected, experiment.Experiment.restore(
+            a,
+            image,
+            runtime,
+            bytes,
+        ));
+    }
 }
 
 fn unitRequestImage() ![]u8 {
@@ -426,7 +496,12 @@ fn finishExperiment(
         const phase = candidate.phase;
         const result = try candidate.pump(31);
         try std.testing.expect(candidate.execution.outer.transitions - before <= 31);
-        if (result == .complete) return result.complete;
+        if (result == .complete) {
+            var completed = result.complete;
+            errdefer completed.deinit();
+            try checkCompletedSegment(candidate, &completed);
+            return completed;
+        }
         const index = @backingInt(phase);
         if (retained[index]) continue;
         retained[index] = true;

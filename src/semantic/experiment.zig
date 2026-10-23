@@ -3,6 +3,7 @@ const data = @import("horos_data");
 const artifact = @import("artifact.zig");
 const service = @import("service.zig");
 const projection = @import("projection.zig");
+const Observation = @import("observe.zig").Observation;
 const driver = @import("driver.zig");
 const base = @import("../base/session.zig");
 const Prepared = @import("../interpreter_v2/prepared.zig").Prepared;
@@ -79,6 +80,8 @@ pub const Experiment = struct {
             .control = control,
             .quantum = guest_quantum,
         } });
+        self.execution.allocator.free(self.observation);
+        self.observation = &.{};
         self.phase = .advancing;
         self.stage = .advanced;
     }
@@ -112,7 +115,7 @@ pub const Experiment = struct {
             .observing => {
                 if (event != .observation) return error.InvalidServiceEvent;
                 const bytes = try projection.encode(
-                    @import("observe.zig").Observation,
+                    Observation,
                     self.execution.allocator,
                     event.observation,
                 );
@@ -129,27 +132,57 @@ pub const Experiment = struct {
 
     fn acceptProjection(self: *Experiment, event: service.Event) !Pump {
         if (event != .projection) return error.InvalidServiceEvent;
-        const a = self.execution.allocator;
-        var canonical = try data.state_image.canonicalize(a, event.projection);
+        const result = try self.segmentFromProjection(self.execution.allocator, event.projection);
+        self.phase = .ready;
+        return .{ .complete = result };
+    }
+
+    pub fn completedSegment(self: *Experiment, a: std.mem.Allocator) !Segment {
+        if (self.phase != .ready) return error.OperationInProgress;
+        if (self.execution.closed or self.execution.operation != null)
+            return error.InvalidExperiment;
+        const actual = try self.execution.outer.observe();
+        if (actual != .requested or actual.requested.effect != 0 or !std.mem.eql(
+            u8,
+            self.execution.outer.program.effects[0].identity,
+            service.identity,
+        )) return error.InvalidServiceEvent;
+        var event = try projection.decode(
+            service.Event,
+            a,
+            try self.execution.outer.bytes(&actual.requested.payload),
+        );
+        defer event.deinit();
+        if (event.value != .projection) return error.InvalidServiceEvent;
+        return self.segmentFromProjection(a, event.value.projection);
+    }
+
+    fn segmentFromProjection(
+        self: *Experiment,
+        a: std.mem.Allocator,
+        state: data.process_state.State,
+    ) !Segment {
+        const cut = self.execution.last_cut orelse return error.InvalidServiceEvent;
+        if (self.guest_work != cut.guest_work) return error.InvalidExperiment;
+        try validateObservation(a, self.observation);
+        var canonical = try data.state_image.canonicalize(a, state);
         defer canonical.deinit();
         try data.state_admission.validateAdmitted(
             a,
             self.execution.guest.admitted(),
             canonical.state,
         );
-        if (canonical.state.status != self.execution.last_cut.?.status)
+        if (canonical.state.status != cut.status)
             return error.InvalidServiceEvent;
         const checkpoint = try data.state_image.emit(a, canonical.state);
-        const result: Segment = .{
+        errdefer a.free(checkpoint);
+        return .{
             .allocator = a,
             .checkpoint = checkpoint,
-            .observation = self.observation,
+            .observation = try a.dupe(u8, self.observation),
             .guest_work = self.guest_work,
             .stage = self.stage,
         };
-        self.observation = &.{};
-        self.phase = .ready;
-        return .{ .complete = result };
     }
 
     pub fn checkpointOuter(self: *Experiment, a: std.mem.Allocator) ![]u8 {
@@ -188,13 +221,20 @@ pub const Experiment = struct {
         try validateRecord(a, record.value, runtime, prepared.core.?.admitted());
         var execution = try restoreExecution(a, &prepared, runtime, record.value);
         errdefer execution.deinit();
-        return .{
+        const observation = try a.dupe(u8, record.value.observation);
+        errdefer a.free(observation);
+        var result: Experiment = .{
             .execution = execution,
             .phase = record.value.phase,
             .stage = record.value.stage,
             .guest_work = record.value.guest_work,
-            .observation = try a.dupe(u8, record.value.observation),
+            .observation = observation,
         };
+        if (result.phase == .ready) {
+            var completed = try result.completedSegment(a);
+            completed.deinit();
+        }
+        return result;
     }
 };
 
@@ -217,8 +257,11 @@ fn validateRecord(
         .projecting => .project,
         .ready => null,
     };
-    if (record.operation != expected or
-        (record.phase == .projecting) != (record.observation.len != 0))
+    const has_observation = record.phase == .projecting or record.phase == .ready;
+    if (record.operation != expected or has_observation != (record.observation.len != 0))
+        return error.InvalidExperiment;
+    if (has_observation) try validateObservation(a, record.observation);
+    if (record.stage == .initialized and record.guest_work != 0)
         return error.InvalidExperiment;
     if (record.phase == .initializing) {
         if (record.stage != .initialized or record.command.len != 0 or
@@ -229,6 +272,7 @@ fn validateRecord(
     if (record.last_cut == null or
         (record.phase == .advancing and record.stage != .advanced) or record.command.len == 0)
         return error.InvalidExperiment;
+    if (record.guest_work != record.last_cut.?.guest_work) return error.InvalidExperiment;
     var command = try projection.decode(service.Command, a, record.command);
     defer command.deinit();
     const tag: std.meta.Tag(service.Command) = switch (record.phase) {
@@ -238,6 +282,14 @@ fn validateRecord(
         .initializing => unreachable,
     };
     if (std.meta.activeTag(command.value) != tag) return error.InvalidExperiment;
+}
+
+fn validateObservation(a: std.mem.Allocator, bytes: []const u8) !void {
+    var observation = try projection.decode(Observation, a, bytes);
+    defer observation.deinit();
+    const canonical = try projection.encode(Observation, a, observation.value);
+    defer a.free(canonical);
+    if (!std.mem.eql(u8, bytes, canonical)) return error.InvalidExperiment;
 }
 
 fn restoreExecution(
