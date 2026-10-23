@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { preparedPeer } from "./prepared_peer.mjs";
+import { hyperExamples, hyperAgreement } from "./hyper_agreement.mjs";
 import { Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome } from "../../src/embedding/index.mjs";
 
 const requiredExamples = ["lexical","deep","recursive","choices-all","choices-first","generator","state-local","state-shared","resource-scalar","resource-pair","answers","scoped-reader","writer-raise","scheduler","queens-dfs","queens-bfs","cell-order","nested","shallow","injection","indexed","abort-custody","unwind","reentrant","cloned","clause-abort","bounded-values","scalar-contracts","ownership","shallow-resumptions","shallow-injection","handle-operand-order","protect-operand-order","successor-state","clause-payload","yielding-cleanup","borrow-operands","cleanup-disposal","cleanup-disposal-running","cleanup-disposal-failure","cleanup-disposal-owned","product-projection","local-one-shot","local-multi-shot"];
 const visitedSources = new Set(), visitedImages = new Set();
 requiredExamples.push("stateful-service", "swapped-service-replies", "paired-services");
+requiredExamples.push(...hyperExamples);
 async function readFile(file, ...options) {
   const match = String(file).match(/\/source-([^/]+)\.(json|bpi3)$/);
   if (match) (match[2] === "json" ? visitedSources : visitedImages).add(match[1]);
@@ -36,6 +38,14 @@ let prepared, preparedImage;
 let observations = 0;
 const comparisonStarted = performance.now();
 console.error("source agreement: native/WASM comparison started");
+function prepare(image) {
+  if (!preparedImage || !Buffer.from(preparedImage).equals(image)) {
+    if (prepared) host.releasePrepared(prepared);
+    prepared = host.prepare(image);
+    preparedImage = image.slice();
+  }
+  return prepared;
+}
 async function compare(mode, input) {
   const control = input.cancel !== undefined ? "cancel_text" : input.result !== undefined ? "reply"
     : input.state && yielded.has(digest(input.state)) ? "resume_yield" : "none";
@@ -51,11 +61,7 @@ async function compare(mode, input) {
     // Code is immutable and admitted once per image. Mutable state is always
     // reconstructed through the public restore boundary, including when it
     // was produced by the other implementation on the preceding instruction.
-    if (!preparedImage || !Buffer.from(preparedImage).equals(input.image)) {
-      if (prepared) host.releasePrepared(prepared);
-      prepared = host.prepare(input.image);
-      preparedImage = input.image.slice();
-    }
+    prepare(input.image);
     session = input.state ? host.restore(prepared, input.state) : host.start(prepared, input.initialArgs);
     bytes = host.drive(session, { control, value: input.cancel ?? input.result, quantum: mode === "advance" ? 1 : null, checkpoint: true });
     const result = decodeOutcome(bytes);
@@ -468,6 +474,7 @@ for (const [name, expected, branches] of [["local-one-shot", 15, [15]], ["local-
     }
   }
 }
+await hyperAgreement({ fixtures, readFile, selected, compare, execute, host, prepare });
 assert.deepEqual([...visitedSources].sort(), selectedExamples.toSorted());
 assert.deepEqual([...visitedImages].sort(), selectedExamples.toSorted());
 if (prepared) host.releasePrepared(prepared);

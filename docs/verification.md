@@ -77,8 +77,8 @@ also supplies the restoration comparison: `advance(.none)` directly calls
 The independent direct session and transactional resident remain compared at
 every cut, after their input checkpoint buffer is overwritten. Source agreement likewise
 keeps a native peer process and one WASM prepared handle, restores every PST3,
-and alternates the actual native/WASM state producer. It retains all 47 examples,
-every quantum-one observation, cancellation frontier, independent source result,
+and alternates the actual native/WASM state producer. It retains all 47 prior examples,
+every prior quantum-one observation, cancellation frontier, independent source result,
 effect trace and canonical-byte assertion. The separate kernel suite still
 exercises the complete fresh invocation entry point alongside resident execution.
 The long recursion resource fixture retains all 10,000 calls and its node bound
@@ -111,8 +111,8 @@ representable sizes; this does not expand the JS/WASM physical input domain.
 The optional foreign-environment roots have distinct consumers:
 
 - `check-source`: the independent Horos higher-order interpreter versus actual
-  compiled native/WASM execution for 47 source examples, including all 42
-  historical examples.
+  compiled native/WASM execution for 65 source examples, including all 42
+  historical examples and 18 typed hyperfunction fixtures.
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
   input; the fixed-memory case changes only the real module's memory declaration.
@@ -142,7 +142,7 @@ the anonymous import sentinel. Standalone test executables show each case and
 require the complete selected count; the ordinary `check-sessions` target still
 runs all 83 cases together. Source-agreement partitions select disjoint fixture
 sets while retaining every mode, instruction frontier, cancellation and comparison;
-together they execute all 47 fixtures and 9,570 observations. The native semantic
+together they execute all 65 fixtures and report their actual observation counts. The native semantic
 group rebuilds the source artifact, while specialization and publication use the
 same authenticated packaged artifact. It does not invoke `check-native` and then the
 overlapping `check`. Native test run steps always execute, even when compilation
@@ -256,6 +256,53 @@ support no tail-latency claim. Process-allocator reuse, power state and load aff
 small timings. Snapshot and publication perform different work; their timings
 are not a before/after comparison. These measurements establish local costs and
 the serialization/memory tradeoff, not a product or provider speedup.
+
+## Typed hyperfunction transfer
+
+The source-agreement root consumes Horos's ordinary typed hyperfunction images
+through the existing native and WASM evaluators. Its 18 fixtures cover ignored
+peers and successor states, retained definitions, lazy data, nested nominal Need
+families, task acquisition, repeated and adaptive requests, requester disposal,
+and three distinct composition endpoints. All 256 byte inputs check the
+heterogeneous composition result; inputs 0, 7 and 255 also restore each instruction.
+
+Task fixtures compare an uninterrupted resident with the independent source
+oracle and native/WASM execution restored from portable states. Quantum-one cuts
+include the first external request before successor demand and counterpart
+returns with non-tail work still pending. Successful, overflowing and cancelled
+executions retain exact effect, result, failure and cleanup observations.
+Acquiring a task produces no task effects. Two adaptive reply sequences select
+different numbers of counterpart requests. These finite observations establish
+the exercised demand and transfer behavior, not termination of arbitrary
+recursive programs.
+
+The migration's coalescing images were also measured on an Apple M2 Pro with
+Zig 0.17.0, native `safe`, WASM `small`, and Node 26.12.1. Baseline images came
+from Horos `ae8ace5feecfda2e194b8ecad6fbe3a86ff91108`. The candidate snapshot's
+source matches Horos `5bea02f41e6ca5cbc41f91ad7497f48742004557` except for its
+package-version string. The image identities and authoring costs are recorded
+in that candidate's `docs/recursive-interaction.md`.
+
+| Fixture | Quantum-one invocations, baseline → candidate | WASM drive ms | Native invocation ms |
+|---|---:|---:|---:|
+| duplicate | 56 → 57 | 45.953 → 47.008 | 17.614 → 17.752 |
+| configured | 58 → 59 | 49.090 → 48.279 | 18.510 → 18.749 |
+| lazy | 26 → 27 | 19.221 → 20.899 | 8.346 → 9.057 |
+
+All 283 quantum-one observations compared native/WASM bytes, alternating the
+checkpoint producer. Inputs `(2,3)` produced `(12,13)`, `(12,14)` and `(2,3)`
+respectively, matching the independent source oracle. Timing medians use twelve
+batch means of sixteen executions after twenty-four warmups per image/backend;
+baseline/candidate order alternates and every result is checked. WASM timing
+excludes preparation, start and close. Native timing includes fresh sessions,
+codecs, framing, IPC and Node scheduling. Concurrent qualification was running;
+these local observations impose no timing gate or claim of isolated VM cost.
+
+The measured WASM SHA-256 is
+`91107599c58c85b115db4bed8b5181b4ace156887406f69629c55a793acc443f`;
+the native fixture SHA-256 is
+`92c4de2046dbb542b655d51284f9d75b774fbc855a8f58cf9ee67f7e0929a72b`.
+Both use the source/compiler/content bindings in `src/semantic_packaged.zig`.
 
 ## Stateful service composition
 
