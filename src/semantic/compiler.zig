@@ -365,10 +365,11 @@ fn functionMap(
 
 fn encodeEvidence(a: std.mem.Allocator, evidence: Evidence) ![]u8 {
     var length: data.wire.Writer = .{};
-    try data.record.write(Evidence, evidence, &length);
+    try data.record.writeAlloc(Evidence, a, evidence, &length);
     const bytes = try a.alloc(u8, length.position);
+    errdefer a.free(bytes);
     var writer: data.wire.Writer = .{ .output = bytes };
-    try data.record.write(Evidence, evidence, &writer);
+    try data.record.writeAlloc(Evidence, a, evidence, &writer);
     return bytes;
 }
 

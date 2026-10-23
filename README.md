@@ -8,7 +8,7 @@ retained control and cleanup are program data. The environment supplies typed
 external results. See [executable semantics](docs/executable-semantics.md) for
 the runtime artifacts, specialization, reconstruction, and trusted boundaries.
 
-Kosmos `9.0.0` requires exact Zig `0.17.0`; source builds use Horos 6.
+Kosmos `9.0.1` requires exact Zig `0.17.0`; source builds use Horos 7.
 It consumes BPI3 programs and PST3 states through ABI 3. See the
 [ABI contract](docs/kernel-abi.md) and [verification boundaries](docs/verification.md).
 Current source/package identities are selected by the consuming lock; published
