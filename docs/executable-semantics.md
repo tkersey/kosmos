@@ -62,6 +62,11 @@ the exact source blob, schema, coordinate and operation. Hits still create the
 same guest values and allocations. Collection first establishes live blobs,
 then drops dead cache entries and remaps surviving keys. Public projection omits
 the cache and hydration starts it empty; exact outer execution retains it.
+Recovery validates the cache map, source blob/schema, slot and operation coordinate,
+then recomputes each retained range through uncached source operations before
+accepting the machine. A matching byte bound alone does not establish a range.
+Admitted caches contain at most 256 entries. Validation traverses the supplied map
+and each checked entry's source prefix; scalar traversal retains checked width arithmetic.
 On a sequence miss, traversal can resume after the greatest retained earlier
 coordinate with the same blob, schema and element operation. Backward reads and
 collisions preserve these exact-key checks; the search adds no retained entries.

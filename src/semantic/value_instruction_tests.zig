@@ -6,6 +6,152 @@ const Author = @import("author.zig").Author;
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
 
+const ProjectionAdmissionFixture = struct {
+    const base = @import("../base/session.zig");
+    const Entry = ProjectionCacheFixture.Entry;
+    const Kind = @import("projection_cache.zig").Kind;
+    const schemas: []const data.program.Schema = &.{
+        .unit,
+        .u64,
+        .bytes,
+        .{ .product = &.{ 1, 1, 2 } },
+        .{ .sum = &.{ 0, 3 } },
+        .{ .seq = 1 },
+        .{ .vector = .{ .element = 1, .maximum = 512 } },
+        .{ .array = .{ .element = 1, .length = 512 } },
+    };
+
+    fn prepare() !base.Prepared {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const e = try Author.init(&b);
+        const m = try @import("machine.zig").define(&b);
+        const entry = try b.declare(&.{
+            m.program, m.state, m.cache.entries.entries,
+        }, e.boolean, &.{}, &.{});
+        const machine = try b.variable(m.schema);
+        const cache = try b.variable(m.cache.schema);
+        const checked = try e.replace(
+            try b.reference(machine),
+            @backingInt(@import("machine.zig").Field.cache),
+            try b.reference(cache),
+        );
+        const validate = try @import("recovery.zig").storage(&b, m);
+        const body = try b.bind(cache, try e.call(m.cache.entries.from_sequence, &.{
+            try e.param(entry, 2),
+        }), try e.call(validate, &.{checked}));
+        try b.define(entry, try b.bind(machine, try e.call(m.hydrate, &.{
+            try e.param(entry, 0), try e.param(entry, 1),
+        }), body));
+        return support.prepare(b.module(entry, e.unit));
+    }
+
+    fn check(core: *base.Prepared, bytes: []const u8, entry: Entry, expected: bool) !void {
+        const schema = entry.value.schema;
+        const program: data.activation.Program = .{
+            .roots = .{ .entry = 0, .result = schema, .failure = 0 },
+            .schemas = schemas,
+            .constants = &.{},
+            .effects = &.{},
+            .functions = &.{.{
+                .entry = 0,
+                .inputs = &.{0},
+                .layout = .{ .slots = &.{schema} },
+                .result = schema,
+            }},
+            .blocks = &.{.{
+                .function = 0,
+                .instructions = &.{},
+                .terminator = .{ .return_value = 0 },
+            }},
+        };
+        const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+        defer a.free(image);
+        _ = try data.program_image.encode(a, program, image);
+        const admitted = try data.program_image.Admitted.decode(a, image);
+        defer admitted.deinit();
+        const guest = try projection.programBytes(a, admitted);
+        defer a.free(guest);
+        const value: data.graph.Value = .{ .schema = schema, .body = .{ .blob = .{ .id = 0 } } };
+        const state = try projection.encode(data.process_state.State, a, .{
+            .program_identity = admitted.identity(),
+            .status = .completed,
+            .roots = .{ .exit = .{ .id = 0 } },
+            .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = value } } } }},
+            .blobs = &.{.{ .schema = schema, .bytes = bytes }},
+        });
+        defer a.free(state);
+        const entries = try projection.encode([]const Entry, a, &.{entry});
+        defer a.free(entries);
+        const input = try std.mem.concat(a, u8, &.{ guest, state, entries });
+        defer a.free(input);
+        var session = try base.Session.start(a, core, input, .{});
+        defer session.deinit();
+        const outcome = try session.run(null);
+        if (outcome == .failed) return std.testing.expect(!expected);
+        try std.testing.expect(outcome == .completed);
+        var result = try projection.decode(bool, a, try session.bytes(&outcome.completed));
+        defer result.deinit();
+        try std.testing.expectEqual(expected, result.value);
+    }
+
+    fn cacheEntry(schema: u64, kind: Kind, index: u64, child: u64, start: u64, end: u64) Entry {
+        return .{ .slot = (index ^ @backingInt(kind)) & 255, .value = .{
+            .blob = 0,
+            .schema = schema,
+            .index = index,
+            .kind = @backingInt(kind),
+            .range = .{ .schema = child, .start = start, .end = end },
+        } };
+    }
+};
+
+test "projection recovery binds every cache range to its source coordinate" {
+    const F = ProjectionAdmissionFixture;
+    var core = try F.prepare();
+    defer core.deinit();
+    const record = try projection.encode(struct { u64, u64, []const u8 }, a, .{
+        17, 29, &@as([4096]u8, @splat(3)),
+    });
+    defer a.free(record);
+    const variant = try std.mem.concat(a, u8, &.{ &.{1}, record });
+    defer a.free(variant);
+    var numbers: [512]u64 = @splat(23);
+    numbers[0] = 7;
+    numbers[1] = 11;
+    const sequence = try projection.encode([]const u64, a, &numbers);
+    defer a.free(sequence);
+    const array = try projection.encode([512]u64, a, numbers);
+    defer a.free(array);
+    const entries = [_]F.Entry{
+        F.cacheEntry(3, .field, 0, 1, 0, 8),
+        F.cacheEntry(3, .field, 1, 1, 8, 16),
+        F.cacheEntry(4, .payload, 0, 3, 1, variant.len),
+        F.cacheEntry(5, .element, 0, 1, 2, 10),
+        F.cacheEntry(6, .element, 1, 1, 10, 18),
+        F.cacheEntry(7, .element, 511, 1, 4088, 4096),
+    };
+    const inputs = [_][]const u8{ record, record, variant, sequence, sequence, array };
+    for (entries, inputs) |entry, input| {
+        try F.check(&core, input, entry, true);
+        var shifted = entry;
+        shifted.value.range.start += 8;
+        shifted.value.range.end += 8;
+        try F.check(&core, input, shifted, false);
+        var wrong_child = entry;
+        wrong_child.value.range.schema = 0;
+        try F.check(&core, input, wrong_child, false);
+        var wrong_blob = entry;
+        wrong_blob.value.blob = 256;
+        try F.check(&core, input, wrong_blob, false);
+        var wrong_slot = entry;
+        wrong_slot.slot ^= 1;
+        try F.check(&core, input, wrong_slot, false);
+    }
+    try F.check(&core, sequence, F.cacheEntry(5, .element, 512, 1, 4098, 4106), false);
+    try F.check(&core, variant, F.cacheEntry(4, .payload, 1, 3, 1, variant.len), false);
+}
+
 const ProjectionCacheFixture = struct {
     const Id = data.program.Id;
     const Entry = struct {
@@ -28,6 +174,7 @@ const ProjectionCacheFixture = struct {
         invisible: data.process_state.State,
         after: data.process_state.State,
         restored: data.process_state.State,
+        valid: [3]bool,
     };
 
     e: Author,
@@ -126,6 +273,7 @@ const ProjectionCacheFixture = struct {
             allocations[i] = try e.field(try f.m.field(e, states[i], .blobs), 0);
         }
         const machines = [_]Id{ states[4], try b.reference(collected), try b.reference(hydrated) };
+        const checked = try b.variable(try projection.schema([3]bool, b));
         var entries: [3]Id = undefined;
         for (&entries) |*entry| entry.* = try b.variable(f.m.cache.entries.entries);
         var projected: [4]Id = undefined;
@@ -148,7 +296,9 @@ const ProjectionCacheFixture = struct {
             try b.reference(projected[1]),
             try b.reference(projected[2]),
             try b.reference(projected[3]),
+            try b.reference(checked),
         }));
+        body = try f.validation(machines, checked, body);
         for (projected, public) |target, input|
             body = try b.bind(target, try e.call(f.m.project, &.{input}), body);
         for (entries, machines) |target, input| body = try b.bind(target, try e.call(
@@ -160,6 +310,26 @@ const ProjectionCacheFixture = struct {
             try e.call(f.v.bytes, &.{ state, try e.field(try b.reference(read), 1) }),
             body,
         );
+        return body;
+    }
+
+    fn validation(f: ProjectionCacheFixture, inputs: [3]Id, target: Id, next: Id) !Id {
+        const b = f.e.b;
+        const validate = try @import("projection_cache.zig").valid(b, f.m);
+        var outputs: [3]Id = undefined;
+        var refs: [3]Id = undefined;
+        for (&outputs, &refs) |*output, *ref| {
+            output.* = try b.variable(f.e.boolean);
+            ref.* = try b.reference(output.*);
+        }
+        var body = try b.bind(target, try b.pure(try b.primitive(
+            try projection.schema([3]bool, b),
+            .sequence,
+            &refs,
+            0,
+        )), next);
+        for (outputs, inputs) |output, input|
+            body = try b.bind(output, try f.e.call(validate, &.{input}), body);
         return body;
     }
 };
@@ -239,6 +409,7 @@ fn checkProjectionCacheResult(
     expected: []const u8,
     sequence: u64,
 ) !void {
+    try std.testing.expectEqualDeep([_]bool{ true, true, true }, result.valid);
     for (result.values, [_]usize{ 0, 0, 256, 0, 10, 0, 0 }) |actual, index| {
         const encoded = try projection.encode([]const u8, a, elements[index]);
         defer a.free(encoded);

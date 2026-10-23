@@ -10,6 +10,204 @@ const a = std.testing.allocator;
 const support = @import("test_support.zig");
 const experiment = @import("experiment.zig");
 
+const CacheProduct = struct { first: u64, second: u64, padding: []const u8 };
+
+fn projectionCacheGuest(sequence: bool) ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try @import("author.zig").Author.init(&b);
+    const input = if (sequence)
+        try b.schema(.{ .seq = e.integer })
+    else
+        try projection.schema(CacheProduct, &b);
+    const entry = try b.declare(&.{input}, e.integer, &.{}, &.{});
+    const argument = try e.param(entry, 0);
+    const first = try b.variable(e.integer);
+    const read = if (sequence) try e.required(argument, e.zero) else try e.field(argument, 0);
+    const subsequent = if (sequence) try e.binary(
+        .integer_add,
+        try e.required(argument, e.one),
+        try e.required(argument, e.zero),
+    ) else read;
+    const result = try b.pure(try e.binary(.integer_add, try b.reference(first), subsequent));
+    try b.define(entry, try b.bind(first, try b.pure(read), try b.term(.{ .yield_then = result })));
+    return support.encode(b.module(entry, e.unit));
+}
+
+fn retainedCacheRange(
+    owner: *driver.Driver,
+    values: *@import("../interpreter_v2/values.zig").Values,
+) !data.graph.Value {
+    const outer = &owner.outer;
+    const pending = (try outer.store.get(outer.roots.pending.?)).pending;
+    const frame = try outer.frames.get(pending.continuation.id);
+    const reader = try outer.frames.slots.reader(frame.view);
+    for (owner.selected.content.value.recovery.anchors) |anchor| {
+        if (anchor.function != frame.function or anchor.role != .published_service) continue;
+        const state = try values.split(try reader.at(@intCast(anchor.parameters[0].slot)));
+        const machine = try values.split(state.fields[
+            @intCast(owner.selected.content.value.recovery.layout.service_machine)
+        ]);
+        const cache_field = @backingInt(@import("machine.zig").Field.cache);
+        const tree = try values.split(machine.fields[cache_field]);
+        try std.testing.expectEqual(@as(u64, 1), tree.tag);
+        const pair = try values.split(tree.fields[0]);
+        const entry = try values.split(pair.fields[1]);
+        return entry.fields[4];
+    }
+    return error.MissingRecoveryAnchor;
+}
+
+fn shiftedCacheCapsule(owner: *driver.Driver, original: []const u8) ![]u8 {
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const Values = @import("../interpreter_v2/values.zig").Values;
+    var values: Values = .{
+        .allocator = scratch.allocator(),
+        .schemas = owner.outer.program.schemas,
+        .store = &owner.outer.store,
+        .aggregate_storage = .structured,
+    };
+    const range = try retainedCacheRange(owner, &values);
+    const parts = try values.split(range);
+    var fields: [3]data.graph.Value = undefined;
+    @memcpy(&fields, parts.fields);
+    for (fields[1..]) |*field| field.* = Values.natural(field.schema, try std.math.add(
+        u64,
+        std.mem.readInt(u64, (try values.bytes(field))[0..8], .little),
+        8,
+    ));
+    switch (range.body) {
+        .reference => |reference| try owner.outer.store.replace(reference, .{ .aggregate = .{
+            .schema = range.schema,
+            .tag = 0,
+            .fields = &fields,
+        } }),
+        .blob => |reference| {
+            const bytes = owner.outer.store.blobs.items[@intCast(reference.id)].bytes;
+            try std.testing.expectEqual(@as(usize, 24), bytes.len);
+            for (&fields, 0..) |*field, i|
+                @memcpy(@constCast(bytes[i * 8 ..][0..8]), try values.bytes(field));
+        },
+        else => return error.InvalidCacheRange,
+    }
+    const checkpoint = try owner.outer.checkpoint(a);
+    defer a.free(checkpoint);
+    var envelope = try capsule.read(a, original);
+    defer envelope.deinit();
+    envelope.value.checkpoint = checkpoint;
+    envelope.value.record.checkpoint = capsule.reference(checkpoint);
+    return projection.encode(capsule.Envelope, a, envelope.value);
+}
+
+fn checkProjectionCacheCapsule(
+    selected: *artifact.Admitted,
+    sequence: bool,
+    input: []const u8,
+) !void {
+    const image = try projectionCacheGuest(sequence);
+    defer a.free(image);
+    var prepared = try base.Prepared.init(a, image);
+    defer prepared.deinit();
+    var owner = try driver.Driver.start(a, &prepared, selected, .{ .arguments = input });
+    var live = true;
+    defer if (live) owner.deinit();
+    var initialized = try owner.pump(null);
+    initialized.deinit();
+    var yielded = try owner.exchange(.{ .advance = .{ .control = .none, .quantum = 100 } });
+    yielded.deinit();
+    try std.testing.expectEqual(.yielded, owner.last_cut.?.status);
+    const provenance: capsule.Provenance = .{
+        .execution = @splat(51),
+        .custody = @splat(61),
+        .publication = null,
+    };
+    const original = try capsule.publish(a, &owner, .outer_execution, provenance);
+    defer a.free(original);
+    const corrupted = try shiftedCacheCapsule(&owner, original);
+    defer a.free(corrupted);
+    var rejected: Custody = .{
+        .expected = capsule.reference(corrupted),
+        .execution = provenance.execution,
+    };
+    if (capsule.restore(a, &prepared, selected, corrupted, rejected.verifier())) |candidate| {
+        var unexpected = candidate;
+        unexpected.deinit();
+        return error.CacheRangeAccepted;
+    } else |err| try std.testing.expectEqual(error.InvalidRecovery, err);
+    try std.testing.expect(!rejected.consumed);
+    var accepted: Custody = .{
+        .expected = capsule.reference(original),
+        .execution = provenance.execution,
+    };
+    owner.deinit();
+    live = false;
+    var restored = try capsule.restore(a, &prepared, selected, original, accepted.verifier());
+    defer restored.deinit();
+    try std.testing.expect(accepted.consumed);
+    try finishProjectionCacheCapsule(&restored, &prepared, selected, provenance, image, input);
+}
+
+fn finishProjectionCacheCapsule(
+    owner: *driver.Driver,
+    prepared: *base.Prepared,
+    selected: *artifact.Admitted,
+    provenance: capsule.Provenance,
+    image: []const u8,
+    input: []const u8,
+) !void {
+    try owner.submit(.{ .advance = .{ .control = .resume_yield, .quantum = 100 } });
+    var partial = try owner.pump(1);
+    defer partial.deinit();
+    try std.testing.expect(partial == .suspended);
+    const bytes = try capsule.publish(a, owner, .outer_execution, provenance);
+    defer a.free(bytes);
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    var custody: Custody = .{
+        .expected = capsule.reference(bytes),
+        .execution = provenance.execution,
+    };
+    const resumed = try capsule.restore(a, prepared, selected, bytes, custody.verifier());
+    owner.deinit();
+    owner.* = resumed;
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    var completed = try owner.pump(null);
+    completed.deinit();
+    try std.testing.expectEqual(.completed, owner.last_cut.?.status);
+    var oracle = try @import("native_baseline").Session.initImage(a, image, input);
+    defer oracle.deinit();
+    try std.testing.expect(try oracle.run(null) == .yielded);
+    try oracle.resumeYield();
+    try std.testing.expect(try oracle.run(null) == .completed);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    const actual = try owner.checkpoint(a);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+test "outer capsules reject shifted projection ranges before claiming custody" {
+    const retained = @import("packaged_runtime").bytes;
+    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer runtime.deinit();
+    const record = try projection.encode(CacheProduct, a, .{
+        .first = 17,
+        .second = 29,
+        .padding = &@as([4096]u8, @splat(3)),
+    });
+    defer a.free(record);
+    try checkProjectionCacheCapsule(&runtime, false, record);
+    var numbers: [512]u64 = @splat(23);
+    numbers[0] = 7;
+    numbers[1] = 11;
+    const sequence = try projection.encode([]const u64, a, &numbers);
+    defer a.free(sequence);
+    try checkProjectionCacheCapsule(&runtime, true, sequence);
+}
+
 test "quarantined runtime preserves bounded phase progress without guest custody" {
     const retained = @import("packaged_runtime").bytes;
     var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));

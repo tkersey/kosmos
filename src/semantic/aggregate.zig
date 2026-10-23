@@ -55,7 +55,7 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     try emitParts(m, e, parts, d);
     try emitConstruct(m, e, v, codec, fields, bytes, node_type, d);
     try emitTag(e, v, codec, parts, bytes, d);
-    try emitAccessors(m, e, v, codec, parts, bytes, d);
+    try emitAccessors(m, e, v, parts, d);
     try emitLoop(m, e, v, fields, parts, split_result, d);
     return cache.finish(b, d);
 }
@@ -533,9 +533,7 @@ fn emitAccessors(
     m: machines.Definition,
     e: Author,
     v: values.Definition,
-    codec: codecs.Definition,
     parts: Id,
-    bytes: Id,
     d: Definition,
 ) Error!void {
     const b = e.b;
@@ -546,53 +544,14 @@ fn emitAccessors(
         const index = if (variant) e.zero else try e.param(entry, 2);
         const selected = try b.variable(parts);
         const from_fields = try defineFromFields(e, v, d, input, value, index, selected);
-        const program = try m.field(e, input, .program);
-        const shapes = try field(
-            e,
-            try access.code(e, program),
-            data.activation.Program,
-            "schemas",
-        );
-        const shape = try e.required(shapes, try e.field(value, 0));
-        const types = try e.payload(shape, @backingInt(
-            if (variant) p.SchemaTag.sum else p.SchemaTag.product,
-        ));
-        const encoded = try b.variable(bytes);
-        const start = try b.variable(e.integer);
-        const end = try b.variable(e.integer);
-        const child_schema = try b.variable(e.integer);
-        const decoded = try b.variable(try projection.schema(codecs.Read, b));
-        const bytes_value = try b.reference(encoded);
-        var read = try defineRead(
-            e,
-            m,
-            start,
-            end,
-            child_schema,
-        );
-        read = try readChild(
-            e,
-            codec,
-            variant,
-            program,
-            types,
-            index,
-            bytes_value,
-            start,
-            end,
-            child_schema,
-            decoded,
-            read,
-        );
-        read = try b.bind(encoded, try e.call(v.bytes, &.{ input, value }), read);
-        read = try @import("projection_cache.zig").read(
+        const read = try @import("projection_cache.zig").read(
             e,
             m,
             input,
             value,
             index,
             if (variant) .payload else .field,
-            read,
+            try encodedRange(e, m, input, value, index, variant),
         );
         try b.define(entry, try e.when(try e.binary(.equal, try b.primitive(
             e.integer,
@@ -601,6 +560,45 @@ fn emitAccessors(
             0,
         ), e.one), read, from_fields));
     }
+}
+
+pub fn encodedRange(
+    e: Author,
+    m: machines.Definition,
+    input: Id,
+    value: Id,
+    index: Id,
+    comptime variant: bool,
+) Error!Id {
+    const b = e.b;
+    const v = try values.define(b, m);
+    const codec = try codecs.define(b, m);
+    const program = try m.field(e, input, .program);
+    const shapes = try field(e, try access.code(e, program), data.activation.Program, "schemas");
+    const shape = try e.required(shapes, try e.field(value, 0));
+    const types = try e.payload(shape, @backingInt(
+        if (variant) p.SchemaTag.sum else p.SchemaTag.product,
+    ));
+    const encoded = try b.variable(try b.schema(.bytes));
+    const start = try b.variable(e.integer);
+    const end = try b.variable(e.integer);
+    const child_schema = try b.variable(e.integer);
+    const decoded = try b.variable(try projection.schema(codecs.Read, b));
+    const read = try readChild(
+        e,
+        codec,
+        variant,
+        program,
+        types,
+        index,
+        try b.reference(encoded),
+        start,
+        end,
+        child_schema,
+        decoded,
+        try defineRead(e, m, start, end, child_schema),
+    );
+    return b.bind(encoded, try e.call(v.bytes, &.{ input, value }), read);
 }
 
 fn constructNode(

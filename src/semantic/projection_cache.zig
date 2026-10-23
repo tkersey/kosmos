@@ -315,3 +315,143 @@ fn emitRebase(e: Author, m: machines.Definition, mapping: maps.Definition, loop:
         0,
     )), visit, try b.pure(output)));
 }
+
+pub fn valid(b: *source.Builder, m: machines.Definition) Error!Id {
+    const cache = try b.specialization(Id, "kosmos.semantic.projection-cache-valid/1", m.schema);
+    if (cache.cached) |saved| return saved;
+    const e = try Author.init(b);
+    const entry = try b.declare(&.{m.schema}, e.boolean, &.{}, &.{});
+    const walk = try b.declare(&.{
+        m.schema, m.cache.entries.entries, e.integer,
+    }, e.boolean, &.{}, &.{});
+    const check = try validationEntry(e, m);
+    const input = try e.param(walk, 0);
+    const entries = try e.param(walk, 1);
+    const index = try e.param(walk, 2);
+    const accepted = try b.variable(e.boolean);
+    const no = try b.pure(try b.constant(bool, false));
+    const next = try e.call(walk, &.{ input, entries, try e.binary(.integer_add, index, e.one) });
+    const visit = try b.bind(accepted, try e.call(check, &.{
+        input, try e.required(entries, index),
+    }), try e.when(try b.reference(accepted), next, no));
+    try b.define(walk, try e.when(try e.binary(.less, index, try b.primitive(
+        e.integer,
+        .sequence_length,
+        &.{entries},
+        0,
+    )), visit, try b.pure(try b.constant(bool, true))));
+    const machine = try e.param(entry, 0);
+    const tree = try m.field(e, machine, .cache);
+    const structural = try b.variable(e.boolean);
+    const listed = try b.variable(m.cache.entries.entries);
+    const inspect = try b.bind(
+        listed,
+        try e.call(m.cache.entries.to_sequence, &.{tree}),
+        try e.call(walk, &.{ machine, try b.reference(listed), e.zero }),
+    );
+    try b.define(entry, try b.bind(
+        structural,
+        try e.call(m.cache.entries.valid, &.{tree}),
+        try e.when(try b.reference(structural), inspect, no),
+    ));
+    return cache.finish(b, entry);
+}
+
+fn validationEntry(e: Author, m: machines.Definition) Error!Id {
+    const b = e.b;
+    const entry = try b.declare(&.{ m.schema, m.cache.entries.entry }, e.boolean, &.{}, &.{});
+    const machine = try e.param(entry, 0);
+    const pair = try e.param(entry, 1);
+    const saved = try e.field(pair, 1);
+    const source_blob = try e.field(saved, 0);
+    const schema = try e.field(saved, 1);
+    const index = try e.field(saved, 2);
+    const kind = try e.field(saved, 3);
+    const actual = try e.field(saved, 4);
+    const found = try b.variable(m.blobs.optional);
+    const absent = try b.variable(e.unit);
+    const present = try b.variable(m.blobs.element);
+    const backing = try b.reference(present);
+    const bytes = try e.field(backing, 1);
+    const length = try b.primitive(e.integer, .blob_length, &.{bytes}, 0);
+    const expected = try b.variable(m.cache.range);
+    const no = try b.pure(try b.constant(bool, false));
+    var same = try b.pure(try b.constant(bool, true));
+    for (0..3) |i| same = try e.when(try e.binary(
+        .equal,
+        try e.field(actual, i),
+        try e.field(try b.reference(expected), i),
+    ), same, no);
+    const body = try e.variant(
+        try projection.schema(@FieldType(data.graph.Value, "body"), b),
+        @backingInt(data.graph.ValueTag.blob),
+        try e.tuple(try projection.schema(data.graph.BlobRef, b), &.{source_blob}),
+    );
+    const value = try e.tuple(try projection.schema(data.graph.Value, b), &.{
+        schema, body,
+    });
+    var checked = try b.bind(expected, try uncachedRange(e, m, machine, value, index, kind), same);
+    checked = try e.when(try e.binary(.less, length, try e.field(actual, 2)), no, checked);
+    checked = try e.when(try e.binary(.less, length, try b.constant(u64, 4096)), no, checked);
+    checked = try e.when(try e.binary(.equal, try e.field(backing, 0), schema), checked, no);
+    const inspect = try b.bind(found, try e.call(m.blobs.get, &.{
+        try m.field(e, machine, .blobs), source_blob,
+    }), try b.term(.{ .match_sum = .{ .value = try b.reference(found), .cases = &.{
+        .{ .variable = absent, .body = no }, .{ .variable = present, .body = checked },
+    } } }));
+    try b.define(entry, try e.when(try e.binary(
+        .equal,
+        try e.field(pair, 0),
+        try slotId(e, source_blob, index, kind),
+    ), inspect, no));
+    return entry;
+}
+
+fn uncachedRange(
+    e: Author,
+    m: machines.Definition,
+    input: Id,
+    value: Id,
+    index: Id,
+    kind: Id,
+) Error!Id {
+    const aggregate = @import("aggregate.zig");
+    var select = try e.fail();
+    select = try e.when(try e.binary(.equal, kind, try e.b.constant(
+        u64,
+        @backingInt(Kind.element),
+    )), try collectionRange(e, m, input, value, index), select);
+    const payload = try e.when(
+        try e.binary(.equal, index, e.zero),
+        try aggregate.encodedRange(e, m, input, value, index, true),
+        try e.fail(),
+    );
+    select = try e.when(try e.binary(.equal, kind, try e.b.constant(
+        u64,
+        @backingInt(Kind.payload),
+    )), payload, select);
+    return e.when(try e.binary(.equal, kind, try e.b.constant(
+        u64,
+        @backingInt(Kind.field),
+    )), try aggregate.encodedRange(e, m, input, value, index, false), select);
+}
+
+fn collectionRange(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
+    const b = e.b;
+    const collection = try @import("collections.zig").define(b, m);
+    const whole = try b.variable(collection.schema);
+    const item = try b.variable(collection.schema);
+    const selected = try b.reference(item);
+    const encoded = try e.payload(try e.field(selected, 2), 0);
+    const result = try b.pure(try e.tuple(m.cache.range, &.{
+        try e.field(selected, 0), try e.field(encoded, 1), try e.field(encoded, 2),
+    }));
+    const selected_range = try b.bind(item, try e.call(collection.range, &.{
+        try m.field(e, input, .program), try b.reference(whole), index, e.one,
+    }), result);
+    return b.bind(whole, try e.call(collection.view, &.{ input, value }), try e.when(
+        try e.binary(.less, index, try e.field(try b.reference(whole), 1)),
+        selected_range,
+        try e.fail(),
+    ));
+}
