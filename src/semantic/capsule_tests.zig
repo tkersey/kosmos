@@ -126,6 +126,10 @@ fn checkProjectionCacheCapsule(
     defer a.free(original);
     const corrupted = try shiftedCacheCapsule(&owner, original);
     defer a.free(corrupted);
+    for ([_]capsule.Kind{ .guest_cut, .outer_execution }) |kind| try std.testing.expectError(
+        error.InvalidRecovery,
+        capsule.publish(a, &owner, kind, provenance),
+    );
     var rejected: Custody = .{
         .expected = capsule.reference(corrupted),
         .execution = provenance.execution,

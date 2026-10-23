@@ -321,6 +321,37 @@ pub fn valid(b: *source.Builder, m: machines.Definition) Error!Id {
     if (cache.cached) |saved| return saved;
     const e = try Author.init(b);
     const entry = try b.declare(&.{m.schema}, e.boolean, &.{}, &.{});
+    const walk = try validationWalk(e, m);
+    const order = try validationOrder(e, m);
+    const machine = try e.param(entry, 0);
+    const tree = try m.field(e, machine, .cache);
+    const structural = try b.variable(e.boolean);
+    const listed = try b.variable(m.cache.entries.entries);
+    const ordered = try b.variable(m.cache.entries.entries);
+    const no = try b.pure(try b.constant(bool, false));
+    const shadow = try e.replace(
+        machine,
+        @backingInt(machines.Field.cache),
+        try m.cache.entries.empty(e),
+    );
+    const count = try b.primitive(e.integer, .sequence_length, &.{try b.reference(listed)}, 0);
+    const checked = try b.bind(
+        ordered,
+        try e.call(order, &.{try b.reference(listed)}),
+        try e.call(walk, &.{ shadow, try b.reference(ordered), e.zero }),
+    );
+    const bounded = try e.when(try e.binary(.less, try b.constant(u64, 256), count), no, checked);
+    const inspect = try b.bind(listed, try e.call(m.cache.entries.to_sequence, &.{tree}), bounded);
+    try b.define(entry, try b.bind(
+        structural,
+        try e.call(m.cache.entries.valid, &.{tree}),
+        try e.when(try b.reference(structural), inspect, no),
+    ));
+    return cache.finish(b, entry);
+}
+
+fn validationWalk(e: Author, m: machines.Definition) Error!Id {
+    const b = e.b;
     const walk = try b.declare(&.{
         m.schema, m.cache.entries.entries, e.integer,
     }, e.boolean, &.{}, &.{});
@@ -328,33 +359,124 @@ pub fn valid(b: *source.Builder, m: machines.Definition) Error!Id {
     const input = try e.param(walk, 0);
     const entries = try e.param(walk, 1);
     const index = try e.param(walk, 2);
+    const pair = try e.required(entries, index);
     const accepted = try b.variable(e.boolean);
+    const retained = try b.variable(m.cache.schema);
     const no = try b.pure(try b.constant(bool, false));
-    const next = try e.call(walk, &.{ input, entries, try e.binary(.integer_add, index, e.one) });
-    const visit = try b.bind(accepted, try e.call(check, &.{
-        input, try e.required(entries, index),
-    }), try e.when(try b.reference(accepted), next, no));
+    const next = try b.bind(retained, try e.call(m.cache.entries.set, &.{
+        try m.field(e, input, .cache), try e.field(pair, 0), try e.field(pair, 1),
+    }), try e.call(walk, &.{
+        try e.replace(input, @backingInt(machines.Field.cache), try b.reference(retained)),
+        entries,
+        try e.binary(.integer_add, index, e.one),
+    }));
+    const visit = try b.bind(
+        accepted,
+        try e.call(check, &.{ input, pair }),
+        try e.when(try b.reference(accepted), next, no),
+    );
     try b.define(walk, try e.when(try e.binary(.less, index, try b.primitive(
         e.integer,
         .sequence_length,
         &.{entries},
         0,
     )), visit, try b.pure(try b.constant(bool, true))));
-    const machine = try e.param(entry, 0);
-    const tree = try m.field(e, machine, .cache);
-    const structural = try b.variable(e.boolean);
-    const listed = try b.variable(m.cache.entries.entries);
-    const inspect = try b.bind(
+    return walk;
+}
+
+fn validationOrder(e: Author, m: machines.Definition) Error!Id {
+    const b = e.b;
+    const buckets = try maps.define(b, m.cache.entries.entries);
+    const collect = try validationBuckets(e, m, buckets);
+    const flatten = try validationFlatten(e, m, buckets);
+    const entry = try b.declare(&.{m.cache.entries.entries}, m.cache.entries.entries, &.{}, &.{});
+    const grouped = try b.variable(buckets.tree);
+    const listed = try b.variable(buckets.entries);
+    const flattened = try e.call(flatten, &.{
+        try b.reference(listed),
+        e.zero,
+        try b.primitive(m.cache.entries.entries, .sequence, &.{}, 0),
+    });
+    const ordered = try b.bind(
         listed,
-        try e.call(m.cache.entries.to_sequence, &.{tree}),
-        try e.call(walk, &.{ machine, try b.reference(listed), e.zero }),
+        try e.call(buckets.to_sequence, &.{try b.reference(grouped)}),
+        flattened,
     );
-    try b.define(entry, try b.bind(
-        structural,
-        try e.call(m.cache.entries.valid, &.{tree}),
-        try e.when(try b.reference(structural), inspect, no),
-    ));
-    return cache.finish(b, entry);
+    try b.define(entry, try b.bind(grouped, try e.call(collect, &.{
+        try e.param(entry, 0), e.zero, try buckets.empty(e),
+    }), ordered));
+    return entry;
+}
+
+fn validationBuckets(e: Author, m: machines.Definition, buckets: maps.Definition) Error!Id {
+    const b = e.b;
+    const loop = try b.declare(&.{
+        m.cache.entries.entries, e.integer, buckets.tree,
+    }, buckets.tree, &.{}, &.{});
+    const entries = try e.param(loop, 0);
+    const index = try e.param(loop, 1);
+    const output = try e.param(loop, 2);
+    const pair = try e.required(entries, index);
+    const coordinate = try e.field(try e.field(pair, 1), 2);
+    const found = try b.variable(buckets.optional);
+    const absent = try b.variable(e.unit);
+    const present = try b.variable(m.cache.entries.entries);
+    const bucket = try b.variable(m.cache.entries.entries);
+    const updated = try b.variable(buckets.tree);
+    const selected = try b.term(.{ .match_sum = .{ .value = try b.reference(found), .cases = &.{
+        .{ .variable = absent, .body = try b.pure(try b.primitive(
+            m.cache.entries.entries,
+            .sequence,
+            &.{pair},
+            0,
+        )) },
+        .{ .variable = present, .body = try b.pure(try b.primitive(
+            m.cache.entries.entries,
+            .sequence_append,
+            &.{ try b.reference(present), pair },
+            0,
+        )) },
+    } } });
+    const next = try b.bind(updated, try e.call(buckets.set, &.{
+        output, coordinate, try b.reference(bucket),
+    }), try e.call(loop, &.{
+        entries, try e.binary(.integer_add, index, e.one), try b.reference(updated),
+    }));
+    const visit = try b.bind(
+        found,
+        try e.call(buckets.get, &.{ output, coordinate }),
+        try b.bind(bucket, selected, next),
+    );
+    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
+        e.integer,
+        .sequence_length,
+        &.{entries},
+        0,
+    )), visit, try b.pure(output)));
+    return loop;
+}
+
+fn validationFlatten(e: Author, m: machines.Definition, buckets: maps.Definition) Error!Id {
+    const b = e.b;
+    const loop = try b.declare(&.{
+        buckets.entries, e.integer, m.cache.entries.entries,
+    }, m.cache.entries.entries, &.{}, &.{});
+    const entries = try e.param(loop, 0);
+    const index = try e.param(loop, 1);
+    const output = try e.param(loop, 2);
+    const next = try e.call(loop, &.{
+        entries, try e.binary(.integer_add, index, e.one),
+        try b.primitive(m.cache.entries.entries, .sequence_concat, &.{
+            output, try e.field(try e.required(entries, index), 1),
+        }, 0),
+    });
+    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
+        e.integer,
+        .sequence_length,
+        &.{entries},
+        0,
+    )), next, try b.pure(output)));
+    return loop;
 }
 
 fn validationEntry(e: Author, m: machines.Definition) Error!Id {
@@ -390,7 +512,11 @@ fn validationEntry(e: Author, m: machines.Definition) Error!Id {
     const value = try e.tuple(try projection.schema(data.graph.Value, b), &.{
         schema, body,
     });
-    var checked = try b.bind(expected, try uncachedRange(e, m, machine, value, index, kind), same);
+    var checked = try b.bind(
+        expected,
+        try validationRange(e, m, machine, value, index, kind),
+        same,
+    );
     checked = try e.when(try e.binary(.less, length, try e.field(actual, 2)), no, checked);
     checked = try e.when(try e.binary(.less, length, try b.constant(u64, 4096)), no, checked);
     checked = try e.when(try e.binary(.equal, try e.field(backing, 0), schema), checked, no);
@@ -407,7 +533,7 @@ fn validationEntry(e: Author, m: machines.Definition) Error!Id {
     return entry;
 }
 
-fn uncachedRange(
+fn validationRange(
     e: Author,
     m: machines.Definition,
     input: Id,
@@ -440,15 +566,17 @@ fn collectionRange(e: Author, m: machines.Definition, input: Id, value: Id, inde
     const b = e.b;
     const collection = try @import("collections.zig").define(b, m);
     const whole = try b.variable(collection.schema);
-    const item = try b.variable(collection.schema);
-    const selected = try b.reference(item);
-    const encoded = try e.payload(try e.field(selected, 2), 0);
-    const result = try b.pure(try e.tuple(m.cache.range, &.{
-        try e.field(selected, 0), try e.field(encoded, 1), try e.field(encoded, 2),
-    }));
-    const selected_range = try b.bind(item, try e.call(collection.range, &.{
-        try m.field(e, input, .program), try b.reference(whole), index, e.one,
-    }), result);
+    const view = try b.reference(whole);
+    const selected_range = try @import("collections.zig").encodedRange(
+        m,
+        e,
+        try @import("codec.zig").define(b, m),
+        input,
+        value,
+        view,
+        index,
+        try e.payload(try e.field(view, 2), 0),
+    );
     return b.bind(whole, try e.call(collection.view, &.{ input, value }), try e.when(
         try e.binary(.less, index, try e.field(try b.reference(whole), 1)),
         selected_range,

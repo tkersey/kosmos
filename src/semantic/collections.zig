@@ -78,7 +78,7 @@ fn emitCachedItem(
     const encoded_var = try e.b.variable(encoded_type);
     const fields_var = try e.b.variable(fields);
     const encoded = try e.b.reference(encoded_var);
-    const range = try cachedRange(m, e, codec, input, value, collection, index, encoded);
+    const range = try encodedRange(m, e, codec, input, value, collection, index, encoded);
     const cached = try @import("projection_cache.zig").read(
         e,
         m,
@@ -99,7 +99,7 @@ fn emitCachedItem(
     } }));
 }
 
-fn cachedRange(
+pub fn encodedRange(
     m: machines.Definition,
     e: Author,
     codec: codecs.Definition,

@@ -19,6 +19,7 @@ const ProjectionAdmissionFixture = struct {
         .{ .seq = 1 },
         .{ .vector = .{ .element = 1, .maximum = 512 } },
         .{ .array = .{ .element = 1, .length = 512 } },
+        .{ .seq = 2 },
     };
 
     fn prepare() !base.Prepared {
@@ -47,7 +48,16 @@ const ProjectionAdmissionFixture = struct {
     }
 
     fn check(core: *base.Prepared, bytes: []const u8, entry: Entry, expected: bool) !void {
-        const schema = entry.value.schema;
+        _ = try checkEntries(core, bytes, entry.value.schema, &.{entry}, expected);
+    }
+
+    fn checkEntries(
+        core: *base.Prepared,
+        bytes: []const u8,
+        schema: u64,
+        saved: []const Entry,
+        expected: bool,
+    ) !usize {
         const program: data.activation.Program = .{
             .roots = .{ .entry = 0, .result = schema, .failure = 0 },
             .schemas = schemas,
@@ -78,21 +88,28 @@ const ProjectionAdmissionFixture = struct {
             .status = .completed,
             .roots = .{ .exit = .{ .id = 0 } },
             .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = value } } } }},
-            .blobs = &.{.{ .schema = schema, .bytes = bytes }},
+            .blobs = &.{
+                .{ .schema = schema, .bytes = bytes },
+                .{ .schema = schema, .bytes = bytes },
+            },
         });
         defer a.free(state);
-        const entries = try projection.encode([]const Entry, a, &.{entry});
+        const entries = try projection.encode([]const Entry, a, saved);
         defer a.free(entries);
         const input = try std.mem.concat(a, u8, &.{ guest, state, entries });
         defer a.free(input);
         var session = try base.Session.start(a, core, input, .{});
         defer session.deinit();
         const outcome = try session.run(null);
-        if (outcome == .failed) return std.testing.expect(!expected);
+        if (outcome == .failed) {
+            try std.testing.expect(!expected);
+            return session.transitions;
+        }
         try std.testing.expect(outcome == .completed);
         var result = try projection.decode(bool, a, try session.bytes(&outcome.completed));
         defer result.deinit();
         try std.testing.expectEqual(expected, result.value);
+        return session.transitions;
     }
 
     fn cacheEntry(schema: u64, kind: Kind, index: u64, child: u64, start: u64, end: u64) Entry {
@@ -150,6 +167,36 @@ test "projection recovery binds every cache range to its source coordinate" {
     }
     try F.check(&core, sequence, F.cacheEntry(5, .element, 512, 1, 4098, 4106), false);
     try F.check(&core, variant, F.cacheEntry(4, .payload, 1, 3, 1, variant.len), false);
+}
+
+test "projection validation reuses only verified variable-width prefixes" {
+    const F = ProjectionAdmissionFixture;
+    var core = try F.prepare();
+    defer core.deinit();
+    const payload: [64]u8 = @splat(37);
+    var values: [512][]const u8 = undefined;
+    var entries: [256]F.Entry = undefined;
+    var offset: u64 = 2;
+    for (&values, 0..) |*value, i| {
+        value.* = payload[0 .. 16 + i % 32];
+        const end = offset + 1 + value.len;
+        if (i >= 256) entries[i - 256] = F.cacheEntry(8, .element, i, 2, offset, end);
+        offset = end;
+    }
+    const encoded = try projection.encode([]const []const u8, a, &values);
+    defer a.free(encoded);
+    const transitions = try F.checkEntries(&core, encoded, 8, &entries, true);
+    try std.testing.expect(transitions < 1_000_000);
+    var sparse = [_]F.Entry{ entries[2], entries[0], entries[2], entries[0] };
+    for (sparse[2..]) |*entry| {
+        entry.value.blob = 1;
+        entry.slot ^= 1;
+    }
+    _ = try F.checkEntries(&core, encoded, 8, &sparse, true);
+    sparse[3].value.range.end = sparse[2].value.range.end;
+    _ = try F.checkEntries(&core, encoded, 8, &sparse, false);
+    entries[0].value.range = entries[1].value.range;
+    _ = try F.checkEntries(&core, encoded, 8, &entries, false);
 }
 
 const ProjectionCacheFixture = struct {
