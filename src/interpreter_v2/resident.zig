@@ -114,6 +114,7 @@ pub const Publication = struct {
     checkpoint: ?*Checkpoint = null,
     allocator: ?std.mem.Allocator,
     trace: ?@import("../semantic/instrumentation.zig").Output = null,
+    guest_work: u64 = 0,
 
     pub fn takeCheckpoint(self: *Publication) ?*Checkpoint {
         const receipt = self.checkpoint;
@@ -127,6 +128,18 @@ pub const Publication = struct {
             .encoded => |bytes| self.allocator.?.free(bytes),
             .buffer => {},
         }
+        self.* = undefined;
+    }
+};
+
+pub const RuntimeObservation = struct {
+    allocator: std.mem.Allocator,
+    observation: []u8,
+    guest_work: u64,
+    binding: capsules.Binding,
+
+    pub fn deinit(self: *RuntimeObservation) void {
+        self.allocator.free(self.observation);
         self.* = undefined;
     }
 };
@@ -291,6 +304,7 @@ pub const Resident = struct {
         errdefer state.expected = expected;
         var transaction = try session.begin();
         errdefer transaction.rollback(session);
+        const transitions_before = session.transitions;
         if (owned == .reply) {
             if (session.statistics) |statistics| statistics.reused_expected_bindings +|= 1;
             try session.answerExpected(owned.reply, state.expected.?);
@@ -339,6 +353,7 @@ pub const Resident = struct {
             .checkpoint = receipt,
             .allocator = if (destination == .encoded) destination.encoded else null,
             .trace = trace,
+            .guest_work = @intCast(session.transitions -% transitions_before),
         };
     }
 
@@ -455,11 +470,39 @@ pub const Resident = struct {
     pub fn runtimeBytes(self: *Resident, a: std.mem.Allocator) ![]u8 {
         const state = try self.enter();
         defer self.leave();
-        return @import("../semantic/projection.zig").encode(
-            @import("../semantic/artifact.zig").Bundle,
+        return @import("../semantic/artifact.zig").encode(
             a,
             state.session.driver.selected.content.value,
         );
+    }
+    pub fn runtimeObservation(self: *Resident, a: std.mem.Allocator) !RuntimeObservation {
+        const state = try self.enter();
+        defer self.leave();
+        const uncached = state.session.driver.operation == null and state.session.view == null and
+            if (state.session.driver.last_cut) |cut|
+                cut.status != .active and cut.status != .unwinding
+            else
+                false;
+        var transaction: ?runtime.Session.Transaction = if (uncached)
+            try state.session.begin()
+        else
+            null;
+        errdefer if (transaction) |*active| active.rollback(&state.session);
+        _ = try state.session.observe();
+        const observation: @import("../semantic/observe.zig").Observation =
+            if (state.session.view) |view| view.event.value.observation else .progressed;
+        const bytes = try @import("../semantic/projection.zig").encode(
+            @TypeOf(observation),
+            a,
+            observation,
+        );
+        if (transaction) |*active| active.commit(&state.session);
+        return .{
+            .allocator = a,
+            .observation = bytes,
+            .guest_work = state.session.driver.last_cut.?.guest_work,
+            .binding = binding(state),
+        };
     }
     pub fn realize(
         self: *Resident,

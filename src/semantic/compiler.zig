@@ -12,6 +12,18 @@ const projection = @import("projection.zig");
 const profile = @import("../base/profile.zig");
 const Id = data.program.Id;
 
+const construction = @import("construction.zig");
+pub const checker_identity = artifact.derived_policy;
+pub const Proposal = construction.Proposal;
+pub const RecordProposal = construction.RecordProposal;
+pub const ProposedInterfaces = construction.Interfaces;
+pub const DeriveOptions = construction.Options;
+pub const ValidationPolicy = construction.ValidationPolicy;
+pub const derive = construction.derive;
+pub const deriveRecord = construction.deriveRecord;
+pub const validateAgainst = construction.validateAgainst;
+pub const approvedRootIdentity = construction.approvedRootIdentity;
+
 pub const Options = struct {
     horos_package: []const u8,
     guest: ?*const data.program_image.Admitted = null,
@@ -37,25 +49,272 @@ pub const Evidence = struct {
     derivation: ?Derivation,
 };
 
+pub const SourceDefinition = struct {
+    builder: source.Builder,
+    service: service.Definition,
+    machine: machines.Definition,
+    clone: clones.Definition,
+    template: Id,
+    helpers: [4]Id,
+    failure: Id,
+
+    pub fn init(
+        a: std.mem.Allocator,
+        staged: bool,
+        hooks: service.instrumentation.Hooks,
+    ) !SourceDefinition {
+        var b = source.Builder.init(a);
+        errdefer b.deinit();
+        const s = try service.defineWithHooks(&b, staged, hooks);
+        const m = try machines.define(&b);
+        const clone = try clones.define(&b, m);
+        const graph = try @import("graph.zig").define(&b, m);
+        const validators = try @import("clone_validation.zig").define(&b, m, clone);
+        const helpers = [4]Id{
+            try @import("recovery.zig").define(&b, m),
+            try @import("recovery.zig").storage(&b, m),
+            validators.context,
+            validators.rebase,
+        };
+        const failure = try b.scalar(void);
+        return .{
+            .builder = b,
+            .service = s,
+            .machine = m,
+            .clone = clone,
+            .template = graph.template,
+            .helpers = helpers,
+            .failure = failure,
+        };
+    }
+
+    pub fn deinit(self: *SourceDefinition) void {
+        self.builder.deinit();
+        self.* = undefined;
+    }
+
+    pub fn module(self: *const SourceDefinition) source.ast.Module {
+        return self.builder.module(self.service.entry, self.failure);
+    }
+};
+
+pub const SourceModule = struct { module: source.ast.Module, digest: artifact.Digest };
+pub const SourceReferences = @import("source_references.zig").Value;
+pub const OwnedSourceReferences = @import("source_references.zig").Owned;
+
+pub fn sourceReferences(a: std.mem.Allocator, module: source.ast.Module) !OwnedSourceReferences {
+    return @import("source_references.zig").init(a, module, (try sourceModule(module)).digest);
+}
+
+pub const SourceHelper = struct {
+    role: enum { projector, storage, clone_context, clone_rebase },
+    source: SourceModule,
+    image: artifact.Digest,
+};
+pub const PureEntry = struct {
+    role: enum { initialize, step, respond, observe, hydrate, project },
+    function: Id,
+    signature: source.ast.Function,
+};
+pub const SourceEntries = struct {
+    service: Id,
+    branch_returns: []const Id,
+    templates: []const Id,
+};
+pub const SourceBundle = struct {
+    realization: artifact.Digest,
+    image: artifact.Digest,
+    emitter: artifact.Digest,
+    guest: ?artifact.Digest,
+    requirements: artifact.Requirements,
+    bridge: data.program.Effect,
+    generic: SourceModule,
+    selected: SourceModule,
+    helpers: [4]SourceHelper,
+    generic_entries: SourceEntries,
+    selected_entries: SourceEntries,
+    generic_roles: [9]SourceRole,
+    selected_roles: []const SourceRole,
+    generic_pure_entries: [6]PureEntry,
+    parameters: []const source.RecoveryBinding,
+    anchors: []const artifact.Anchor,
+    branch_returns: []const Id,
+    template_entries: []const Id,
+    evidence: Evidence,
+    construction: ?construction.Evidence = null,
+    lineage: ?artifact.Lineage = null,
+};
+pub const ExportedSource = struct {
+    arena: *std.heap.ArenaAllocator,
+    value: SourceBundle,
+    retained: artifact.Admitted,
+    derived: ?artifact.Admitted = null,
+    definition: SourceDefinition,
+
+    pub fn deinit(self: *ExportedSource) void {
+        if (self.derived) |*derived| derived.deinit();
+        self.definition.deinit();
+        self.retained.deinit();
+        const parent = self.arena.child_allocator;
+        self.arena.deinit();
+        parent.destroy(self.arena);
+        self.* = undefined;
+    }
+};
+
+pub fn exportSource(a: std.mem.Allocator, admitted: *const artifact.Admitted) !ExportedSource {
+    if (admitted.content.value.lineage != null) return construction.exportSource(a, admitted);
+    return exportBuiltinSource(a, admitted);
+}
+
+pub fn exportBuiltinSource(
+    a: std.mem.Allocator,
+    admitted: *const artifact.Admitted,
+) !ExportedSource {
+    const arena = try a.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(a);
+    errdefer {
+        arena.deinit();
+        a.destroy(arena);
+    }
+    const scratch = arena.allocator();
+    const bytes = try admitted.encode(scratch);
+    var retained = try artifact.Admitted.init(scratch, bytes, admitted.identity);
+    errdefer retained.deinit();
+    var definition = try sourceDefinition(scratch, &retained);
+    errdefer definition.deinit();
+    const pure_entries = try pureEntries(&definition);
+    const evidence = try readEvidence(scratch, &retained);
+    var validation = std.heap.ArenaAllocator.init(a);
+    defer validation.deinit();
+    const parameters = try scratch.dupe(source.RecoveryBinding, try validateDefined(
+        validation.allocator(),
+        &retained,
+        &definition,
+        evidence,
+    ));
+    const original = definition.module();
+    const selected = if (evidence.derivation) |d| d.residual else original;
+    const bundle = retained.content.value;
+    var helpers: [4]SourceHelper = undefined;
+    for (definition.helpers, 0..) |entry, i| {
+        helpers[i] = .{
+            .role = @fromBackingInt(@intCast(i)),
+            .source = try sourceModule(definition.builder.module(entry, definition.failure)),
+            .image = retained.helpers[i].identity(),
+        };
+    }
+    const roles = sourceRoles(definition.service, definition.clone);
+    return .{ .arena = arena, .retained = retained, .definition = definition, .value = .{
+        .realization = retained.identity,
+        .image = bundle.manifest.image,
+        .emitter = bundle.manifest.source,
+        .guest = bundle.guest,
+        .requirements = bundle.manifest.requirements,
+        .bridge = bundle.manifest.bridge,
+        .generic = try sourceModule(original),
+        .selected = try sourceModule(selected),
+        .helpers = helpers,
+        .generic_entries = try sourceEntries(scratch, &definition, null),
+        .selected_entries = try sourceEntries(scratch, &definition, evidence.derivation),
+        .generic_roles = roles,
+        .selected_roles = try selectedRoles(scratch, roles, evidence.derivation),
+        .generic_pure_entries = pure_entries,
+        .parameters = parameters,
+        .anchors = bundle.recovery.anchors,
+        .branch_returns = bundle.branch_returns,
+        .template_entries = bundle.template_entries,
+        .evidence = evidence,
+    } };
+}
+
+pub fn sourceModule(module: source.ast.Module) !SourceModule {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var writer: data.wire.Writer = .{ .hasher = &hash };
+    try data.record.write(source.ast.Module, module, &writer);
+    return .{ .module = module, .digest = hash.finalResult() };
+}
+
+fn pureEntries(definition: *SourceDefinition) ![6]PureEntry {
+    const b = &definition.builder;
+    const m = definition.machine;
+    const life = try @import("lifecycle.zig").define(b, m);
+    const step = try @import("step.zig").define(b, m);
+    const observe = try @import("observe.zig").define(b, m);
+    const functions = [6]Id{
+        life.initialize, step.active, life.respond, observe, m.hydrate, m.project,
+    };
+    var result: [6]PureEntry = undefined;
+    for (functions, 0..) |function, i| result[i] = .{
+        .role = @fromBackingInt(@intCast(i)),
+        .function = function,
+        .signature = b.functions.items[function],
+    };
+    return result;
+}
+
+fn sourceEntries(
+    a: std.mem.Allocator,
+    definition: *const SourceDefinition,
+    derivation: ?Derivation,
+) !SourceEntries {
+    return .{
+        .service = if (derivation) |d| d.residual.entry else definition.service.entry,
+        .branch_returns = try sourceFunctions(a, definition.clone.instantiate, derivation),
+        .templates = try sourceFunctions(a, definition.template, derivation),
+    };
+}
+
+fn sourceFunctions(a: std.mem.Allocator, original: Id, derivation: ?Derivation) ![]const Id {
+    var result: std.ArrayList(Id) = .empty;
+    try result.append(a, original);
+    if (derivation) |d| for (d.functions) |f| {
+        if (f.before == original) try result.append(a, f.after);
+    };
+    return result.toOwnedSlice(a);
+}
+
+fn selectedRoles(
+    a: std.mem.Allocator,
+    roles: [9]SourceRole,
+    derivation: ?Derivation,
+) ![]const SourceRole {
+    var result: std.ArrayList(SourceRole) = .empty;
+    try result.appendSlice(a, &roles);
+    if (derivation) |d| for (d.functions) |f| {
+        for (roles) |role| {
+            if (f.before != role.function) continue;
+            var ordinals: std.ArrayList(u32) = .empty;
+            for (role.ordinals) |original| {
+                if (f.arguments[original] == .known) break;
+                var ordinal: u32 = 0;
+                for (f.arguments[0..original]) |argument| {
+                    if (argument != .known) ordinal += 1;
+                }
+                try ordinals.append(a, ordinal);
+            }
+            if (ordinals.items.len != role.ordinals.len) continue;
+            try result.append(a, .{
+                .function = f.after,
+                .role = role.role,
+                .ordinals = try ordinals.toOwnedSlice(a),
+            });
+        }
+    };
+    return result.toOwnedSlice(a);
+}
+
 pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var b = source.Builder.init(a);
-    defer b.deinit();
-    const s = try service.defineWithHooks(&b, options.guest != null, options.hooks);
-    const m = try machines.define(&b);
-    const clone = try clones.define(&b, m);
-    const graph = try @import("graph.zig").define(&b, m);
-    const validators = try @import("clone_validation.zig").define(&b, m, clone);
-    const helpers = [4]Id{
-        try @import("recovery.zig").define(&b, m),
-        try @import("recovery.zig").storage(&b, m),
-        validators.context,
-        validators.rebase,
-    };
-    const failure = try b.scalar(void);
-    const original = b.module(s.entry, failure);
+    var definition = try SourceDefinition.init(a, options.guest != null, options.hooks);
+    defer definition.deinit();
+    const b = &definition.builder;
+    const s = definition.service;
+    const m = definition.machine;
+    const clone = definition.clone;
+    const original = definition.module();
     var specialized = try specialize(a, options, original, s.entry, m.program);
     defer if (specialized) |*out| out.deinit();
     const module = if (specialized) |*out| out.module() else original;
@@ -72,15 +331,15 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) ![]u8 {
         effects[0].identity,
         service.identity,
     )) return error.InvalidBridge;
-    const helper_images = try helperImages(a, &b, helpers, failure);
+    const helper_images = try helperImages(a, b, definition.helpers, definition.failure);
     const bytes = try encodeBundle(
         a,
         allocator,
         options,
-        &b,
+        b,
         s,
         clone,
-        graph.template,
+        definition.template,
         compiled,
         if (specialized) |*out| out else null,
         admitted,
@@ -168,7 +427,7 @@ fn encodeBundle(
             .terms = out.term_proofs.items,
         } else null,
     });
-    return projection.encode(artifact.Bundle, allocator, .{
+    return artifact.encode(allocator, .{
         .manifest = try manifestFor(a, options, admitted),
         .image = image,
         .guest = if (options.guest) |guest| guest.identity() else null,
@@ -245,18 +504,11 @@ pub fn contextWithHooks(
     };
 }
 
-const Selector = struct { function: Id, role: artifact.Role, ordinals: []const usize };
+pub const SourceRole = struct { function: Id, role: artifact.Role, ordinals: []const u32 };
+const Selector = SourceRole;
 
-fn anchorMap(
-    a: std.mem.Allocator,
-    b: *const source.Builder,
-    s: service.Definition,
-    clone: clones.Definition,
-    parameters: []const source.RecoveryBinding,
-    specialized: ?*const source.specialize.Output,
-) ![]const artifact.Anchor {
-    var anchors: std.ArrayList(artifact.Anchor) = .empty;
-    const selectors = [_]Selector{
+fn sourceRoles(s: service.Definition, clone: clones.Definition) [9]SourceRole {
+    return .{
         .{ .function = s.loop, .role = .published_service, .ordinals = &.{1} },
         .{ .function = s.dispatch, .role = .committed_service, .ordinals = &.{1} },
         .{ .function = s.publish, .role = .committed_service, .ordinals = &.{1} },
@@ -267,6 +519,18 @@ fn anchorMap(
         .{ .function = clone.run, .role = .clone_context, .ordinals = &.{ 0, 1 } },
         .{ .function = clone.rebase, .role = .clone_rebase, .ordinals = &.{ 0, 1, 2, 3 } },
     };
+}
+
+fn anchorMap(
+    a: std.mem.Allocator,
+    b: *const source.Builder,
+    s: service.Definition,
+    clone: clones.Definition,
+    parameters: []const source.RecoveryBinding,
+    specialized: ?*const source.specialize.Output,
+) ![]const artifact.Anchor {
+    var anchors: std.ArrayList(artifact.Anchor) = .empty;
+    const selectors = sourceRoles(s, clone);
     for (selectors) |selector| {
         try addAnchor(
             a,
@@ -288,6 +552,24 @@ fn anchorMap(
                 f.arguments,
             );
         };
+    }
+    return anchors.toOwnedSlice(a);
+}
+
+pub fn anchorsForRoles(
+    a: std.mem.Allocator,
+    roles: []const SourceRole,
+    module: source.ast.Module,
+    parameters: []const source.RecoveryBinding,
+) ![]const artifact.Anchor {
+    var anchors: std.ArrayList(artifact.Anchor) = .empty;
+    for (roles) |role| {
+        if (role.function >= module.functions.len) return error.InvalidRecovery;
+        const function = module.functions[@intCast(role.function)];
+        for (role.ordinals) |ordinal| {
+            if (ordinal >= function.parameters.len) return error.InvalidRecovery;
+        }
+        try addAnchor(a, &anchors, parameters, role, module, role.function, null);
     }
     return anchors.toOwnedSlice(a);
 }
@@ -330,7 +612,7 @@ fn addAnchor(
         if (!found) return; // unreachable original functions have no final slots
     }
     try anchors.append(a, .{
-        .function = final_function.?,
+        .function = final_function orelse return error.InvalidRecovery,
         .role = selector.role,
         .parameters = try parameters.toOwnedSlice(a),
     });
@@ -365,44 +647,58 @@ fn functionMap(
 
 fn encodeEvidence(a: std.mem.Allocator, evidence: Evidence) ![]u8 {
     var length: data.wire.Writer = .{};
-    try data.record.write(Evidence, evidence, &length);
+    try data.record.writeAlloc(Evidence, a, evidence, &length);
     const bytes = try a.alloc(u8, length.position);
     var writer: data.wire.Writer = .{ .output = bytes };
-    try data.record.write(Evidence, evidence, &writer);
+    try data.record.writeAlloc(Evidence, a, evidence, &writer);
     return bytes;
 }
 
 /// Independent derivation/relocation checks over carried evidence. A caller
 /// still approves the exact source/compiler policy before activating it.
 pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void {
+    if (admitted.content.value.lineage != null) return construction.validate(a, admitted, .{});
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
+    var definition = try sourceDefinition(scratch, admitted);
+    defer definition.deinit();
+    const evidence = try readEvidence(scratch, admitted);
+    _ = try validateDefined(scratch, admitted, &definition, evidence);
+}
+
+pub fn validateWithPolicy(
+    a: std.mem.Allocator,
+    admitted: *const artifact.Admitted,
+    policy: ValidationPolicy,
+) !void {
+    if (admitted.content.value.lineage != null) return construction.validate(a, admitted, policy);
+    return validate(a, admitted);
+}
+
+fn sourceDefinition(a: std.mem.Allocator, admitted: *const artifact.Admitted) !SourceDefinition {
     const bundle = admitted.content.value;
     if (!std.mem.eql(u8, &bundle.manifest.source, &@import("source_identity.zig").digest()) or
-        !std.mem.eql(
-            u8,
-            bundle.manifest.compiler.policy,
-            artifact.build_policy,
-        )) return error.UnsupportedSource;
-    var reader: data.wire.Reader = .{ .input = bundle.evidence };
-    const evidence = try data.record.read(Evidence, &reader, scratch);
+        !std.mem.eql(u8, bundle.manifest.compiler.policy, artifact.build_policy))
+        return error.UnsupportedSource;
+    return SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
+}
+
+fn readEvidence(a: std.mem.Allocator, admitted: *const artifact.Admitted) !Evidence {
+    var reader: data.wire.Reader = .{ .input = admitted.content.value.evidence };
+    const evidence = try data.record.read(Evidence, &reader, a);
     try reader.finish();
-    var expected_builder = source.Builder.init(scratch);
-    defer expected_builder.deinit();
-    const s = try service.defineWithHooks(&expected_builder, bundle.guest != null, bundle.hooks);
-    const m = try machines.define(&expected_builder);
-    const clone = try clones.define(&expected_builder, m);
-    const graph = try @import("graph.zig").define(&expected_builder, m);
-    const validators = try @import("clone_validation.zig").define(&expected_builder, m, clone);
-    const helper_entries = [4]Id{
-        try @import("recovery.zig").define(&expected_builder, m),
-        try @import("recovery.zig").storage(&expected_builder, m),
-        validators.context,
-        validators.rebase,
-    };
-    const failure = try expected_builder.scalar(void);
-    const original = expected_builder.module(s.entry, failure);
+    return evidence;
+}
+
+fn validateDefined(
+    scratch: std.mem.Allocator,
+    admitted: *const artifact.Admitted,
+    definition: *const SourceDefinition,
+    evidence: Evidence,
+) ![]const source.RecoveryBinding {
+    const bundle = admitted.content.value;
+    const original = definition.module();
     const module = if (evidence.derivation) |d| d.residual else original;
     const parameters = try source.recovery.parameters(
         scratch,
@@ -410,31 +706,40 @@ pub fn validate(a: std.mem.Allocator, admitted: *const artifact.Admitted) !void 
         admitted.program.program(),
         evidence.recovery,
     );
-    var anchors: []const artifact.Anchor = undefined;
-    var branch_returns: []const Id = undefined;
-    var template_entries: []const Id = undefined;
+    var specialized: ?source.specialize.Output = null;
+    defer if (specialized) |*out| out.deinit();
     if (evidence.derivation) |d| {
-        var out = try validatedDerivation(scratch, admitted, original, s.entry, m.program, d);
-        defer out.deinit();
-        anchors = try anchorMap(scratch, &expected_builder, s, clone, parameters, &out);
-        branch_returns = try functionMap(scratch, clone.instantiate, parameters, &out);
-        template_entries = try functionMap(scratch, graph.template, parameters, &out);
-    } else {
-        if (bundle.specialization != null or bundle.guest != null) return error.InvalidRealization;
-        anchors = try anchorMap(scratch, &expected_builder, s, clone, parameters, null);
-        branch_returns = try functionMap(scratch, clone.instantiate, parameters, null);
-        template_entries = try functionMap(scratch, graph.template, parameters, null);
+        specialized = try validatedDerivation(
+            scratch,
+            admitted,
+            original,
+            definition.service.entry,
+            definition.machine.program,
+            d,
+        );
+    } else if (bundle.specialization != null or bundle.guest != null) {
+        return error.InvalidRealization;
     }
+    const out = if (specialized) |*value| value else null;
+    const anchors = try anchorMap(
+        scratch,
+        &definition.builder,
+        definition.service,
+        definition.clone,
+        parameters,
+        out,
+    );
     try validateRecovery(
         scratch,
         admitted,
-        &expected_builder,
-        failure,
-        helper_entries,
+        &definition.builder,
+        definition.failure,
+        definition.helpers,
         anchors,
-        branch_returns,
-        template_entries,
+        try functionMap(scratch, definition.clone.instantiate, parameters, out),
+        try functionMap(scratch, definition.template, parameters, out),
     );
+    return parameters;
 }
 
 fn validatedDerivation(

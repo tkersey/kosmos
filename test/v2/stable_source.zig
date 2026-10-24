@@ -624,7 +624,7 @@ fn residentFailureSweep(
     );
     var failed_after_mutation = false;
     for (0..allocation_count + 1) |failures| {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
         var resident = try fixture.restore(failing.allocator(), prepared);
         defer releaseResident(&resident);
         var statistics: std.meta.Child(
@@ -1688,6 +1688,73 @@ test "behavior: imported storage avoids payload copies and releases a large dead
     try testing.expectEqualStrings("small", store.blobs.items[1].bytes);
     const interned = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = "small" });
     try testing.expectEqual(1, interned.body.blob.id);
+}
+
+test "ownership: private index churn retains projections and allocation-free reclamation" {
+    const Store = @FieldType(@FieldType(@FieldType(Session, "driver"), "outer"), "store");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var store: Store = .{ .allocator = failing.allocator() };
+    defer store.deinit();
+    const original = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = "source" });
+    const projected = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = "projection" });
+    const Projection = @typeInfo(@TypeOf(Store.rememberProjection)).@"fn".param_types[1].?;
+    const key: Projection = .{ .blob = original.body.blob.id, .schema = 0, .field = 0 };
+    try store.rememberProjection(key, projected);
+    const root = try store.add(.{ .environment = .{ .values = &.{original}, .tail = null } });
+    const roots: horos.data.graph.Roots = .{ .current = root };
+    try populatePrivateIndexChurn(&store, 0);
+    try store.collect(roots);
+    for (1..17) |generation| {
+        try populatePrivateIndexChurn(&store, generation);
+        try collectPrivateIndexesWithoutAllocation(&store, &failing, roots);
+        try testing.expectEqualDeep(projected, store.data_projections.get(key).?.value);
+        try testing.expect(store.blob_alive.items[@intCast(projected.body.blob.id)]);
+        try testing.expectEqualStrings(
+            "projection",
+            store.blobs.items[@intCast(projected.body.blob.id)].bytes,
+        );
+        const same = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = "source" });
+        try testing.expectEqualDeep(original, same);
+        try testing.expectEqual(128, store.free_blobs.items.len);
+        for (store.free_blobs.items, 2..) |id, expected| try testing.expectEqual(expected, id);
+    }
+    try store.replace(root, .{ .environment = .{ .values = &.{}, .tail = null } });
+    try collectPrivateIndexesWithoutAllocation(&store, &failing, roots);
+    try testing.expect(store.data_projections.get(key) == null);
+    try testing.expectEqual(130, store.free_blobs.items.len);
+    for (store.free_blobs.items[0..128], 2..) |id, expected| try testing.expectEqual(expected, id);
+    try testing.expectEqualSlices(usize, &.{ 0, 1 }, store.free_blobs.items[128..]);
+}
+
+fn populatePrivateIndexChurn(store: anytype, generation: usize) !void {
+    for (0..64) |index| {
+        var encoded: [16]u8 = undefined;
+        std.mem.writeInt(u64, encoded[0..8], generation, .little);
+        std.mem.writeInt(u64, encoded[8..16], index * 2, .little);
+        const original = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = &encoded });
+        std.mem.writeInt(u64, encoded[8..16], index * 2 + 1, .little);
+        const projected = try store.literal(&.{.bytes}, .{ .schema = 0, .bytes = &encoded });
+        try store.rememberProjection(.{
+            .blob = original.body.blob.id,
+            .schema = 0,
+            .field = index,
+        }, projected);
+    }
+}
+
+fn collectPrivateIndexesWithoutAllocation(
+    store: anytype,
+    failing: *testing.FailingAllocator,
+    roots: horos.data.graph.Roots,
+) !void {
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+    }
+    try store.collect(roots);
+    try testing.expect(!failing.has_induced_failure);
 }
 
 test "behavior: borrow admission distinguishes older from fresh references through return clauses" {
@@ -4563,7 +4630,9 @@ fn residentTransitionAllocations(
     control: horos.data.invocation.Control,
     checkpoint_mode: bool,
 ) !usize {
-    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var counting = testing.FailingAllocator.init(testing.allocator, .{
+        .resize_fail_index = 0,
+    });
     var resident = try fixture.restore(counting.allocator(), prepared);
     defer releaseResident(&resident);
     var statistics: std.meta.Child(

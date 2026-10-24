@@ -46,9 +46,9 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     try emitLoop(e, bytes, read, d, optional_byte, base);
     try emitLoopBody(e, bytes, d, byte, base);
     try emitFixed(e, fixed_bytes, d, byte);
-    try emitSkipMany(e, d);
+    const skip_shape = try emitSkip(e, read, d);
+    try emitSkipMany(e, d, skip_shape);
     try emitSkipFields(e, ids, d);
-    try emitSkip(e, read, d);
     return cache.finish(b, d);
 }
 
@@ -148,7 +148,7 @@ fn emitFixed(e: Author, fixed_bytes: Id, d: Definition, byte: Id) Error!void {
     )));
 }
 
-fn emitSkipMany(e: Author, d: Definition) Error!void {
+fn emitSkipMany(e: Author, d: Definition, skip_shape: Id) Error!void {
     const program = try e.param(d.skip_many, 0);
     const schema = try e.param(d.skip_many, 1);
     const input = try e.param(d.skip_many, 2);
@@ -160,19 +160,71 @@ fn emitSkipMany(e: Author, d: Definition) Error!void {
         projection.Program,
         "schemas",
     ), data.admission.SchemaFacts, "minimum"), schema);
-    const next = try e.b.variable(e.integer);
-    const more = try e.b.bind(next, try e.call(
-        d.skip,
-        &.{ program, schema, input, offset },
-    ), try e.call(d.skip_many, &.{
-        program, schema, input, try e.b.reference(next), try e.binary(.integer_sub, count, e.one),
-    }));
+    const descriptor = try projection.schema(data.program.Schema, e.b);
+    const loop = try e.b.declare(&.{
+        e.b.values.items[@intCast(program)].schema, descriptor,
+        try e.b.schema(.bytes),                     e.integer,
+        e.integer,
+    }, e.integer, &.{}, &.{});
+    try emitSkipManyLoop(e, loop, skip_shape);
+    const schemas = try access.field(
+        e,
+        try access.code(e, program),
+        data.activation.Program,
+        "schemas",
+    );
+    const selected = try e.b.variable(descriptor);
+    const shape = try e.b.reference(selected);
+    const variants = e.b.schemas.items[@intCast(descriptor)].sum;
+    const names = @typeInfo(data.program.Schema).@"union".field_names;
+    const Case = std.meta.Elem(@FieldType(@FieldType(source.ast.Term, "match_sum"), "cases"));
+    var cases: [names.len]Case = undefined;
+    const variable = try e.call(loop, &.{ program, shape, input, offset, count });
+    inline for (names, 0..) |name, i| {
+        const tag: data.program.SchemaTag = @field(data.program.SchemaTag, name);
+        cases[i] = .{
+            .variable = try e.b.variable(variants[i]),
+            .body = if (scalarWidth(tag)) |width| try e.b.pure(try e.binary(
+                .integer_add,
+                offset,
+                try e.binary(.integer_mul, count, try e.b.constant(u64, width)),
+            )) else variable,
+        };
+    }
+    const dispatched = try e.b.bind(
+        selected,
+        try e.b.pure(try e.required(schemas, schema)),
+        try e.b.term(.{ .match_sum = .{ .value = shape, .cases = &cases } }),
+    );
     const done = try e.b.pure(offset);
     try e.b.define(d.skip_many, try e.when(try e.binary(.equal, count, e.zero), done, try e.when(
         try e.binary(.equal, minimum, e.zero),
         done,
-        more,
+        dispatched,
     )));
+}
+
+fn emitSkipManyLoop(e: Author, loop: Id, skip_shape: Id) Error!void {
+    const loop_program = try e.param(loop, 0);
+    const loop_shape = try e.param(loop, 1);
+    const loop_input = try e.param(loop, 2);
+    const loop_offset = try e.param(loop, 3);
+    const loop_count = try e.param(loop, 4);
+    const next = try e.b.variable(e.integer);
+    const more = try e.b.bind(next, try e.call(skip_shape, &.{
+        loop_program, loop_shape, loop_input, loop_offset,
+    }), try e.call(loop, &.{
+        loop_program,
+        loop_shape,
+        loop_input,
+        try e.b.reference(next),
+        try e.binary(.integer_sub, loop_count, e.one),
+    }));
+    try e.b.define(loop, try e.when(
+        try e.binary(.equal, loop_count, e.zero),
+        try e.b.pure(loop_offset),
+        more,
+    ));
 }
 
 fn emitSkipFields(e: Author, ids: Id, d: Definition) Error!void {
@@ -201,7 +253,7 @@ fn emitSkipFields(e: Author, ids: Id, d: Definition) Error!void {
     } } }));
 }
 
-fn emitSkip(e: Author, read: Id, d: Definition) Error!void {
+fn emitSkip(e: Author, read: Id, d: Definition) Error!Id {
     const program = try e.param(d.skip, 0);
     const schema = try e.param(d.skip, 1);
     const input = try e.param(d.skip, 2);
@@ -213,6 +265,14 @@ fn emitSkip(e: Author, read: Id, d: Definition) Error!void {
         "schemas",
     );
     const descriptor = try projection.schema(data.program.Schema, e.b);
+    const skip_shape = try e.b.declare(&.{
+        e.b.values.items[@intCast(program)].schema, descriptor,
+        try e.b.schema(.bytes),                     e.integer,
+    }, e.integer, &.{}, &.{});
+    const shape_program = try e.param(skip_shape, 0);
+    const selected = try e.param(skip_shape, 1);
+    const shape_input = try e.param(skip_shape, 2);
+    const shape_offset = try e.param(skip_shape, 3);
     const variants = e.b.schemas.items[@intCast(descriptor)].sum;
     const names = @typeInfo(data.program.Schema).@"union".field_names;
     const Case = std.meta.Elem(@FieldType(@FieldType(source.ast.Term, "match_sum"), "cases"));
@@ -221,13 +281,37 @@ fn emitSkip(e: Author, read: Id, d: Definition) Error!void {
         const variable = try e.b.variable(variants[i]);
         const shape = try e.b.reference(variable);
         const tag: data.program.SchemaTag = @field(data.program.SchemaTag, name);
-        const body = try emitSkipShape(e, read, d, program, input, offset, shape, tag);
+        const body = try emitSkipShape(
+            e,
+            read,
+            d,
+            shape_program,
+            shape_input,
+            shape_offset,
+            shape,
+            tag,
+        );
         cases[i] = .{ .variable = variable, .body = body };
     }
-    try e.b.define(d.skip, try e.b.term(.{ .match_sum = .{
-        .value = try e.required(schemas, schema),
+    try e.b.define(skip_shape, try e.b.term(.{ .match_sum = .{
+        .value = selected,
         .cases = &cases,
     } }));
+    try e.b.define(d.skip, try e.call(skip_shape, &.{
+        program, try e.required(schemas, schema), input, offset,
+    }));
+    return skip_shape;
+}
+
+fn scalarWidth(comptime tag: data.program.SchemaTag) ?u64 {
+    return switch (tag) {
+        .unit => 0,
+        .boolean, .u8, .i8 => 1,
+        .u16, .i16 => 2,
+        .u32, .i32, .enumeration => 4,
+        .u64, .i64 => 8,
+        else => null,
+    };
 }
 
 fn emitSkipShape(
@@ -238,16 +322,9 @@ fn emitSkipShape(
     input: Id,
     offset: Id,
     shape: Id,
-    tag: data.program.SchemaTag,
+    comptime tag: data.program.SchemaTag,
 ) Error!Id {
-    const width: ?u64 = switch (tag) {
-        .unit => 0,
-        .boolean, .u8, .i8 => 1,
-        .u16, .i16 => 2,
-        .u32, .i32, .enumeration => 4,
-        .u64, .i64 => 8,
-        else => null,
-    };
+    const width = scalarWidth(tag);
     const count = try e.b.variable(read);
     const decoded = try e.b.reference(count);
     return if (width) |n| try e.b.pure(try e.binary(

@@ -796,3 +796,342 @@ fn expectInputCuts(
         try std.testing.expect(cut < max_cuts);
     }
 }
+
+test "generated source transformer emits reusable checked scalar and layout candidates" {
+    const transformation = @import("semantic/transformation.zig");
+    var producer_builder = source.Builder.init(a);
+    defer producer_builder.deinit();
+    var producer = try support.prepare(try transformation.scalar(&producer_builder));
+    defer producer.deinit();
+    for ([_]u64{ 9, 37 }) |key| {
+        var subject_builder = source.Builder.init(a);
+        defer subject_builder.deinit();
+        const original = try transformationSubject(&subject_builder, key);
+        const bytes = try projection.encode(transformation.Input, a, .{ .module = original });
+        defer a.free(bytes);
+        var proposal_value = try runGenerated(&producer, bytes);
+        defer proposal_value.deinit();
+        const proposed = proposal_value.value;
+        try std.testing.expectEqual(@as(usize, 1), proposed.steps.len);
+        try std.testing.expect(proposed.steps[0].rule == .scalar);
+        try validateGenerated(original, proposed, &.{});
+        try expectRejectedScalar(original, proposed);
+        try expectTransformedDynamic(original, proposed.selected, key);
+    }
+    try expectGeneratedLayout();
+}
+
+test "generated transformer reads actual generic semantic source" {
+    const compiler = @import("semantic/compiler.zig");
+    const transformation = @import("semantic/transformation.zig");
+    var definition = try compiler.SourceDefinition.init(a, false, .{});
+    defer definition.deinit();
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    var producer = try support.prepare(try transformation.scalar(&builder));
+    defer producer.deinit();
+    const original = definition.module();
+    const input = try projection.encode(transformation.Input, a, .{ .module = original });
+    defer a.free(input);
+    var proposed = try runGenerated(&producer, input);
+    defer proposed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposed.value.steps.len);
+    try std.testing.expectError(error.Capacity, validateGeneratedWithBudget(
+        original,
+        proposed.value,
+        &.{},
+        1_000_000,
+    ));
+    const allocated_bytes = try validateGeneratedWithBudget(
+        original,
+        proposed.value,
+        &.{},
+        (compiler.ValidationPolicy{}).work,
+    );
+    std.debug.print("generated source decoding allocated_bytes={d}\n", .{allocated_bytes});
+}
+
+fn emittedReferenceModule(b: *source.Builder, failure: bool) !source.Module {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const effect = try b.effect(.{
+        .identity = "source-reference/dispose",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const resumption = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const dispose = try b.declare(&.{resumption}, unit, &.{}, &.{});
+    try b.define(dispose, try b.term(.{ .dispose = try b.reference(b.parameter(dispose, 0)) }));
+    const entry = try b.declare(
+        if (failure) &.{ word, word } else &.{},
+        if (failure) word else unit,
+        &.{},
+        &.{},
+    );
+    const value = if (failure) try b.value(.{
+        .schema = word,
+        .expression = .{ .primitive = .{
+            .opcode = .integer_div,
+            .operands = &.{
+                try b.reference(b.parameter(entry, 0)),
+                try b.reference(b.parameter(entry, 1)),
+            },
+            .failures = &.{
+                .{ .kind = .arithmetic_overflow, .value = 0 },
+                .{ .kind = .division_by_zero, .value = 0 },
+            },
+        } },
+    }) else try b.primitive(unit, .constant, &.{}, 0);
+    try b.define(entry, try b.pure(value));
+    return b.module(entry, unit);
+}
+
+test "source references include emitted constants and failure literals" {
+    const compiler = @import("semantic/compiler.zig");
+    const relocation = source.relation.Relocation;
+    for ([_]bool{ false, true }) |failure| {
+        var builder = source.Builder.init(a);
+        defer builder.deinit();
+        const module = try emittedReferenceModule(&builder, failure);
+        try std.testing.expectEqual(@as(usize, 0), module.constants.len);
+        var compiled = try source.lower(a, module);
+        defer compiled.deinit();
+        try std.testing.expectEqual(@as(usize, 1), compiled.program.constants.len);
+        var references = try compiler.sourceReferences(a, module);
+        defer references.deinit();
+        try std.testing.expectEqualSlices(
+            u8,
+            &(try compiler.sourceModule(module)).digest,
+            &references.value.source,
+        );
+        const constants = references.value.users[@backingInt(relocation.Kind.constant)];
+        try std.testing.expectEqual(@as(usize, 1), constants.len);
+        const expected: []const relocation.Reference = &.{
+            .{ .kind = .value, .id = module.values.len - 1 },
+            .{ .kind = .term, .id = 0 },
+        };
+        try std.testing.expectEqualDeep(expected, constants[0]);
+        const unit_users = references.value.users[@backingInt(relocation.Kind.schema)][0];
+        var constant_schema = false;
+        for (unit_users) |reference| {
+            constant_schema = constant_schema or std.meta.eql(reference, relocation.Reference{
+                .kind = .constant,
+                .id = 0,
+            });
+        }
+        try std.testing.expect(constant_schema);
+    }
+}
+
+test "indexed generated layout reuses exact source facts and rejects omitted users" {
+    const compiler = @import("semantic/compiler.zig");
+    const transformation = @import("semantic/transformation.zig");
+    var subject = source.Builder.init(a);
+    defer subject.deinit();
+    const e = try Author.init(&subject);
+    const product = try subject.schema(.{ .product = &.{ e.integer, e.integer } });
+    const entry = try subject.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const value = try e.tuple(product, &.{ try e.param(entry, 0), try subject.constant(u64, 37) });
+    try subject.define(entry, try subject.pure(try e.field(value, 0)));
+    const original = subject.module(entry, e.unit);
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const driver = try transformation.indexedLayout(&builder);
+    var producer = try support.prepare(builder.module(driver, try builder.scalar(void)));
+    defer producer.deinit();
+    var references = try compiler.sourceReferences(a, original);
+    defer references.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try compiler.sourceModule(original)).digest,
+        &references.value.source,
+    );
+    var first = try runIndexedLayout(&producer, original, product, references.value);
+    defer first.deinit();
+    try validateGenerated(original, first.value, &.{product});
+    var successor_references = try compiler.sourceReferences(a, first.value.selected);
+    defer successor_references.deinit();
+    var second = try runIndexedLayout(
+        &producer,
+        first.value.selected,
+        product,
+        successor_references.value,
+    );
+    defer second.deinit();
+    try validateGenerated(first.value.selected, second.value, &.{product});
+    try std.testing.expect(data.record.equal(source.Module, original, second.value.selected));
+    const kind = @backingInt(source.relation.Relocation.Kind.value);
+    @constCast(references.value.users[kind])[@intCast(value)] = &.{};
+    var omitted = try runIndexedLayout(&producer, original, product, references.value);
+    defer omitted.deinit();
+    var admitted = try source.lower(a, omitted.value.selected);
+    defer admitted.deinit();
+    try std.testing.expectError(error.InvalidRelation, validateGenerated(
+        original,
+        omitted.value,
+        &.{product},
+    ));
+}
+
+fn runIndexedLayout(
+    producer: *const base.Prepared,
+    module: source.Module,
+    schema: u64,
+    references: @import("semantic/compiler.zig").SourceReferences,
+) !projection.Owned(@import("semantic/compiler.zig").RecordProposal) {
+    const transformation = @import("semantic/transformation.zig");
+    const input = try projection.encode(transformation.IndexedLayoutInput, a, .{
+        .module = module,
+        .layout = .{ .schema = schema, .coordinates = &.{ 1, 0 } },
+        .references = references,
+    });
+    defer a.free(input);
+    return runGenerated(producer, input);
+}
+
+fn transformationSubject(b: *source.Builder, key: u64) !source.Module {
+    const e = try Author.init(b);
+    const entry = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const input = try e.param(entry, 0);
+    const redundant = try e.binary(.integer_bit_or, input, input);
+    try b.define(entry, try b.pure(try e.binary(
+        .integer_bit_xor,
+        redundant,
+        try b.constant(u64, key),
+    )));
+    return b.module(entry, e.unit);
+}
+
+fn runGenerated(
+    producer: *const base.Prepared,
+    input: []const u8,
+) !projection.Owned(@import("semantic/compiler.zig").RecordProposal) {
+    var work = try base.Session.start(a, producer, input, .{});
+    defer work.deinit();
+    const outcome = try work.run(null);
+    try std.testing.expect(outcome == .completed);
+    const bytes = try work.bytes(&outcome.completed);
+    std.debug.print("generated transform input/output bytes={d}/{d}, base transitions={d}\n", .{
+        input.len, bytes.len, work.transitions,
+    });
+    return projection.decode(@import("semantic/compiler.zig").RecordProposal, a, bytes);
+}
+
+fn validateGenerated(
+    original: source.Module,
+    proposed: @import("semantic/compiler.zig").RecordProposal,
+    private_schemas: []const u64,
+) !void {
+    _ = try validateGeneratedWithBudget(
+        original,
+        proposed,
+        private_schemas,
+        (@import("semantic/compiler.zig").ValidationPolicy{}).work,
+    );
+}
+
+fn validateGeneratedWithBudget(
+    original: source.Module,
+    proposed: @import("semantic/compiler.zig").RecordProposal,
+    private_schemas: []const u64,
+    allocation_bytes_max: usize,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const storage = arena.allocator();
+    const evidence = try storage.alloc(source.relation.Step, proposed.steps.len);
+    var remaining = allocation_bytes_max;
+    for (proposed.steps, evidence) |record, *step|
+        step.* = try source.relation.decodeRecordStep(storage, record, &remaining);
+    try source.relation.validate(a, original, proposed.selected, evidence, .{
+        .private_schemas = private_schemas,
+        .work = 64_000_000,
+    });
+    return allocation_bytes_max - remaining;
+}
+
+fn expectTransformedDynamic(original: source.Module, selected: source.Module, key: u64) !void {
+    var before = try support.prepare(original);
+    defer before.deinit();
+    var after = try support.prepare(selected);
+    defer after.deinit();
+    for ([_]u64{ 0, 17, std.math.maxInt(u64) }) |value| {
+        var arguments: [8]u8 = undefined;
+        std.mem.writeInt(u64, &arguments, value, .little);
+        var prior = try base.Session.start(a, &before, &arguments, .{});
+        defer prior.deinit();
+        var successor = try base.Session.start(a, &after, &arguments, .{});
+        defer successor.deinit();
+        const prior_result = try prior.run(null);
+        const next_result = try successor.run(null);
+        try std.testing.expect(prior_result == .completed and next_result == .completed);
+        const expected_bytes = try prior.bytes(&prior_result.completed);
+        const actual_bytes = try successor.bytes(&next_result.completed);
+        try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+        try std.testing.expectEqual(value ^ key, std.mem.readInt(u64, actual_bytes[0..8], .little));
+        try std.testing.expect(successor.transitions < prior.transitions);
+    }
+}
+
+fn expectGeneratedLayout() !void {
+    const transformation = @import("semantic/transformation.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try Author.init(&b);
+    const product = try b.schema(.{ .product = &.{ e.integer, e.boolean } });
+    const entry = try b.declare(&.{ e.integer, e.boolean }, e.integer, &.{}, &.{});
+    const value = try e.tuple(product, &.{ try e.param(entry, 0), try e.param(entry, 1) });
+    try b.define(entry, try b.pure(try e.field(value, 0)));
+    const original = b.module(entry, e.unit);
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const driver = try transformation.layout(&builder);
+    var producer = try support.prepare(builder.module(driver, try builder.scalar(void)));
+    defer producer.deinit();
+    const input = try projection.encode(transformation.LayoutInput, a, .{
+        .module = original,
+        .layout = .{ .schema = product, .coordinates = &.{ 1, 0 } },
+    });
+    defer a.free(input);
+    var proposed = try runGenerated(&producer, input);
+    defer proposed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposed.value.steps.len);
+    try validateGenerated(original, proposed.value, &.{product});
+    const selected_fields = proposed.value.selected.schemas[@intCast(product)].product;
+    try std.testing.expectEqualSlices(u64, &.{ e.boolean, e.integer }, selected_fields);
+}
+
+fn expectRejectedScalar(
+    original: source.Module,
+    proposed: @import("semantic/compiler.zig").RecordProposal,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const storage = arena.allocator();
+    const mutant = try source.own(source.Module, storage, proposed.selected);
+    const scalar_rule = proposed.steps[0].rule.scalar;
+    const target = &@constCast(mutant.values)[@intCast(scalar_rule.value)];
+    for (original.values) |value| {
+        if (value.schema != target.schema or value.expression != .literal) continue;
+        target.* = value;
+        break;
+    }
+    var compiled = try source.lower(a, mutant);
+    defer compiled.deinit();
+    const evidence = [_]source.relation.Step{.{
+        .successor = mutant,
+        .rule = .{ .scalar = scalar_rule },
+    }};
+    try std.testing.expectError(
+        error.InvalidRelation,
+        source.relation.validate(a, original, mutant, &evidence, .{}),
+    );
+}

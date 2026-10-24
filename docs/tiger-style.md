@@ -104,7 +104,7 @@ Every required check must complete successfully on the delivered candidate.
 Stopped, skipped, timed-out and inconclusive runs remain outstanding. Record the
 actual commands and outcomes in the PR. Runtime qualification retains its
 600-second workflow budget. TigerStyle verification is exempt from that budget
-and remains required, with an independent 45-minute job timeout.
+and remains required, with an independent 10-minute job timeout.
 
 ## Run the adoption ratchet
 

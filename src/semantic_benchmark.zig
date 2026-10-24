@@ -292,6 +292,7 @@ const BenchmarkContext = struct {
     generic: *kosmos.RuntimeArtifact,
     instrumented: *kosmos.RuntimeArtifact,
     bootstrap: *native.Prepared,
+    proposal: *const kosmos.RuntimeCompiler.RecordProposal,
 };
 const WorkloadContext = struct {
     benchmark: BenchmarkContext,
@@ -302,6 +303,7 @@ const WorkloadContext = struct {
     selected: *kosmos.Prepared,
     observed: *kosmos.Prepared,
     specialized: *kosmos.RuntimeArtifact,
+    candidate: *kosmos.Prepared,
 };
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
@@ -332,6 +334,9 @@ pub fn main(init: std.process.Init) !void {
     );
     defer instrumented_meter.allocator().free(instrumented.bytes);
     defer instrumented.artifact.deinit();
+    var producer_meter = meter(a);
+    var proposed = try buildProposal(&producer_meter, init.io, &generic, &output.interface);
+    defer proposed.deinit();
     const context: BenchmarkContext = .{
         .a = a,
         .io = init.io,
@@ -339,6 +344,7 @@ pub fn main(init: std.process.Init) !void {
         .generic = &generic,
         .instrumented = &instrumented.artifact,
         .bootstrap = &bootstrap_prepared,
+        .proposal = &proposed.value,
     };
     for (std.meta.tags(Workload)) |kind| {
         if (filter == null or std.mem.eql(u8, filter.?, @tagName(kind)))
@@ -510,6 +516,14 @@ fn measureWorkload(context: BenchmarkContext, kind: Workload) !void {
     );
     defer construction.allocator().free(specialized.bytes);
     defer specialized.artifact.deinit();
+    var candidate_meter = meter(a);
+    var candidate = try buildCandidate(context, guest, kind, &candidate_meter);
+    defer candidate_meter.allocator().free(candidate.bytes);
+    defer candidate.artifact.deinit();
+    start = now(io);
+    var derived = try kosmos.Prepared.initWithRuntime(a, bytes, &candidate.artifact);
+    const candidate_prepare_ns = elapsed(io, start);
+    defer derived.deinit();
     start = now(io);
     var general = try kosmos.Prepared.initWithRuntime(a, bytes, context.generic);
     const generic_prepare_ns = elapsed(io, start);
@@ -529,6 +543,7 @@ fn measureWorkload(context: BenchmarkContext, kind: Workload) !void {
         .generic_prepare_ns = generic_prepare_ns,
         .specialized_prepare_ns = specialized_prepare_ns,
         .instrumented_prepare_ns = instrumented_prepare_ns,
+        .candidate_prepare_ns = candidate_prepare_ns,
     });
     const workload: WorkloadContext = .{
         .benchmark = context,
@@ -539,6 +554,7 @@ fn measureWorkload(context: BenchmarkContext, kind: Workload) !void {
         .selected = &selected,
         .observed = &observed_prepared,
         .specialized = &specialized.artifact,
+        .candidate = &derived,
     };
     for (0..3) |sample| try measureSample(workload, sample);
 }
@@ -627,12 +643,13 @@ fn measureReplicates(
     const kind = context.kind;
     for (0..3) |replicate| {
         inline for (.{
-            "generic-base", "specialized-base", "instrumented-base",
+            "generic-base", "specialized-base", "instrumented-base", "generated-candidate",
         }, 0..) |name, index| {
             const measured = try run(kosmos, io, a, switch (index) {
                 0 => context.general,
                 1 => context.selected,
-                else => context.observed,
+                2 => context.observed,
+                else => context.candidate,
             }, input, sample, trace_allocator, trace, false);
             try emit(output, .{
                 .phase = "execution",
@@ -644,6 +661,7 @@ fn measureReplicates(
                 .costs = measured,
             });
         }
+        try measureGuarded(context, sample, replicate, input, trace_allocator, trace);
     }
 }
 
@@ -975,4 +993,166 @@ fn bootstrapCut(
     }
     if (step.control == .reply) costs.effects += 1;
     costs.cuts += 1;
+}
+
+fn buildProposal(
+    resources: *kosmos.AllocationBudget,
+    io: std.Io,
+    generic: *const kosmos.RuntimeArtifact,
+    output: *std.Io.Writer,
+) !projection.Owned(kosmos.RuntimeCompiler.RecordProposal) {
+    const storage = resources.allocator();
+    var start = now(io);
+    var exported = try kosmos.RuntimeCompiler.exportSource(storage, generic);
+    defer exported.deinit();
+    const export_ns = elapsed(io, start);
+    start = now(io);
+    var builder = horos.source.Builder.init(storage);
+    defer builder.deinit();
+    const module = try kosmos.RuntimeTransformation.scalar(&builder);
+    var compiled = try horos.source.lower(storage, module);
+    defer compiled.deinit();
+    const image_length = try data.program_image.encodedLength(compiled.program);
+    const image_bytes = try storage.alloc(u8, image_length);
+    defer storage.free(image_bytes);
+    _ = try compiled.encode(storage, image_bytes);
+    var prepared = try @import("base/session.zig").Prepared.init(storage, image_bytes);
+    defer prepared.deinit();
+    const construction_ns = elapsed(io, start);
+    const input = try projection.encode(kosmos.RuntimeTransformation.Input, storage, .{
+        .module = exported.value.selected.module,
+        .first_value = 0,
+        .edits_max = 16,
+    });
+    defer storage.free(input);
+    start = now(io);
+    var producer = try @import("base/session.zig").Session.start(storage, &prepared, input, .{});
+    defer producer.deinit();
+    const outcome = try producer.run(null);
+    if (outcome != .completed) return error.ProducerFailed;
+    const result = try producer.bytes(&outcome.completed);
+    var proposed = try projection.decode(kosmos.RuntimeCompiler.RecordProposal, storage, result);
+    errdefer proposed.deinit();
+    if (proposed.value.steps.len != 16) return error.MissingGeneratedEdit;
+    try emit(output, .{
+        .phase = "generated-producer",
+        .source_export_ns = export_ns,
+        .construction_prepare_ns = construction_ns,
+        .execute_decode_ns = elapsed(io, start),
+        .image_bytes = image_bytes.len,
+        .input_bytes = input.len,
+        .output_bytes = result.len,
+        .base_work = producer.transitions,
+        .peak_bytes = resources.peak,
+        .source = std.fmt.bytesToHex(exported.value.selected.digest, .lower),
+        .first_value = 0,
+        .edits_max = 16,
+    });
+    return proposed;
+}
+
+fn buildCandidate(
+    context: BenchmarkContext,
+    guest: *const data.program_image.Admitted,
+    kind: Workload,
+    construction: *kosmos.AllocationBudget,
+) !BuiltArtifact {
+    var start = now(context.io);
+    const bytes = try kosmos.RuntimeCompiler.deriveRecord(
+        construction.allocator(),
+        context.generic,
+        guest,
+        context.proposal.*,
+        .{ .horos_package = context.generic.content.value.manifest.compiler.horos_package },
+    );
+    errdefer construction.allocator().free(bytes);
+    const derive_ns = elapsed(context.io, start);
+    start = now(context.io);
+    var candidate = try kosmos.RuntimeArtifact.init(context.a, bytes, artifact.digest(bytes));
+    errdefer candidate.deinit();
+    const admission_ns = elapsed(context.io, start);
+    var validation = meter(context.a);
+    start = now(context.io);
+    try kosmos.RuntimeCompiler.validateAgainst(validation.allocator(), &candidate, context.generic);
+    try emit(context.output, .{
+        .phase = "generated-candidate-construction",
+        .workload = @tagName(kind),
+        .derive_ns = derive_ns,
+        .admission_ns = admission_ns,
+        .independent_validation_ns = elapsed(context.io, start),
+        .construction_peak_bytes = construction.peak,
+        .validation_peak_bytes = validation.peak,
+        .artifact_bytes = bytes.len,
+        .executable_bytes = candidate.content.value.image.len,
+        .proof_bytes = candidate.content.value.evidence.len,
+        .artifact = std.fmt.bytesToHex(candidate.identity, .lower),
+    });
+    return .{ .bytes = bytes, .artifact = candidate, .admission_ns = admission_ns };
+}
+
+fn measureGuarded(
+    context: WorkloadContext,
+    sample: usize,
+    replicate: usize,
+    input: []const u8,
+    trace_allocator: std.mem.Allocator,
+    trace: *std.ArrayList(Step),
+) !void {
+    const io = context.benchmark.io;
+    var resources = meter(context.benchmark.a);
+    const a = resources.allocator();
+    const total_start = now(io);
+    var costs = [_]Costs{ .{}, .{} };
+    const prepared = [_]*const kosmos.Prepared{ context.general, context.candidate };
+    var statistics = [_]kosmos.Statistics{ .{}, .{} };
+    var side_resources = [_]kosmos.AllocationBudget{ meter(a), meter(a) };
+    var start = now(io);
+    var reference = try kosmos.Session.start(side_resources[0].allocator(), prepared[0], input);
+    defer reference.deinit();
+    costs[0].start_ns = elapsed(io, start);
+    start = now(io);
+    var candidate = try kosmos.Session.start(side_resources[1].allocator(), prepared[1], input);
+    defer candidate.deinit();
+    costs[1].start_ns = elapsed(io, start);
+    const sessions = [_]*kosmos.Session{ &reference, &candidate };
+    const run_context: RunContext = .{
+        .io = io,
+        .a = a,
+        .sample = sample,
+        .trace_allocator = trace_allocator,
+        .trace = trace,
+        .recording = false,
+    };
+    for (sessions, &statistics) |session, *stats| session.setStatistics(stats);
+    for (trace.items, 0..) |_, index| {
+        for (sessions, prepared, &costs) |session, selected, *cost| {
+            var control: protocol.Control = .none;
+            const more = try runCut(kosmos, selected, session, run_context, cost, index, &control);
+            if (more != (index + 1 < trace.items.len)) return error.GuardTraceChanged;
+        }
+        if (statistics[0].transitions != statistics[1].transitions) return error.GuardWorkChanged;
+    }
+    for (&costs, statistics, side_resources) |*cost, stats, side| {
+        cost.guest_work = stats.transitions;
+        cost.base_work = stats.base_transitions;
+        cost.copied_blob_bytes = stats.storage.copied_blob_bytes;
+        cost.live_bytes = side.live;
+        cost.peak_bytes = side.peak;
+    }
+    try emit(context.benchmark.output, .{
+        .phase = "execution",
+        .workload = @tagName(context.kind),
+        .sample = sample,
+        .replicate = replicate,
+        .input_bytes = input.len,
+        .realization = "generated-candidate-reference-guarded",
+        .guard_scope = "paired generic and candidate cuts checked against independent native trace",
+        .native_trace_preparation = "separate direct-native row",
+        .reference = costs[0],
+        .candidate = costs[1],
+        .total_ns = elapsed(io, total_start),
+        .total_base_work = costs[0].base_work + costs[1].base_work,
+        .combined_live_bytes = resources.live,
+        .combined_peak_bytes = resources.peak,
+    });
 }

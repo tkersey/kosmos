@@ -57,6 +57,26 @@ instead of eagerly serializing the entire tree. Exported bytes are materialized
 only when demanded. Stable guest IDs and canonical PST3 projection remain the
 public observation.
 
+Large encoded aggregates use a bounded cache of 256 projection ranges keyed by
+the exact source blob, schema, coordinate and operation. Hits still create the
+same guest values and allocations. Collection first establishes live blobs,
+then drops dead cache entries and remaps surviving keys. Public projection omits
+the cache and hydration starts it empty; exact outer execution retains it.
+Recovery validates the cache map, source blob/schema, slot and operation coordinate,
+then recomputes retained ranges in coordinate order before accepting the machine.
+Validation starts with an empty private cache and adds each original entry only after
+its complete range matches the source. Collection traversal can reuse an already
+verified prefix; supplied unchecked ranges never seed later checks. A matching byte
+bound alone does not establish a range. The original machine remains unchanged.
+Admitted caches contain at most 256 entries. Temporary ordering and verified-prefix
+storage have the same bound; scalar traversal retains checked width arithmetic.
+On a sequence miss, traversal can resume after the greatest retained earlier
+coordinate with the same blob, schema and element operation. Backward reads and
+collisions preserve these exact-key checks; the search adds no retained entries.
+Repeated scalar skips use checked count-times-width arithmetic. Variable-width
+skips retain their order and reuse one resolved schema descriptor. Zero counts
+still avoid schema access; zero-width schemas avoid descriptor access.
+
 After `blob_length` retires a backing of at least 64 KiB from the current frame,
 the authored transition runs ordinary reachability collection. A surviving direct
 alias avoids that trace; captured and indirect aliases remain tracing roots.
@@ -157,6 +177,75 @@ work, pending-control disposition and publication authority. It returns:
 The expected environmental request identity is preserved because the guest
 checkpoint is unchanged. Kosmos cannot determine whether a host has dispatched
 that request; checking active/unknown delivery belongs to the enclosing owner.
+
+## Semantic source and checked construction
+
+`RuntimeCompiler.exportSource` reconstructs and checks the actual selected
+artifact before returning its source bundle. The bundle distinguishes the
+approved root, selected module, guest scope, recovery interfaces and four helper
+images. It does not substitute the packaged generic module for a selected
+realization. Horos `source.slice.extract` admits the complete module, extracts
+the selected function's dependency closure and can require an effect-free slice.
+The resulting source is ordinary editable Horos data.
+
+`RuntimeCompiler.deriveRecord` packages a proposed module and finite relation
+steps as an admitted candidate. `validateAgainst` separately checks it against
+the owner-selected ancestor. The new artifact and lowering contracts are
+`kosmos.semantic-artifact/3` and `kosmos.source-relation/1`; historical `/2` decoding
+and verification retain their original meaning. A candidate cannot supply its
+own approved root or convert successful compilation into validation.
+
+The Horos relation checker reconstructs scalar simplifications, closed pure
+inlining, private product coordinate permutations, catalog relocation and
+existing specialization steps. It compares complete successor modules and
+rejects unsupported changes. Kosmos then derives recovery mappings and checks
+the final runtime and helper images against that source. Intermediate evidence
+uses reconstructible canonical byte deltas; every reconstructed step remains
+subject to the same checker. Resource exhaustion is not approval.
+
+`RuntimeTransformation.scalar` and `.layout` construct ordinary Horos producer
+programs. Their inputs contain source records and selected objectives; their
+outputs contain candidate source and relation records. Native compilation and
+validation consume those outputs without choosing replacement code. Producer
+execution, candidate admission, validation and retained-state realization are
+separate operations.
+
+`RuntimeExperiment` runs an unapproved candidate without live guest custody.
+Its bounded pumps retain initialization, execution, observation and projection
+progress. The enclosing owner must independently execute its approved reference,
+admit and compare complete guest state, observation and work, and publish only
+the reference successor. Finite agreement does not authorize an ordinary
+realization switch. Real guest cancellation remains the reference owner's duty.
+
+## Views and isolated interpretations
+
+Guest views default to metadata. `RuntimeViews.captureDetailed` accepts explicit
+node, field and blob-range disclosure, reports value coverage, and includes the
+schema information needed to interpret authorized values. Borrowed PST3 decoding
+avoids copying an entire payload merely to inspect metadata; returned projections
+own their disclosed data. Outer-capsule inspection exposes the selected
+runtime's private execution state under a separate binding; it is not a
+committed guest cut.
+
+Complete guest snapshots require explicit `snapshot` disclosure together with
+all graph nodes and all node values. The returned optional state owns its data
+and reconstructs the exact canonical checkpoint under the same binding. Partial
+scopes, bounded blob slices and outer-capsule snapshot requests are rejected.
+The default path carries no snapshot and makes no full-payload copy. Disclosing
+this state supplies analysis data; it grants no restore, execution or custody right.
+
+`RuntimeAnalysis.interpretation` builds an ordinary pure driver with an explicit
+sequence of assumed replies, request history, guest-work allowance and stopping
+disposition. It can start from admitted arguments or an admitted snapshot.
+Unavailable replies remain unavailable; partial execution returns state for a
+later hypothetical continuation. Generated source may instead compose disclosed
+pure functions into its own interpretation. Neither source admission nor an
+analysis result grants guest acquisition, settlement or custody.
+
+The legacy `hypotheticalReply` helper stops before applying a reply when its
+guest-work allowance is exhausted. The multi-reply interpretation applies supplied
+replies at pending requests without consuming guest work, including a retained
+request with zero allowance; further guest steps still require remaining allowance.
 
 ## Evidence and physical limits
 

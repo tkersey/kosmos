@@ -260,9 +260,18 @@ fn emitRun(
         try e.field(try e.b.reference(marked_blobs), 1),
     );
     result = try control.withRoots(e, result, try e.b.reference(new_roots));
+    const cache = try e.b.variable(m.cache.schema);
+    result = try e.replace(result, @backingInt(machines.Field.cache), try e.b.reference(cache));
     var body = try e.b.bind(new_roots, try e.call(roots.rebase, &.{
         try control.roots(e, m, input), try e.field(try e.b.reference(marked), 0),
     }), try e.b.pure(result));
+    body = try e.b.bind(cache, try e.call(try @import("projection_cache.zig").rebase(
+        e,
+        m,
+        blobs.map,
+    ), &.{
+        try m.field(e, input, .cache), try e.field(try e.b.reference(marked_blobs), 0),
+    }), body);
     body = try emitRunBody(m, e, rebase, marked, marked_blobs, new_nodes, body);
     body = try e.b.bind(marked_blobs, try e.call(mark_blobs, &.{
         input,
