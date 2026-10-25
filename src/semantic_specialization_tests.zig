@@ -940,7 +940,14 @@ test "indexed generated layout reuses exact source facts and rejects omitted use
     const product = try subject.schema(.{ .product = &.{ e.integer, e.integer } });
     const entry = try subject.declare(&.{e.integer}, e.integer, &.{}, &.{});
     const value = try e.tuple(product, &.{ try e.param(entry, 0), try subject.constant(u64, 37) });
-    try subject.define(entry, try subject.pure(try e.field(value, 0)));
+    const left = try subject.variable(e.integer);
+    const right = try subject.variable(e.integer);
+    const result = try e.binary(.integer_add, try e.field(value, 0), try subject.reference(left));
+    try subject.define(entry, try subject.term(.{ .unpack_product = .{
+        .value = value,
+        .variables = &.{ left, right },
+        .body = try subject.pure(result),
+    } }));
     const original = subject.module(entry, e.unit);
     var builder = source.Builder.init(a);
     defer builder.deinit();
@@ -957,6 +964,15 @@ test "indexed generated layout reuses exact source facts and rejects omitted use
     var first = try runIndexedLayout(&producer, original, product, references.value);
     defer first.deinit();
     try validateGenerated(original, first.value, &.{product});
+    try expectRepeatedLayoutSites(
+        &producer,
+        original,
+        product,
+        value,
+        references.value,
+        first.value,
+    );
+    try expectFullScanLayout(original, product, first.value);
     var successor_references = try compiler.sourceReferences(a, first.value.selected);
     defer successor_references.deinit();
     var second = try runIndexedLayout(
@@ -979,6 +995,67 @@ test "indexed generated layout reuses exact source facts and rejects omitted use
         omitted.value,
         &.{product},
     ));
+}
+
+fn expectRepeatedLayoutSites(
+    producer: *const base.Prepared,
+    module: source.Module,
+    schema: u64,
+    value: u64,
+    references: @import("semantic/compiler.zig").SourceReferences,
+    expected: @import("semantic/compiler.zig").RecordProposal,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    const relocation = source.relation.Relocation;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const storage = arena.allocator();
+    const repeated = try source.own(compiler.SourceReferences, storage, references);
+    const users = repeated.users[@backingInt(relocation.Kind.value)][@intCast(value)];
+    var value_user = false;
+    var term_user = false;
+    for (users) |user| {
+        value_user = value_user or user.kind == .value;
+        term_user = term_user or user.kind == .term;
+    }
+    try std.testing.expect(value_user and term_user);
+    inline for (.{
+        .{ relocation.Kind.schema, schema },
+        .{ relocation.Kind.value, value },
+    }) |row| {
+        const table = @constCast(repeated.users[@backingInt(row[0])]);
+        const index: usize = @intCast(row[1]);
+        const duplicated = try std.mem.concat(storage, relocation.Reference, &.{
+            table[index], table[index],
+        });
+        std.mem.reverse(relocation.Reference, duplicated);
+        table[index] = duplicated;
+    }
+    var actual = try runIndexedLayout(producer, module, schema, repeated);
+    defer actual.deinit();
+    try std.testing.expect(data.record.equal(compiler.RecordProposal, expected, actual.value));
+}
+
+fn expectFullScanLayout(
+    module: source.Module,
+    schema: u64,
+    expected: @import("semantic/compiler.zig").RecordProposal,
+) !void {
+    const compiler = @import("semantic/compiler.zig");
+    const transformation = @import("semantic/transformation.zig");
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const entry = try transformation.layout(&builder);
+    var producer = try support.prepare(builder.module(entry, try builder.scalar(void)));
+    defer producer.deinit();
+    const input = try projection.encode(transformation.LayoutInput, a, .{
+        .module = module,
+        .layout = .{ .schema = schema, .coordinates = &.{ 1, 0 } },
+    });
+    defer a.free(input);
+    var actual = try runGenerated(&producer, input);
+    defer actual.deinit();
+    try std.testing.expect(data.record.equal(compiler.RecordProposal, expected, actual.value));
 }
 
 fn runIndexedLayout(

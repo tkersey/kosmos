@@ -5,11 +5,10 @@ const index = @import("source_references.zig");
 const Id = source.Id;
 pub const Sites = struct { values: []const Id, terms: []const Id };
 const Kind = source.relation.Relocation.Kind;
-const Definition = struct { entry: Id, roots: Id, users: Id, add: Id };
+const Definition = struct { entry: Id, roots: Id, users: Id };
 
 pub fn define(b: *source.Builder) !Id {
     const e = try Author.init(b);
-    const ids = try projection.schema([]const Id, b);
     const refs = try projection.schema([]const index.Reference, b);
     const tables = try projection.schema([]const []const []const index.Reference, b);
     const sites = try projection.schema(Sites, b);
@@ -17,9 +16,7 @@ pub fn define(b: *source.Builder) !Id {
         .entry = try b.declare(&.{ tables, e.integer }, sites, &.{}, &.{}),
         .roots = try b.declare(&.{ tables, refs, e.integer, sites }, sites, &.{}, &.{}),
         .users = try b.declare(&.{ refs, e.integer, sites }, sites, &.{}, &.{}),
-        .add = try b.declare(&.{ ids, e.integer, e.integer }, ids, &.{}, &.{}),
     };
-    try defineAdd(e, d);
     try defineUsers(e, d);
     try defineRoots(e, d);
     const users = try e.param(d.entry, 0);
@@ -41,24 +38,13 @@ fn kindIs(e: Author, ref: Id, kind: Kind) !Id {
     return e.binary(.equal, tag, try e.b.constant(u32, @backingInt(kind)));
 }
 
-fn defineAdd(e: Author, d: Definition) !void {
-    const ids = try e.param(d.add, 0);
-    const wanted = try e.param(d.add, 1);
-    const cursor = try e.param(d.add, 2);
-    const len = try e.b.primitive(e.integer, .sequence_length, &.{ids}, 0);
-    const found = try e.when(
-        try e.binary(.equal, try e.required(ids, cursor), wanted),
-        try e.b.pure(ids),
-        try e.call(d.add, &.{ ids, wanted, try next(e, cursor) }),
-    );
-    const append = try e.b.primitive(
+fn append(e: Author, ids: Id, wanted: Id) !Id {
+    return e.b.pure(try e.b.primitive(
         e.b.values.items[@intCast(ids)].schema,
         .sequence_append,
         &.{ ids, wanted },
         0,
-    );
-    const finished = try e.b.pure(append);
-    try e.b.define(d.add, try e.when(try e.binary(.less, cursor, len), found, finished));
+    ));
 }
 
 fn defineUsers(e: Author, d: Definition) !void {
@@ -76,7 +62,7 @@ fn defineUsers(e: Author, d: Definition) !void {
             if (position == 1) try e.b.reference(updated) else try e.field(sites, 1),
         };
         const changed = try e.tuple(try projection.schema(Sites, e.b), &fields);
-        const added = try e.call(d.add, &.{ try e.field(sites, position), id, e.zero });
+        const added = try append(e, try e.field(sites, position), id);
         body.* = try e.b.bind(updated, added, try e.call(d.users, &.{
             refs, try next(e, cursor), changed,
         }));
@@ -108,7 +94,7 @@ fn defineRoots(e: Author, d: Definition) !void {
     const recurse = try e.call(d.roots, &.{
         tables, roots, try next(e, cursor), try e.b.reference(updated),
     });
-    const insert = try e.call(d.add, &.{ try e.field(sites, 0), id, e.zero });
+    const insert = try append(e, try e.field(sites, 0), id);
     const collect = try e.b.bind(added, insert, try e.b.bind(
         updated,
         try e.call(d.users, &.{ refs, e.zero, initial }),
