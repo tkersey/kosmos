@@ -97,9 +97,19 @@ jobs:
           test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
           bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
-          test "$bytes" -le 4294967296 || exit 0
           test ! -e .zig-cache-upload
           cp -al .zig-cache .zig-cache-upload
+          while IFS= read -r -d '' object; do
+            test "$bytes" -gt 4294967296 || break
+            object=${object#* }
+            removed=$(find "$object" -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+            rm -rf -- "$object"
+            bytes=$((bytes - removed))
+          done < <(find .zig-cache-upload/o -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -zn)
+          bytes=$(find .zig-cache-upload -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+          echo "Upload snapshot: $bytes bytes"
+          test "$bytes" -le 4294967296 || exit 0
+          test -n "$(find .zig-cache-upload/o -type f -size +0c -print -quit)" || exit 0
           echo 'save=true' >> "$GITHUB_OUTPUT"
       - name: Retain completed native compilation before execution
         if: steps.native_cache_size.outputs.save == 'true'
