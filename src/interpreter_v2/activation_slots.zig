@@ -532,9 +532,17 @@ pub fn Slots(comptime Value: type) type {
         }
 
         fn drop(self: *Self, node: Node) void {
+            switch (node) {
+                .empty => {},
+                .page => |page| self.dropPage(page),
+                .branch => |branch| self.dropBranch(branch),
+            }
+        }
+
+        noinline fn dropBranch(self: *Self, root: *Branch) void {
             const Visit = struct { node: Node, release: bool = false };
             var pending: [maximum_depth * width + 1]Visit = undefined;
-            pending[0] = .{ .node = node };
+            pending[0] = .{ .node = .{ .branch = root } };
             var length: usize = 1;
             while (length != 0) {
                 length -= 1;
