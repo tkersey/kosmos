@@ -90,9 +90,12 @@ pub fn guestCut(
             .store = &session.store,
             .aggregate_storage = .structured,
         };
-        const fields = try values.split(saved);
-        if (fields.fields.len != 2) return error.InvalidRecovery;
-        return reify(a, session, selected, guest, &values, fields.fields[0]);
+        const machine = try privateField(
+            &values,
+            saved,
+            selected.content.value.recovery.layout.service_machine,
+        );
+        return reify(a, session, selected, guest, &values, machine);
     }
     return error.MissingRecoveryAnchor;
 }
@@ -105,7 +108,13 @@ fn reify(
     values: *Values,
     machine: g.Value,
 ) !data.state_image.Owned {
-    try bindGuest(a, values, machine, guest);
+    try bindGuest(
+        a,
+        values,
+        machine,
+        guest,
+        selected.content.value.recovery.layout.machine_program,
+    );
     const input = try arguments(
         a,
         session.program.schemas,
@@ -135,16 +144,25 @@ fn bindGuest(
     values: *Values,
     machine: g.Value,
     guest: *const data.program_image.Admitted,
+    program_field: u64,
 ) !void {
-    const fields = try values.split(machine);
-    if (fields.fields.len != 5) return error.InvalidRecovery;
+    const program = try privateField(values, machine, program_field);
     const expected = try projection.programBytes(a, guest);
     defer a.free(expected);
     if (!std.mem.eql(
         u8,
         expected,
-        try values.bytes(&fields.fields[0]),
+        try values.bytes(&program),
     )) return error.GuestIdentityMismatch;
+}
+
+fn privateField(values: *Values, value: g.Value, index: u64) !g.Value {
+    if (value.schema >= values.schemas.len) return error.InvalidRecovery;
+    const schema = values.schemas[@intCast(value.schema)];
+    if (schema != .product or index >= schema.product.len) return error.InvalidRecovery;
+    const fields = try values.split(value);
+    if (fields.fields.len != schema.product.len) return error.InvalidRecovery;
+    return fields.fields[@intCast(index)];
 }
 
 fn arguments(
@@ -189,7 +207,11 @@ fn inspectAnchor(
             const machine = if (anchor.role == .committed_machine)
                 parameters[0]
             else
-                (try values.split(parameters[0])).fields[0];
+                try privateField(
+                    values,
+                    parameters[0],
+                    selected.content.value.recovery.layout.service_machine,
+                );
             var recovered = try reify(
                 temporary,
                 session,
@@ -203,10 +225,12 @@ fn inspectAnchor(
         },
         .clone_context, .clone_rebase => {
             const helper_index: usize = if (anchor.role == .clone_context) 2 else 3;
-            const machine = if (anchor.role == .clone_context) (try values.split(
-                parameters[0],
-            )).fields[0] else parameters[0];
-            try bindGuest(temporary, values, machine, guest);
+            const layout = selected.content.value.recovery.layout;
+            const machine = if (anchor.role == .clone_context)
+                try privateField(values, parameters[0], layout.clone_machine)
+            else
+                parameters[0];
+            try bindGuest(temporary, values, machine, guest, layout.machine_program);
             const bytes = try arguments(
                 temporary,
                 session.program.schemas,

@@ -187,12 +187,14 @@ fn emitSequenceGet(o: Operands, body_initial: Id) Error!Id {
     const no = try e.b.bind(absent, try e.call(c.v.natural, &.{
         try e.required(sum_types, e.zero), e.zero,
     }), try c.finish(try c.make(c.input, o.result_schema, e.zero, &.{try e.b.reference(absent)})));
-    const yes = try e.b.bind(item, try e.call(
-        c.collection.item,
-        &.{ c.input, o.view, o.index },
-    ), try c.finish(try c.make(try e.field(try e.b.reference(item), 0), o.result_schema, e.one, &.{
+    const selected = try e.call(
+        c.collection.cached_item,
+        &.{ c.input, o.left, o.view, o.index },
+    );
+    const present = try c.make(try e.field(try e.b.reference(item), 0), o.result_schema, e.one, &.{
         try e.field(try e.b.reference(item), 1),
-    })));
+    });
+    const yes = try e.b.bind(item, selected, try c.finish(present));
     const get = try e.b.bind(o.right_var, o.read_right, try e.b.bind(
         o.index_var,
         o.read_index,

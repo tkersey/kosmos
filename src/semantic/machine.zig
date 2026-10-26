@@ -5,6 +5,7 @@ const source = @import("horos").source;
 const projection = @import("projection.zig");
 const table = @import("table.zig");
 const frames = @import("frames.zig");
+const projections = @import("projection_cache.zig");
 const Author = @import("author.zig").Author;
 const Id = data.program.Id;
 const Error = source.Error;
@@ -15,7 +16,7 @@ pub const Header = struct {
     roots: data.graph.Roots,
 };
 
-pub const Field = enum(usize) { program, header, nodes, blobs, work };
+pub const Field = enum(usize) { program, header, nodes, blobs, work, cache };
 
 pub const Definition = struct {
     schema: Id,
@@ -25,6 +26,7 @@ pub const Definition = struct {
     nodes: table.Definition,
     blobs: table.Definition,
     frames: frames.Definition,
+    cache: projections.Definition,
     hydrate: Id,
     project: Id,
     node_from_public: Id,
@@ -49,8 +51,9 @@ pub fn define(b: *source.Builder) Error!Definition {
     } });
     const nodes = try table.define(b, node);
     const blobs = try table.define(b, try projection.schema(data.graph.Blob, b));
+    const projections_cache = try projections.define(b);
     const schema = try b.schema(.{ .product = &.{
-        program, header, nodes.table, blobs.table, e.integer,
+        program, header, nodes.table, blobs.table, e.integer, projections_cache.schema,
     } });
     const d: Definition = .{
         .node_from_public = try b.declare(&.{
@@ -69,6 +72,7 @@ pub fn define(b: *source.Builder) Error!Definition {
         .nodes = nodes,
         .blobs = blobs,
         .frames = frame,
+        .cache = projections_cache,
         .hydrate = try b.declare(&.{ program, state }, schema, &.{}, &.{}),
         .project = try b.declare(&.{schema}, state, &.{}, &.{}),
     };
@@ -176,7 +180,7 @@ fn emitHydrate(
     const result = try e.b.pure(try e.tuple(schema, &.{
         try e.param(d.hydrate, 0),      try e.tuple(header, &header_values),
         try e.b.reference(saved_nodes), try e.b.reference(saved_blobs),
-        e.zero,
+        e.zero,                         try d.cache.entries.empty(e),
     }));
     const fill_blobs = try e.b.bind(saved_blobs, try e.call(blobs.from_sequence, &.{try e.field(
         input,

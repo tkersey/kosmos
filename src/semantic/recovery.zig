@@ -82,6 +82,11 @@ pub fn storage(b: *source.Builder, machine: machines.Definition) source.Error!Id
         program_identity,
         try b.constant(u64, i),
     ), try e.required(state_identity, try b.constant(u64, i))), checked, invalid);
+    const valid_cache = try b.variable(e.boolean);
+    checked = try b.bind(valid_cache, try e.call(
+        try @import("projection_cache.zig").valid(b, machine),
+        &.{input},
+    ), try e.when(try b.reference(valid_cache), checked, invalid));
     checked = try b.bind(valid_blobs, try e.call(machine.blobs.valid, &.{
         try machine.field(e, input, .blobs),
     }), try e.when(try b.reference(valid_blobs), checked, invalid));

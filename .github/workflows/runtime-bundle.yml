@@ -4,11 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      compiler-cache:
-        description: Restore dependency and compiler artifacts (disable for a cold run)
-        type: boolean
-        default: true
 permissions:
   contents: read
   actions: read
@@ -19,7 +14,7 @@ jobs:
   tiger-style:
     name: TigerStyle
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -31,6 +26,7 @@ jobs:
           version: '0.17.0'
           mirror: https://zigmirror.com
           use-cache: false
+          use-tool-cache: true
       - name: Check committed Zig changes and the native auditor
         env:
           TIGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'd777cfa402da97ff2299686f8365324b2f9b368c' }}
@@ -56,18 +52,19 @@ jobs:
           version: '0.17.0'
           mirror: https://zigmirror.com
           use-cache: false
+          use-tool-cache: true
       - name: Check source formatting before compilation
         run: |
           git ls-files '*.zig' | xargs zig fmt --check
       - name: Restore complete compiler cache
         id: cache
-        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
           key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
@@ -78,6 +75,49 @@ jobs:
             mv .zig-cache-upload .zig-cache
           fi
           mkdir -p .zig-cache/tmp
+      - name: Compile native qualification and independently rebuild the core
+        if: matrix.lane == 'native'
+        run: |
+          nproc
+          free -m
+          vmstat -w 30 &
+          observer=$!
+          trap 'kill "$observer" 2>/dev/null || true' EXIT
+          /usr/bin/time -v zig build build-storage-check build-semantic-driver-check \
+            build-semantics-check build-zig17-check \
+            -Doptimize=safe --summary all --verbose
+      - name: Admit completed native compilation before execution
+        id: native_cache_size
+        if: matrix.lane == 'native'
+        continue-on-error: true
+        run: |
+          echo 'save=false' >> "$GITHUB_OUTPUT"
+          test -d .zig-cache/o || exit 0
+          test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
+          test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
+          bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+          echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
+          test ! -e .zig-cache-upload
+          cp -al .zig-cache .zig-cache-upload
+          while IFS= read -r -d '' object; do
+            test "$bytes" -gt 4294967296 || break
+            object=${object#* }
+            removed=$(find "$object" -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+            rm -rf -- "$object"
+            bytes=$((bytes - removed))
+          done < <(find .zig-cache-upload/o -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -zn)
+          bytes=$(find .zig-cache-upload -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+          echo "Upload snapshot: $bytes bytes"
+          test "$bytes" -le 4294967296 || exit 0
+          test -n "$(find .zig-cache-upload/o -type f -size +0c -print -quit)" || exit 0
+          echo 'save=true' >> "$GITHUB_OUTPUT"
+      - name: Retain completed native compilation before execution
+        if: steps.native_cache_size.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .zig-cache-upload
+          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Check native owners and independently rebuild the core
         if: matrix.lane == 'native'
         run: >-
@@ -98,7 +138,7 @@ jobs:
           fi
           case "${{ matrix.lane }}" in
             sessions) group=behavior; expected=54 ;;
-            session-ownership) group=ownership; expected=16 ;;
+            session-ownership) group=ownership; expected=17 ;;
             source-regressions) group=regressions; expected=17 ;;
           esac
           zig build build-session-check -Dsession-group="$group" \
@@ -129,6 +169,8 @@ jobs:
       - name: Install only the browser boundary's tools
         if: matrix.lane == 'portable'
         run: |
+          grep -Fq 'https://archive.ubuntu.com/ubuntu/' /etc/apt/apt-mirrors.txt
+          sudo sed -i '\|^http://azure\.archive\.ubuntu\.com/ubuntu/|d' /etc/apt/apt-mirrors.txt
           npm ci --ignore-scripts --prefix test/current/browser-tools
           node test/current/browser-tools/node_modules/playwright-core/cli.js install --with-deps chromium firefox
       - name: Qualify the independent oracle and optional JS boundary
@@ -163,7 +205,7 @@ jobs:
           compression-level: 0
       - name: Admit complete bounded compiler cache
         id: cache_size
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.lane != 'native' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

@@ -8,6 +8,516 @@ const driver = @import("driver.zig");
 const base = @import("../base/session.zig");
 const a = std.testing.allocator;
 const support = @import("test_support.zig");
+const experiment = @import("experiment.zig");
+
+const CacheProduct = struct { first: u64, second: u64, padding: []const u8 };
+
+fn projectionCacheGuest(sequence: bool) ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try @import("author.zig").Author.init(&b);
+    const input = if (sequence)
+        try b.schema(.{ .seq = e.integer })
+    else
+        try projection.schema(CacheProduct, &b);
+    const entry = try b.declare(&.{input}, e.integer, &.{}, &.{});
+    const argument = try e.param(entry, 0);
+    const first = try b.variable(e.integer);
+    const read = if (sequence) try e.required(argument, e.zero) else try e.field(argument, 0);
+    const subsequent = if (sequence) try e.binary(
+        .integer_add,
+        try e.required(argument, e.one),
+        try e.required(argument, e.zero),
+    ) else read;
+    const result = try b.pure(try e.binary(.integer_add, try b.reference(first), subsequent));
+    try b.define(entry, try b.bind(first, try b.pure(read), try b.term(.{ .yield_then = result })));
+    return support.encode(b.module(entry, e.unit));
+}
+
+fn retainedCacheRange(
+    owner: *driver.Driver,
+    values: *@import("../interpreter_v2/values.zig").Values,
+) !data.graph.Value {
+    const outer = &owner.outer;
+    const pending = (try outer.store.get(outer.roots.pending.?)).pending;
+    const frame = try outer.frames.get(pending.continuation.id);
+    const reader = try outer.frames.slots.reader(frame.view);
+    for (owner.selected.content.value.recovery.anchors) |anchor| {
+        if (anchor.function != frame.function or anchor.role != .published_service) continue;
+        const state = try values.split(try reader.at(@intCast(anchor.parameters[0].slot)));
+        const machine = try values.split(state.fields[
+            @intCast(owner.selected.content.value.recovery.layout.service_machine)
+        ]);
+        const cache_field = @backingInt(@import("machine.zig").Field.cache);
+        const tree = try values.split(machine.fields[cache_field]);
+        try std.testing.expectEqual(@as(u64, 1), tree.tag);
+        const pair = try values.split(tree.fields[0]);
+        const entry = try values.split(pair.fields[1]);
+        return entry.fields[4];
+    }
+    return error.MissingRecoveryAnchor;
+}
+
+fn shiftedCacheCapsule(owner: *driver.Driver, original: []const u8) ![]u8 {
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const Values = @import("../interpreter_v2/values.zig").Values;
+    var values: Values = .{
+        .allocator = scratch.allocator(),
+        .schemas = owner.outer.program.schemas,
+        .store = &owner.outer.store,
+        .aggregate_storage = .structured,
+    };
+    const range = try retainedCacheRange(owner, &values);
+    const parts = try values.split(range);
+    var fields: [3]data.graph.Value = undefined;
+    @memcpy(&fields, parts.fields);
+    for (fields[1..]) |*field| field.* = Values.natural(field.schema, try std.math.add(
+        u64,
+        std.mem.readInt(u64, (try values.bytes(field))[0..8], .little),
+        8,
+    ));
+    switch (range.body) {
+        .reference => |reference| try owner.outer.store.replace(reference, .{ .aggregate = .{
+            .schema = range.schema,
+            .tag = 0,
+            .fields = &fields,
+        } }),
+        .blob => |reference| {
+            const bytes = owner.outer.store.blobs.items[@intCast(reference.id)].bytes;
+            try std.testing.expectEqual(@as(usize, 24), bytes.len);
+            for (&fields, 0..) |*field, i|
+                @memcpy(@constCast(bytes[i * 8 ..][0..8]), try values.bytes(field));
+        },
+        else => return error.InvalidCacheRange,
+    }
+    const checkpoint = try owner.outer.checkpoint(a);
+    defer a.free(checkpoint);
+    var envelope = try capsule.read(a, original);
+    defer envelope.deinit();
+    envelope.value.checkpoint = checkpoint;
+    envelope.value.record.checkpoint = capsule.reference(checkpoint);
+    return projection.encode(capsule.Envelope, a, envelope.value);
+}
+
+fn checkProjectionCacheCapsule(
+    selected: *artifact.Admitted,
+    sequence: bool,
+    input: []const u8,
+) !void {
+    const image = try projectionCacheGuest(sequence);
+    defer a.free(image);
+    var prepared = try base.Prepared.init(a, image);
+    defer prepared.deinit();
+    var owner = try driver.Driver.start(a, &prepared, selected, .{ .arguments = input });
+    var live = true;
+    defer if (live) owner.deinit();
+    var initialized = try owner.pump(null);
+    initialized.deinit();
+    var yielded = try owner.exchange(.{ .advance = .{ .control = .none, .quantum = 100 } });
+    yielded.deinit();
+    try std.testing.expectEqual(.yielded, owner.last_cut.?.status);
+    const provenance: capsule.Provenance = .{
+        .execution = @splat(51),
+        .custody = @splat(61),
+        .publication = null,
+    };
+    const original = try capsule.publish(a, &owner, .outer_execution, provenance);
+    defer a.free(original);
+    const corrupted = try shiftedCacheCapsule(&owner, original);
+    defer a.free(corrupted);
+    for ([_]capsule.Kind{ .guest_cut, .outer_execution }) |kind| try std.testing.expectError(
+        error.InvalidRecovery,
+        capsule.publish(a, &owner, kind, provenance),
+    );
+    var rejected: Custody = .{
+        .expected = capsule.reference(corrupted),
+        .execution = provenance.execution,
+    };
+    if (capsule.restore(a, &prepared, selected, corrupted, rejected.verifier())) |candidate| {
+        var unexpected = candidate;
+        unexpected.deinit();
+        return error.CacheRangeAccepted;
+    } else |err| try std.testing.expectEqual(error.InvalidRecovery, err);
+    try std.testing.expect(!rejected.consumed);
+    var accepted: Custody = .{
+        .expected = capsule.reference(original),
+        .execution = provenance.execution,
+    };
+    owner.deinit();
+    live = false;
+    var restored = try capsule.restore(a, &prepared, selected, original, accepted.verifier());
+    defer restored.deinit();
+    try std.testing.expect(accepted.consumed);
+    try finishProjectionCacheCapsule(&restored, &prepared, selected, provenance, image, input);
+}
+
+fn finishProjectionCacheCapsule(
+    owner: *driver.Driver,
+    prepared: *base.Prepared,
+    selected: *artifact.Admitted,
+    provenance: capsule.Provenance,
+    image: []const u8,
+    input: []const u8,
+) !void {
+    try owner.submit(.{ .advance = .{ .control = .resume_yield, .quantum = 100 } });
+    var partial = try owner.pump(1);
+    defer partial.deinit();
+    try std.testing.expect(partial == .suspended);
+    const bytes = try capsule.publish(a, owner, .outer_execution, provenance);
+    defer a.free(bytes);
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    var custody: Custody = .{
+        .expected = capsule.reference(bytes),
+        .execution = provenance.execution,
+    };
+    const resumed = try capsule.restore(a, prepared, selected, bytes, custody.verifier());
+    owner.deinit();
+    owner.* = resumed;
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    var completed = try owner.pump(null);
+    completed.deinit();
+    try std.testing.expectEqual(.completed, owner.last_cut.?.status);
+    var oracle = try @import("native_baseline").Session.initImage(a, image, input);
+    defer oracle.deinit();
+    try std.testing.expect(try oracle.run(null) == .yielded);
+    try oracle.resumeYield();
+    try std.testing.expect(try oracle.run(null) == .completed);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    const actual = try owner.checkpoint(a);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+test "outer capsules reject shifted projection ranges before claiming custody" {
+    const retained = @import("packaged_runtime").bytes;
+    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer runtime.deinit();
+    const record = try projection.encode(CacheProduct, a, .{
+        .first = 17,
+        .second = 29,
+        .padding = &@as([4096]u8, @splat(3)),
+    });
+    defer a.free(record);
+    try checkProjectionCacheCapsule(&runtime, false, record);
+    var numbers: [512]u64 = @splat(23);
+    numbers[0] = 7;
+    numbers[1] = 11;
+    const sequence = try projection.encode([]const u64, a, &numbers);
+    defer a.free(sequence);
+    try checkProjectionCacheCapsule(&runtime, true, sequence);
+}
+
+test "quarantined runtime preserves bounded phase progress without guest custody" {
+    const retained = @import("packaged_runtime").bytes;
+    var runtime = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer runtime.deinit();
+    const image = try support.guestImage();
+    defer a.free(image);
+    var oracle = try @import("native_baseline").Session.initImage(
+        a,
+        image,
+        &std.mem.toBytes(@as(u64, 5)),
+    );
+    defer oracle.deinit();
+    const before = try oracle.checkpoint(a);
+    defer a.free(before);
+    var candidate = try experiment.Experiment.init(a, image, &runtime, before);
+    defer candidate.deinit();
+    try checkExperimentCommands(&candidate, image, &runtime);
+    var initialized = try finishExperiment(&candidate, image, &runtime);
+    defer initialized.deinit();
+    try std.testing.expectEqual(.initialized, initialized.stage);
+    try std.testing.expectEqual(@as(u64, 0), initialized.guest_work);
+    try std.testing.expectEqualSlices(u8, before, initialized.checkpoint);
+    try candidate.begin(.none, 2);
+    var advanced = try finishExperiment(&candidate, image, &runtime);
+    defer advanced.deinit();
+    try std.testing.expectEqual(.advanced, advanced.stage);
+    _ = try oracle.run(2);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, advanced.checkpoint);
+    try std.testing.expectEqual(@as(u64, 2), advanced.guest_work);
+    try std.testing.expectError(error.NoOperation, candidate.pump(1));
+    try checkExperimentCommands(&candidate, image, &runtime);
+    const ready = try candidate.checkpointOuter(a);
+    defer a.free(ready);
+    var restored = try experiment.Experiment.restore(a, image, &runtime, ready);
+    defer restored.deinit();
+    try checkCompletedSegment(&restored, &advanced);
+    try rejectMalformedCompletedSegment(image, &runtime, ready);
+    try std.testing.checkAllAllocationFailures(a, completedSegmentAllocations, .{&restored});
+    try checkCompletedSegment(&restored, &advanced);
+    try restored.begin(.none, 0);
+    try std.testing.expectEqual(@as(usize, 0), restored.observation.len);
+    try std.testing.expectError(error.OperationInProgress, restored.completedSegment(a));
+    var repeated = try finishExperiment(&restored, image, &runtime);
+    defer repeated.deinit();
+    try std.testing.expectEqualSlices(u8, advanced.checkpoint, repeated.checkpoint);
+}
+
+test "experimental replies use retained projections without candidate recovery" {
+    const image = try unitRequestImage();
+    defer a.free(image);
+    var runtime = try failingRecoveryCandidate(image);
+    defer runtime.deinit();
+    var oracle = try @import("native_baseline").Session.initImage(a, image, &.{});
+    defer oracle.deinit();
+    try std.testing.expect(try oracle.run(null) == .requested);
+    const before = try oracle.checkpoint(a);
+    defer a.free(before);
+    var pending = try oracle.pendingBinding(a, false);
+    defer pending.deinit();
+    const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+        .request_identity = pending.request.request_identity,
+        .value = &.{},
+    });
+    defer a.free(reply);
+    try oracle.answer(reply);
+    try std.testing.expect(try oracle.run(null) == .completed);
+    const expected = try oracle.checkpoint(a);
+    defer a.free(expected);
+    for ([_]bool{ false, true }) |restore_ready| {
+        var candidate = try experiment.Experiment.init(a, image, &runtime, before);
+        defer candidate.deinit();
+        var initialized = try finishExperiment(&candidate, image, &runtime);
+        defer initialized.deinit();
+        const ready = try candidate.checkpointOuter(a);
+        defer a.free(ready);
+        if (restore_ready) {
+            const restored = try experiment.Experiment.restore(a, image, &runtime, ready);
+            candidate.deinit();
+            candidate = restored;
+        }
+        try std.testing.expectError(error.InvalidRecovery, candidate.execution.checkpoint(a));
+        try rejectNonprojectionReply(image, &runtime, ready);
+        try std.testing.expectError(
+            error.NonCanonical,
+            candidate.begin(.{ .answer = &.{255} }, 10),
+        );
+        const unchanged = try candidate.checkpointOuter(a);
+        defer a.free(unchanged);
+        try std.testing.expectEqualSlices(u8, ready, unchanged);
+        try std.testing.expectEqual(.ready, candidate.phase);
+        try checkCompletedSegment(&candidate, &initialized);
+        try candidate.begin(.{ .answer = &.{} }, 10);
+        var completed = try finishExperiment(&candidate, image, &runtime);
+        defer completed.deinit();
+        try std.testing.expectEqualSlices(u8, expected, completed.checkpoint);
+    }
+}
+
+fn failingRecoveryCandidate(image: []const u8) !artifact.Admitted {
+    const compiler = @import("compiler.zig");
+    const retained = @import("packaged_runtime").bytes;
+    var root = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer root.deinit();
+    var exported = try compiler.exportSource(a, &root);
+    defer exported.deinit();
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const b = &exported.definition.builder;
+    var helpers = exported.definition.helpers;
+    const projector = b.functions.items[@intCast(helpers[0])];
+    try std.testing.expectEqual(@as(usize, 1), projector.parameters.len);
+    const input = b.variables.items[@intCast(projector.parameters[0])];
+    helpers[0] = try b.declare(&.{input}, projector.result, &.{}, &.{});
+    try b.define(helpers[0], try b.term(.{ .fail = try b.constant(void, {}) }));
+    const bytes = try compiler.deriveRecord(a, &root, guest, .{
+        .selected = exported.definition.module(),
+        .steps = &.{},
+        .interfaces = .{
+            .roles = exported.value.selected_roles,
+            .entries = exported.value.selected_entries,
+            .helpers = helpers,
+            .layout = .{},
+            .input = .program_and_initial,
+        },
+    }, .{ .horos_package = root.content.value.manifest.compiler.horos_package });
+    defer a.free(bytes);
+    return artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+}
+
+fn rejectNonprojectionReply(
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+    ready: []const u8,
+) !void {
+    var observed = try experiment.Experiment.restore(a, image, runtime, ready);
+    defer observed.deinit();
+    var event = try observed.execution.exchange(.observe);
+    defer event.deinit();
+    const checkpoint = try observed.execution.outer.checkpoint(a);
+    defer a.free(checkpoint);
+    var record = try projection.decode(experiment.Record, a, ready);
+    defer record.deinit();
+    record.value.checkpoint = checkpoint;
+    const bytes = try projection.encode(experiment.Record, a, record.value);
+    defer a.free(bytes);
+    try std.testing.expectError(
+        error.InvalidServiceEvent,
+        experiment.Experiment.restore(a, image, runtime, bytes),
+    );
+}
+
+fn checkCompletedSegment(
+    candidate: *experiment.Experiment,
+    expected: *const experiment.Segment,
+) !void {
+    const before = try candidate.checkpointOuter(a);
+    defer a.free(before);
+    const transitions = candidate.execution.outer.transitions;
+    var completed = try candidate.completedSegment(a);
+    defer completed.deinit();
+    try std.testing.expectEqualSlices(u8, expected.checkpoint, completed.checkpoint);
+    try std.testing.expectEqualSlices(u8, expected.observation, completed.observation);
+    try std.testing.expectEqual(expected.guest_work, completed.guest_work);
+    try std.testing.expectEqual(expected.stage, completed.stage);
+    try std.testing.expect(completed.observation.ptr != candidate.observation.ptr);
+    try std.testing.expectEqual(transitions, candidate.execution.outer.transitions);
+    const after = try candidate.checkpointOuter(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+fn completedSegmentAllocations(
+    allocator: std.mem.Allocator,
+    candidate: *experiment.Experiment,
+) !void {
+    var completed = try candidate.completedSegment(allocator);
+    defer completed.deinit();
+    try std.testing.expectEqualSlices(u8, candidate.observation, completed.observation);
+}
+
+fn rejectMalformedCompletedSegment(
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+    ready: []const u8,
+) !void {
+    var decoded = try projection.decode(experiment.Record, a, ready);
+    defer decoded.deinit();
+    for (0..4) |index| {
+        var record = decoded.value;
+        const expected: anyerror = switch (index) {
+            0 => invalid: {
+                record.observation = &.{};
+                break :invalid error.InvalidExperiment;
+            },
+            1 => invalid: {
+                record.observation = &.{127};
+                break :invalid error.InvalidValue;
+            },
+            2 => invalid: {
+                record.guest_work += 1;
+                break :invalid error.InvalidExperiment;
+            },
+            3 => invalid: {
+                record.last_cut.?.status = .cancelled;
+                break :invalid error.InvalidServiceEvent;
+            },
+            else => unreachable,
+        };
+        const bytes = try projection.encode(experiment.Record, a, record);
+        defer a.free(bytes);
+        try std.testing.expectError(expected, experiment.Experiment.restore(
+            a,
+            image,
+            runtime,
+            bytes,
+        ));
+    }
+}
+
+fn unitRequestImage() ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{ .identity = "unit", .payload = unit, .result = unit });
+    const entry = try b.declare(&.{}, unit, &.{effect}, &.{});
+    const request = try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.constant(void, {}),
+    } });
+    try b.define(entry, try b.bind(try b.variable(unit), request, try b.pure(
+        try b.constant(void, {}),
+    )));
+    return support.encode(b.module(entry, unit));
+}
+
+fn checkExperimentCommands(
+    candidate: *experiment.Experiment,
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+) !void {
+    const service = @import("service.zig");
+    const bytes = try candidate.checkpointOuter(a);
+    defer a.free(bytes);
+    var decoded = try projection.decode(experiment.Record, a, bytes);
+    defer decoded.deinit();
+    const commands = [_]service.Command{
+        .{ .advance = .{ .control = .none, .quantum = 1 } }, .observe, .project, .finish,
+    };
+    const accepted: ?std.meta.Tag(service.Command) = switch (candidate.phase) {
+        .initializing => null,
+        .advancing => .advance,
+        .observing => .observe,
+        .projecting, .ready => .project,
+    };
+    for (commands) |command| {
+        if (accepted == std.meta.activeTag(command)) continue;
+        const command_bytes = try projection.encode(service.Command, a, command);
+        defer a.free(command_bytes);
+        var record = decoded.value;
+        record.command = command_bytes;
+        const invalid = try projection.encode(experiment.Record, a, record);
+        defer a.free(invalid);
+        try std.testing.expectError(error.InvalidExperiment, experiment.Experiment.restore(
+            a,
+            image,
+            runtime,
+            invalid,
+        ));
+    }
+}
+
+fn finishExperiment(
+    candidate: *experiment.Experiment,
+    image: []const u8,
+    runtime: *const artifact.Admitted,
+) !experiment.Segment {
+    var retained: [5]bool = @splat(false);
+    for (0..100_000) |_| {
+        const before = candidate.execution.outer.transitions;
+        const phase = candidate.phase;
+        const result = try candidate.pump(31);
+        try std.testing.expect(candidate.execution.outer.transitions - before <= 31);
+        if (result == .complete) {
+            var completed = result.complete;
+            errdefer completed.deinit();
+            try checkCompletedSegment(candidate, &completed);
+            return completed;
+        }
+        const index = @backingInt(phase);
+        if (retained[index]) continue;
+        retained[index] = true;
+        try checkExperimentCommands(candidate, image, runtime);
+        const bytes = try candidate.checkpointOuter(a);
+        defer a.free(bytes);
+        var restored = try experiment.Experiment.restore(a, image, runtime, bytes);
+        errdefer restored.deinit();
+        const again = try restored.checkpointOuter(a);
+        defer a.free(again);
+        try std.testing.expectEqualSlices(u8, bytes, again);
+        candidate.deinit();
+        candidate.* = restored;
+    }
+    return error.ExperimentDidNotComplete;
+}
 
 const Custody = struct {
     expected: capsule.Reference,
@@ -197,6 +707,7 @@ test "outer capsule retains clone microprogress and requires exact consumed cust
     };
     const bytes = try capsule.publish(a, &original, .outer_execution, provenance);
     defer a.free(bytes);
+    try inspectOuterView(&original, &selected, bytes);
     const before = try original.outer.checkpoint(a);
     defer a.free(before);
     var custody = try checkRejectedCustody(&prepared, &selected, bytes, provenance);
@@ -223,6 +734,53 @@ test "outer capsule retains clone microprogress and requires exact consumed cust
     var state = try data.state_image.decodeGraph(a, checkpoint);
     defer state.deinit();
     try data.state_admission.validateAdmitted(a, restored.guest.admitted(), state.state);
+}
+
+fn inspectOuterView(
+    owner: *driver.Driver,
+    selected: *artifact.Admitted,
+    bytes: []const u8,
+) !void {
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    var view = try capsule.inspectOuter(
+        a,
+        owner.guest.admitted(),
+        selected,
+        bytes,
+        .{},
+        @splat(23),
+    );
+    defer view.deinit();
+    try std.testing.expectEqual(.outer_execution, view.value.capsule.kind);
+    try std.testing.expectEqual(.not_requested, view.value.state.value_coverage);
+    try std.testing.expectEqual(null, view.value.state.snapshot);
+    try std.testing.expectError(error.InvalidDisclosure, capsule.inspectOuter(
+        a,
+        owner.guest.admitted(),
+        selected,
+        bytes,
+        .{ .snapshot = true },
+        @splat(23),
+    ));
+    try std.testing.expectEqualDeep(
+        owner.guest.admitted().identity(),
+        view.value.capsule.guest.identity,
+    );
+    try std.testing.expectEqualDeep(
+        selected.program.identity(),
+        view.value.state.metadata.binding.guest,
+    );
+    const encoded = try capsule.encodeOuterView(a, view.value);
+    defer a.free(encoded);
+    const schema = try capsule.outerViewSchemaBytes(a);
+    defer a.free(schema);
+    var descriptor = try data.schema.decode(a, schema);
+    defer descriptor.deinit();
+    try data.schema.validateValue(a, descriptor.descriptor, encoded);
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "resident capsule receipts bind level generation and exact outer progress" {

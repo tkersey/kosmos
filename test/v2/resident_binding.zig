@@ -59,6 +59,94 @@ fn encodeReply(request: []const u8, value: []const u8) ![]u8 {
         .value = value,
     });
 }
+
+test "runtime observation failures preserve restored terminal state and retry binding" {
+    const image = try makeImage(false);
+    defer a.free(image);
+    var prepared = try runtime.Prepared.init(a, image);
+    defer prepared.deinit();
+    var owner = try runtime.Resident.start(a, &prepared, &std.mem.toBytes(@as(u64, 42)));
+    defer finish(&owner);
+    const active = try owner.checkpoint(a);
+    defer a.free(active);
+    try checkActiveObservation(&prepared, active);
+    var requested = try owner.drive(a, .none, .{});
+    defer requested.deinit();
+    const reply = try encodeReply(requested.record.requested.request, &.{});
+    defer a.free(reply);
+    var completed = try owner.drive(a, .{ .reply = reply }, .{});
+    defer completed.deinit();
+    const checkpoint = try owner.checkpoint(a);
+    defer a.free(checkpoint);
+    var measuring = std.testing.FailingAllocator.init(a, .{});
+    var reference = try runtime.Resident.restore(measuring.allocator(), &prepared, checkpoint);
+    defer finish(&reference);
+    const start = measuring.alloc_index;
+    var expected = try reference.runtimeObservation(a);
+    defer expected.deinit();
+    const allocations = measuring.alloc_index - start;
+    try expect(allocations > 2);
+    var cached = try reference.runtimeObservation(a);
+    defer cached.deinit();
+    try std.testing.expectEqualDeep(expected.binding, cached.binding);
+    try bytesEq(u8, expected.observation, cached.observation);
+    for ([_]usize{ 0, allocations / 2, allocations - 1 }) |offset| {
+        try checkObservationRetry(&prepared, checkpoint, expected.observation, offset);
+    }
+}
+
+fn checkActiveObservation(prepared: *runtime.Prepared, checkpoint: []const u8) !void {
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    var owner = try runtime.Resident.restore(failing.allocator(), prepared, checkpoint);
+    defer finish(&owner);
+    const before = try owner.runtimeBinding();
+    failing.fail_index = failing.alloc_index;
+    defer failing.fail_index = std.math.maxInt(usize);
+    var observed = try owner.runtimeObservation(a);
+    defer observed.deinit();
+    try std.testing.expectEqualDeep(before, observed.binding);
+    try std.testing.expectEqualDeep(before, try owner.runtimeBinding());
+}
+
+fn checkObservationRetry(
+    prepared: *runtime.Prepared,
+    checkpoint: []const u8,
+    expected: []const u8,
+    offset: usize,
+) !void {
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    var owner = try runtime.Resident.restore(failing.allocator(), prepared, checkpoint);
+    defer finish(&owner);
+    const before = try owner.runtimeBinding();
+    const rollbacks = (try owner.diagnostics()).transactions.rollback_entries;
+    failing.fail_index = failing.alloc_index + offset;
+    try std.testing.expectError(error.OutOfMemory, owner.runtimeObservation(a));
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqualDeep(before, try owner.runtimeBinding());
+    if (offset != 0) {
+        try expect((try owner.diagnostics()).transactions.rollback_entries > rollbacks);
+    }
+    var empty: [0]u8 = .{};
+    var output = std.heap.FixedBufferAllocator.init(&empty);
+    try std.testing.expectError(error.OutOfMemory, owner.runtimeObservation(output.allocator()));
+    try std.testing.expectEqualDeep(before, try owner.runtimeBinding());
+    const unchanged = try owner.checkpoint(a);
+    defer a.free(unchanged);
+    try bytesEq(u8, checkpoint, unchanged);
+    var retry = try owner.runtimeObservation(a);
+    defer retry.deinit();
+    try bytesEq(u8, expected, retry.observation);
+    try eq(before.guest_revision, retry.binding.guest_revision);
+    try eq(before.generation, retry.binding.generation);
+    try eq(before.outer_revision + 2, retry.binding.outer_revision);
+    try std.testing.expectError(error.OutOfMemory, owner.runtimeObservation(output.allocator()));
+    try std.testing.expectEqualDeep(retry.binding, try owner.runtimeBinding());
+    var cached = try owner.runtimeObservation(a);
+    defer cached.deinit();
+    try bytesEq(u8, expected, cached.observation);
+    try std.testing.expectEqualDeep(retry.binding, cached.binding);
+}
+
 fn rejected(session: *runtime.Session, reply: []const u8) anyerror {
     session.answer(reply) catch |err| return err;
     return error.UnexpectedSuccess;

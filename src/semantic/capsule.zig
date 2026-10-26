@@ -427,3 +427,74 @@ fn validateRestored(a: std.mem.Allocator, result: *driver.Driver, record: Record
         result.revision = try std.math.add(u64, record.outer_revision, 1);
     }
 }
+
+pub const OuterView = struct {
+    contract: []const u8 = "kosmos.outer-view/1",
+    capsule: Record,
+    state: @import("views.zig").DetailedView,
+};
+
+pub const OuterInspection = struct {
+    envelope: projection.Owned(Envelope),
+    details: @import("views.zig").Detailed,
+    value: OuterView,
+
+    pub fn deinit(self: *OuterInspection) void {
+        self.details.deinit();
+        self.envelope.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn inspectOuter(
+    a: std.mem.Allocator,
+    guest: *const data.program_image.Admitted,
+    selected: *const artifact.Admitted,
+    bytes: []const u8,
+    disclosure: @import("views.zig").Disclosure,
+    disclosure_identity: artifact.Digest,
+) !OuterInspection {
+    if (disclosure.snapshot) return error.InvalidDisclosure;
+    var envelope = try read(a, bytes);
+    errdefer envelope.deinit();
+    const value = envelope.value;
+    const record = value.record;
+    if (record.kind != .outer_execution) return error.InvalidCapsule;
+    const guest_bytes = try image(a, guest);
+    defer a.free(guest_bytes);
+    try validateBindings(selected, guest, guest_bytes, value);
+    try disposition(a, value);
+    var details = try @import("views.zig").captureDetailed(
+        a,
+        selected.program,
+        value.checkpoint,
+        .{
+            .guest = record.realization.identity,
+            .core = record.realization.identity,
+            .realization = record.artifact.digest,
+            .checkpoint = record.checkpoint.digest,
+            .execution = record.provenance.execution,
+            .guest_revision = record.guest_revision,
+            .realization_revision = record.outer_revision,
+            .disclosure = disclosure_identity,
+        },
+        disclosure,
+    );
+    errdefer details.deinit();
+    return .{
+        .envelope = envelope,
+        .details = details,
+        .value = .{ .capsule = record, .state = details.value },
+    };
+}
+
+pub fn encodeOuterView(a: std.mem.Allocator, value: OuterView) ![]u8 {
+    return projection.encode(OuterView, a, value);
+}
+
+pub fn outerViewSchemaBytes(a: std.mem.Allocator) ![]u8 {
+    var builder = @import("horos").source.Builder.init(a);
+    defer builder.deinit();
+    const root = try projection.schema(OuterView, &builder);
+    return data.schema.encodeOwned(a, builder.schemas.items, root);
+}

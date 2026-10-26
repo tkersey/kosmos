@@ -3,6 +3,28 @@ const data = @import("horos_data");
 const heap = @import("store.zig");
 const testing = std.testing;
 
+test "intern equality preserves schemas and bytes across hash collisions" {
+    const Index = @FieldType(heap.Store, "interned");
+    const Key = @FieldType(Index.KV, "key");
+    const Context = @typeInfo(@TypeOf(Index.getContext)).@"fn".param_types[2].?;
+    var index: Index = .empty;
+    defer index.deinit(testing.allocator);
+    const keys = [_]Key{
+        .{ .blob = .{ .schema = 0, .bytes = "first" }, .hash = 7 },
+        .{ .blob = .{ .schema = 0, .bytes = "second" }, .hash = 7 },
+        .{ .blob = .{ .schema = 1, .bytes = "first" }, .hash = 7 },
+    };
+    for (keys, 0..) |key, id| try index.put(testing.allocator, key, id);
+    try testing.expectEqual(keys.len, index.count());
+    index.rehash(Context{});
+    for (keys, 0..) |key, id| try testing.expectEqual(id, index.get(key).?);
+    try testing.expect(index.remove(keys[1]));
+    index.rehash(Context{});
+    try testing.expectEqual(0, index.get(keys[0]).?);
+    try testing.expectEqual(2, index.get(keys[2]).?);
+    try testing.expect(index.get(keys[1]) == null);
+}
+
 test "blob retirement visits each intern entry and preserves free order and rollback" {
     var store: heap.Store = .{ .allocator = testing.allocator };
     defer store.deinit();

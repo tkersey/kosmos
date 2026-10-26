@@ -304,3 +304,237 @@ test "guest view divergence query reports only aligned finite observation eviden
         }
     }
 }
+
+const ViewInput = struct { number: u64, bytes: []const u8 };
+
+fn typedViewGuest(b: *source.Builder) !source.Module {
+    const unit = try b.scalar(void);
+    const input = try projection.schema(ViewInput, b);
+    const entry = try b.declare(&.{
+        try b.scalar(u64), try projection.schema([]const u8, b),
+    }, input, &.{}, &.{});
+    const number = try b.reference(b.parameter(entry, 0));
+    const bytes = try b.reference(b.parameter(entry, 1));
+    const aggregate = try b.primitive(input, .product, &.{ number, bytes }, 0);
+    const inner = try b.declare(&.{}, input, &.{}, &.{});
+    try b.define(inner, try b.pure(aggregate));
+    const closure = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = input,
+        .capture_bound = &.{ try b.scalar(u64), try projection.schema([]const u8, b) },
+    } } });
+    const retained = try b.variable(closure);
+    const returned = try b.term(.{ .apply = .{
+        .computation = try b.reference(retained),
+        .arguments = &.{},
+    } });
+    try b.define(entry, try b.bind(
+        retained,
+        try b.pure(try b.lambda(inner, closure)),
+        try b.term(.{ .yield_then = returned }),
+    ));
+    return b.module(entry, unit);
+}
+
+fn typedViewBinding(
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+) views.Binding {
+    var bound = binding;
+    bound.guest = guest.identity();
+    bound.checkpoint = @import("artifact.zig").digest(checkpoint);
+    return bound;
+}
+
+test "typed guest views disclose selected scalars schemas and bounded blob slices" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const image = try support.encode(try typedViewGuest(&b));
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const input = try projection.encode(ViewInput, a, .{ .number = 42, .bytes = "secret-payload" });
+    defer a.free(input);
+    var oracle = try @import("native_baseline").Session.initImage(a, image, input);
+    defer oracle.deinit();
+    _ = try oracle.run(null);
+    const checkpoint = try oracle.checkpoint(a);
+    defer a.free(checkpoint);
+    const bound = typedViewBinding(guest, checkpoint);
+    var metadata = try views.captureDetailed(a, guest, checkpoint, bound, .{});
+    defer metadata.deinit();
+    try std.testing.expectEqual(.not_requested, metadata.value.value_coverage);
+    try std.testing.expectEqual(@as(usize, 0), metadata.value.values.len);
+    try std.testing.expectEqual(null, metadata.value.snapshot);
+    const mask = try a.alloc(bool, metadata.value.metadata.nodes.len);
+    defer a.free(mask);
+    @memset(mask, true);
+    var values = try views.captureDetailed(a, guest, checkpoint, bound, .{
+        .values = .{ .nodes = mask },
+    });
+    defer values.deinit();
+    try std.testing.expectEqual(.complete, values.value.value_coverage);
+    try std.testing.expect(values.value.schemas.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), values.value.blobs.len);
+    try std.testing.expectEqual(null, values.value.snapshot);
+    try checkTypedDisclosure(guest, checkpoint, bound, values.value);
+    try checkSnapshotDisclosure(guest, image, checkpoint, bound, mask);
+    const unchanged = try oracle.checkpoint(a);
+    defer a.free(unchanged);
+    try std.testing.expectEqualSlices(u8, checkpoint, unchanged);
+}
+
+fn checkSnapshotDisclosure(
+    guest: *const data.program_image.Admitted,
+    image: []const u8,
+    checkpoint: []const u8,
+    bound: views.Binding,
+    mask: []const bool,
+) !void {
+    const temporary = try a.dupe(u8, checkpoint);
+    defer a.free(temporary);
+    var disclosed = blk: {
+        const isolated = try data.program_image.Admitted.decode(a, image);
+        defer isolated.deinit();
+        break :blk try views.captureDetailed(a, isolated, temporary, bound, .{
+            .values = .{ .nodes = mask },
+            .snapshot = true,
+        });
+    };
+    defer disclosed.deinit();
+    @memset(temporary, 0);
+    try std.testing.expectEqualDeep(bound, disclosed.value.metadata.binding);
+    const reconstructed = try data.state_image.emit(a, disclosed.value.snapshot.?);
+    defer a.free(reconstructed);
+    try std.testing.expectEqualSlices(u8, checkpoint, reconstructed);
+    try checkSnapshotEncoding(guest, disclosed.value);
+    const partial = try a.dupe(bool, mask);
+    defer a.free(partial);
+    try std.testing.expect(partial.len != 0);
+    partial[0] = false;
+    const invalid = [_]views.Disclosure{
+        .{ .snapshot = true },
+        .{ .snapshot = true, .values = .{ .fields = &.{} } },
+        .{ .snapshot = true, .values = .{ .nodes = partial } },
+        .{ .snapshot = true, .values = .{ .nodes = mask }, .nodes = mask },
+        .{
+            .snapshot = true,
+            .values = .{ .nodes = mask },
+            .blobs = &.{.{ .blob = 0, .offset = 0, .length = 1 }},
+        },
+    };
+    for (invalid) |selection| try std.testing.expectError(
+        error.InvalidDisclosure,
+        views.captureDetailed(a, guest, checkpoint, bound, selection),
+    );
+}
+
+fn checkSnapshotEncoding(
+    guest: *const data.program_image.Admitted,
+    view: views.DetailedView,
+) !void {
+    var internal = false;
+    for (view.schemas) |schema| {
+        try std.testing.expectEqualDeep(
+            guest.program().schemas[@intCast(schema.id)],
+            schema.definition,
+        );
+        try std.testing.expectEqual(
+            guest.schemaFacts().exportable[@intCast(schema.id)],
+            schema.descriptor != null,
+        );
+        if (schema.definition == .internal) {
+            internal = true;
+            const result = schema.definition.internal.computation.result;
+            const definition = for (view.schemas) |child| {
+                if (child.id == result) break child.definition;
+            } else return error.MissingSchemaDefinition;
+            try std.testing.expectEqual(@as(usize, 2), definition.product.len);
+        }
+    }
+    try std.testing.expect(internal);
+    const encoded = try views.encodeDetailed(a, view);
+    defer a.free(encoded);
+    const schema = try views.detailedSchemaBytes(a);
+    defer a.free(schema);
+    var descriptor = try data.schema.decode(a, schema);
+    defer descriptor.deinit();
+    try data.schema.validateValue(a, descriptor.descriptor, encoded);
+    var decoded = try projection.decode(views.DetailedView, a, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqualDeep(view, decoded.value);
+}
+
+fn checkTypedDisclosure(
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+    bound: views.Binding,
+    whole: views.DetailedView,
+) !void {
+    var scalar: ?views.TypedValue = null;
+    var blob: ?views.TypedValue = null;
+    for (whole.values) |value| switch (value.value.body) {
+        .scalar => if (std.mem.readInt(u64, &value.value.body.scalar, .little) == 42) {
+            scalar = value;
+        },
+        .blob => blob = value,
+        else => {},
+    };
+    try std.testing.expect(scalar != null and blob != null);
+    const selected = scalar.?;
+    const fields = [_]views.FieldSelection{.{ .node = selected.node, .field = selected.field }};
+    var partial = try views.captureDetailed(a, guest, checkpoint, bound, .{
+        .values = .{ .fields = &fields },
+    });
+    defer partial.deinit();
+    try std.testing.expectEqual(.partial, partial.value.value_coverage);
+    try std.testing.expectEqual(@as(usize, 1), partial.value.values.len);
+    try std.testing.expectEqual(@as(usize, 1), partial.value.schemas.len);
+    try std.testing.expectEqual(selected.value.schema, partial.value.schemas[0].id);
+    try std.testing.expectEqualDeep(selected, partial.value.values[0]);
+    const range: views.BlobRange = .{ .blob = blob.?.value.body.blob.id, .offset = 1, .length = 6 };
+    try std.testing.expectError(error.InvalidDisclosure, views.captureDetailed(
+        a,
+        guest,
+        checkpoint,
+        bound,
+        .{ .values = .{ .fields = &fields }, .blobs = &.{range} },
+    ));
+    try checkBlobDisclosure(guest, checkpoint, bound, blob.?, range);
+}
+
+fn checkBlobDisclosure(
+    guest: *const data.program_image.Admitted,
+    checkpoint: []const u8,
+    bound: views.Binding,
+    blob: views.TypedValue,
+    range: views.BlobRange,
+) !void {
+    const fields = [_]views.FieldSelection{.{ .node = blob.node, .field = blob.field }};
+    var selected = try views.captureDetailed(a, guest, checkpoint, bound, .{
+        .values = .{ .fields = &fields },
+        .blobs = &.{range},
+    });
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), selected.value.blobs.len);
+    try std.testing.expectEqualSlices(u8, "secret", selected.value.blobs[0].bytes);
+    const bytes = try projection.encode(views.DetailedView, a, selected.value);
+    defer a.free(bytes);
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const root = try projection.schema(views.DetailedView, &b);
+    const schema = try data.schema.encodeOwned(a, b.schemas.items, root);
+    defer a.free(schema);
+    var descriptor = try data.schema.decode(a, schema);
+    defer descriptor.deinit();
+    try data.schema.validateValue(a, descriptor.descriptor, bytes);
+    var invalid = range;
+    invalid.length = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidDisclosure, views.captureDetailed(
+        a,
+        guest,
+        checkpoint,
+        bound,
+        .{ .values = .{ .fields = &fields }, .blobs = &.{invalid} },
+    ));
+}

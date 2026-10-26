@@ -4,7 +4,7 @@
 auditor self-tests and committed-change ratchet must pass along with all existing
 runtime qualification lanes. `Complete qualification` requires both results.
 Runtime qualification retains its 600-second workflow budget; TigerStyle is
-exempt from that budget and has an independent 45-minute job timeout.
+exempt from that budget and has an independent 10-minute job timeout.
 
 The native roots preserve the evaluator and language contracts:
 
@@ -150,11 +150,17 @@ is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional
 ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
 Zig's input hashes and the dependency admission guards remain authoritative.
+The native lane compiles its existing test artifacts and independently rebuilt
+core before retaining the bounded compiler cache. It then executes the original
+check roots, so a later test timeout does not discard completed compilation.
+The Zig installation uses a stable tool-cache path because dependency extraction
+includes `PATH` in its input identity. Neither cache restoration nor successful
+compilation substitutes for completed tests.
 The other lanes use `-Dpackaged-runtime=true` to authenticate the exact shipped
 artifact whose source correspondence the native semantic lane checks. All lanes
 retain full runtime artifact and guest-state admission.
-The workflow-dispatch `compiler-cache=false` input disables compiler restoration
-for a cold measurement. Every runtime lane has at most ten minutes. The runtime
+Matching compiler artifacts are restored and missing inputs are rebuilt; every
+selected test still executes. Every runtime lane has at most ten minutes. The runtime
 budget gate checks elapsed time from workflow start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed.
