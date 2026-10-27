@@ -140,10 +140,10 @@ retaining every restore, transfer checkpoint, byte comparison and source asserti
 CI runs session behavior, session ownership/failure, source regression, native
 semantic, specialization/publication, two source-agreement and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
-82 named cases (52 behavior, 14 ownership/failure, 16 source regressions) and
+86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and
 the anonymous import sentinel. Standalone test executables show each case and
 require the complete selected count; the ordinary `check-sessions` target still
-runs all 83 cases together. Source-agreement partitions select disjoint fixture
+runs all 87 cases together. Source-agreement partitions select disjoint fixture
 sets while retaining every mode, instruction frontier, cancellation and comparison;
 together they execute all 70 fixtures and report their actual observation counts. The native semantic
 group rebuilds the source artifact, while specialization and publication use the
