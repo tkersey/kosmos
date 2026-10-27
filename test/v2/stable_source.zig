@@ -10,7 +10,8 @@ test {
 }
 
 test "behavior: exported mixed library client returns its scoped callable result" {
-    var compiled = try horos.program.lower(testing.allocator, @import("authoring_client").Application);
+    const Client = @import("authoring_client").Application;
+    var compiled = try horos.program.lower(testing.allocator, Client);
     defer compiled.deinit();
     const image = try programBytes(compiled.program);
     defer testing.allocator.free(image);
@@ -21,7 +22,8 @@ test "behavior: exported mixed library client returns its scoped callable result
     defer session.deinit();
     const result = try drive(&session, null);
     try testing.expect(result == .completed);
-    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+    const observed = try session.bytes(&result.completed);
+    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, observed);
 }
 
 test "ownership: encoded cursors export canonical immutable checkpoints and restore as values" {
