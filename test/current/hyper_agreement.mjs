@@ -17,6 +17,7 @@ const tasks = [
 export const hyperExamples = [
   ...pure.map(([name]) => `hyper_${name}`),
   ...tasks.map(([name]) => `hyper_task_${name}`), "hyper_composition",
+  ...["obtain", "resume", "repeated", "dispose", "local"].map(name => `hyper_captured_${name}`),
 ];
 const word = value => {
   const bytes = Buffer.alloc(8);
@@ -32,8 +33,8 @@ function terminal(step, oracle) {
   assert.deepEqual(step.cleanupFailures ?? [], oracle.cleanupFailures ?? []);
 }
 
-async function resident(host, prepare, image, responses, oracle) {
-  const session = host.start(prepare(image), new Uint8Array());
+async function resident(host, prepare, image, responses, oracle, initialArgs = new Uint8Array()) {
+  const session = host.start(prepare(image), initialArgs);
   const trace = [];
   let step = decodeOutcome(host.drive(session)), replies = 0;
   while (step.kind === "requested") {
@@ -135,6 +136,54 @@ export async function hyperAgreement({ fixtures, readFile, selected, compare, ex
         const calls = await restored(compare, image, new Uint8Array(), overflowReplies, failed, mode);
         if (mode === "advance") costs.push({ fixture: name, scenario: "overflow", invocations: calls });
       }
+    }
+  }
+  for (const kind of ["obtain", "resume", "repeated", "dispose"]) {
+    const name = `hyper_captured_${kind}`;
+    if (!selected(name)) continue;
+    const { source, image } = await load(name);
+    for (const [producer, consumer] of [[10, 20], [3, 40]]) {
+      const produced = [producer, consumer, producer, producer + 5, producer + 100];
+      const payloads = kind === "obtain" ? [] : kind === "dispose"
+        ? [consumer, ...produced, consumer, consumer + 100] : kind === "repeated"
+          ? [consumer, ...produced, consumer, ...produced, consumer,
+            consumer + 2 * (producer + 5), consumer + 100, consumer + 100]
+          : [consumer, ...produced, consumer, consumer + producer + 5, consumer + 100];
+      const value = kind === "obtain" ? 7 : kind === "dispose" ? consumer
+        : consumer + (kind === "repeated" ? 2 : 1) * (producer + 5);
+      const initialArgs = Uint8Array.from([...word(producer), ...word(consumer)]);
+      const responses = payloads.map(() => word(5));
+      const oracle = execute(source, [...initialArgs], responses);
+      assert.deepEqual(oracle, {
+        kind: "Completed", value: word(value),
+        trace: payloads.map(value => ({
+          kind: "Requested", identity: "hyper/captured", payload: word(value),
+        })),
+      });
+      await resident(host, prepare, image, responses, oracle, initialArgs);
+      for (const mode of ["run", "advance"]) {
+        const calls = await restored(compare, image, initialArgs, responses, oracle, mode);
+        if (mode === "advance") costs.push({
+          fixture: name, producer, consumer, invocations: calls,
+        });
+      }
+    }
+  }
+  if (selected("hyper_captured_local")) {
+    const name = "hyper_captured_local";
+    const { source, image } = await load(name);
+    const responses = [word(5), word(5)];
+    const oracle = execute(source, [], responses);
+    assert.deepEqual(oracle, {
+      kind: "Completed", value: word(13),
+      trace: [7, 7].map(value => ({
+        kind: "Requested", identity: "hyper/captured", payload: word(value),
+      })),
+    });
+    await resident(host, prepare, image, responses, oracle);
+    for (const mode of ["run", "advance"]) {
+      const calls = await restored(compare, image, new Uint8Array(), responses, oracle, mode);
+      if (mode === "advance") costs.push({ fixture: name, invocations: calls });
     }
   }
   if (selected("hyper_composition")) {

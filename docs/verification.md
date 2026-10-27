@@ -111,8 +111,11 @@ representable sizes; this does not expand the JS/WASM physical input domain.
 The optional foreign-environment roots have distinct consumers:
 
 - `check-source`: the independent Horos higher-order interpreter versus actual
-  compiled native/WASM execution for 65 source examples, including all 42
-  historical examples and 18 typed hyperfunction fixtures.
+  compiled native/WASM execution for 70 source examples, including all 42
+  historical examples and 23 typed hyperfunction fixtures. Captured Need cases
+  exercise distinct entry arguments, completion effects, repeated requests and
+  disposal, and a completion using a cell allocated inside its task through
+  resident execution and every restored quantum-one cut.
 - `check-kernel`: the real JS embedding and canonical native/WASM ABI observations.
 - `check-capacity`: guest buffer bounds, physical memory growth and unchanged retry
   input; the fixed-memory case changes only the real module's memory declaration.
@@ -142,7 +145,7 @@ the anonymous import sentinel. Standalone test executables show each case and
 require the complete selected count; the ordinary `check-sessions` target still
 runs all 83 cases together. Source-agreement partitions select disjoint fixture
 sets while retaining every mode, instruction frontier, cancellation and comparison;
-together they execute all 65 fixtures and report their actual observation counts. The native semantic
+together they execute all 70 fixtures and report their actual observation counts. The native semantic
 group rebuilds the source artifact, while specialization and publication use the
 same authenticated packaged artifact. It does not invoke `check-native` and then the
 overlapping `check`. Native test run steps always execute, even when compilation
@@ -260,10 +263,11 @@ the serialization/memory tradeoff, not a product or provider speedup.
 ## Typed hyperfunction transfer
 
 The source-agreement root consumes Horos's ordinary typed hyperfunction images
-through the existing native and WASM evaluators. Its 18 fixtures cover ignored
+through the existing native and WASM evaluators. Its 23 fixtures cover ignored
 peers and successor states, retained definitions, lazy data, nested nominal Need
 families, task acquisition, repeated and adaptive requests, requester disposal,
-and three distinct composition endpoints. All 256 byte inputs check the
+captured step and completion values, task-local cells, and three distinct
+composition endpoints. All 256 byte inputs check the
 heterogeneous composition result; inputs 0, 7 and 255 also restore each instruction.
 
 Task fixtures compare an uninterrupted resident with the independent source
