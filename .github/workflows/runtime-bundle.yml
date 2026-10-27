@@ -83,9 +83,16 @@ jobs:
           vmstat -w 30 &
           observer=$!
           trap 'kill "$observer" 2>/dev/null || true' EXIT
-          /usr/bin/time -v zig build build-storage-check build-semantic-driver-check \
-            build-semantics-check build-zig17-check \
-            -Doptimize=safe --summary all --verbose
+          /usr/bin/time -v zig build build-storage-check build-semantics-check \
+            build-zig17-check -Doptimize=safe --summary all --verbose &
+          owners_pid=$!
+          /usr/bin/time -v zig build build-semantic-driver-check \
+            -Doptimize=safe --summary all --verbose &
+          driver_pid=$!
+          compile_status=0
+          wait "$owners_pid" || compile_status=1
+          wait "$driver_pid" || compile_status=1
+          exit "$compile_status"
       - name: Admit completed native compilation before execution
         id: native_cache_size
         if: matrix.lane == 'native'
