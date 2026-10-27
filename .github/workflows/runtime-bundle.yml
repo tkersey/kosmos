@@ -83,18 +83,27 @@ jobs:
           vmstat -w 30 &
           observer=$!
           trap 'kill "$observer" 2>/dev/null || true' EXIT
-          /usr/bin/time -v zig build build-storage-check build-semantic-driver-check \
-            build-semantics-check build-zig17-check \
-            -Doptimize=safe --summary all --verbose
+          /usr/bin/time -v zig build build-storage-check build-semantics-check \
+            build-zig17-check --cache-dir .zig-cache/native-owners \
+            -Doptimize=safe --summary all --verbose &
+          owners_pid=$!
+          /usr/bin/time -v zig build build-semantic-driver-check \
+            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all --verbose &
+          driver_pid=$!
+          compile_status=0
+          wait "$owners_pid" || compile_status=1
+          wait "$driver_pid" || compile_status=1
+          exit "$compile_status"
       - name: Admit completed native compilation before execution
         id: native_cache_size
         if: matrix.lane == 'native'
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
-          test -d .zig-cache/o || exit 0
+          test -d .zig-cache/native-owners/o || exit 0
+          test -d .zig-cache/native-driver/o || exit 0
           test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
-          test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
+          test -n "$(find .zig-cache/native-owners/o .zig-cache/native-driver/o -type f -size +0c -print -quit)" || exit 0
           bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
           test ! -e .zig-cache-upload
@@ -105,11 +114,15 @@ jobs:
             removed=$(find "$object" -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
             rm -rf -- "$object"
             bytes=$((bytes - removed))
-          done < <(find .zig-cache-upload/o -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -zn)
+          done < <(
+            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o; do
+              test ! -d "$objects" || find "$objects" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0'
+            done | sort -zn
+          )
           bytes=$(find .zig-cache-upload -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Upload snapshot: $bytes bytes"
           test "$bytes" -le 4294967296 || exit 0
-          test -n "$(find .zig-cache-upload/o -type f -size +0c -print -quit)" || exit 0
+          test -n "$(find .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o -type f -size +0c -print -quit)" || exit 0
           echo 'save=true' >> "$GITHUB_OUTPUT"
       - name: Retain completed native compilation before execution
         if: steps.native_cache_size.outputs.save == 'true'
@@ -120,10 +133,11 @@ jobs:
           key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Check native owners and independently rebuild the core
         if: matrix.lane == 'native'
-        run: >-
-          zig build check-storage check-semantic-driver check-semantics
-          check-zig17
-          -Doptimize=safe --summary all
+        run: |
+          zig build check-storage check-semantics check-zig17 \
+            --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
+          zig build check-semantic-driver \
+            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
       - name: Check specialization and public receipt owners
         if: matrix.lane == 'specialization'
         run: >-
