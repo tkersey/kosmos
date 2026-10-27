@@ -202,8 +202,10 @@ the old packaged evaluator with a new dependency manifest.
 The rebuilt consolidation evaluator bundle is 275,293 bytes, unchanged in size
 from the qualified prerequisite. Comparing its complete bytes with that bundle
 after replacing only the embedded Horos package identifier yields equality.
-The new artifact SHA-256 is
-`b3c148f348a579cb5456a6bf6f5fdedf44a9e2a3a5d664eade1f51fcc28e11fa`.
+The current artifact digest and selected Horos package identity are recorded in
+[`src/semantic_packaged.zig`](../src/semantic_packaged.zig), alongside the checked
+source digest. The exact qualified revision and command outcomes are recorded in
+[the consolidation PR](https://github.com/tkersey/kosmos/pull/76).
 This establishes unchanged evaluator-image content for these two builds; it
 does not make arbitrary saved-task bindings interchangeable. Final execution
 qualification remains a separate requirement.
