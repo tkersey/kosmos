@@ -151,8 +151,10 @@ same authenticated packaged artifact. It does not invoke `check-native` and then
 overlapping `check`. Native test run steps always execute, even when compilation
 is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional
-ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
-Zig's input hashes and the dependency admission guards remain authoritative.
+ABI fixture peer. Compiler caches may reuse content across dependency-lock changes.
+Cache lookup prefers the same lane across dependency-lock changes before its
+legacy cache fallbacks. Zig's input hashes and the dependency admission guards
+remain authoritative; a cache hit never replaces test execution.
 The native lane compiles its existing test artifacts and independently rebuilt
 core before retaining the bounded compiler cache. It then executes the original
 check roots, so a later test timeout does not discard completed compilation.
