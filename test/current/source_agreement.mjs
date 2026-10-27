@@ -23,7 +23,7 @@ assert(["all", "first", "second"].includes(group));
 const selected = name => {
   const index = requiredExamples.indexOf(name);
   assert(index >= 0, `unaccounted source fixture: ${name}`);
-  return group === "all" || index % 2 === (group === "first" ? 0 : 1);
+  return group === "all" || name === "borrow-operands" || index % 2 === (group === "first" ? 0 : 1);
 };
 const selectedExamples = requiredExamples.filter(selected);
 const { execute } = await import(pathToFileURL(oraclePath).href);
@@ -198,6 +198,7 @@ const cleanup = JSON.parse(await readFile(new URL("./cleanup-expectations.json",
     const source = JSON.parse(await readFile(join(fixtures, "source-borrow-operands.json"), "utf8"));
     const image = new Uint8Array(await readFile(join(fixtures, "source-borrow-operands.bpi3")));
     for (let index = 0; index < 53; index++) {
+      if (group !== "all" && index % 2 !== (group === "first" ? 0 : 1)) continue;
       const oracle = execute(source, [index], index >= 32 ? [[], []] : []);
       const populated = index % 2 === 1, owned = index >= 12;
       const kind = owned || !populated ? "Failed" : "Completed";
