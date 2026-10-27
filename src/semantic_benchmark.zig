@@ -737,7 +737,7 @@ fn cleanupModule(e: Author) !horos.source.Module {
         .payload = e.unit,
         .result = e.unit,
     });
-    const exit_info = try horos.library.cleanup.exitInfo(b, e.unit);
+    const exit_info = try horos.source.library.cleanup.exitInfo(b, e.unit);
     const recursive = try b.declare(&.{e.integer}, e.integer, &.{releasing}, &.{});
     const count = try e.param(recursive, 0);
     const body = try b.declare(&.{}, e.integer, &.{releasing}, &.{});

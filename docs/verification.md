@@ -181,6 +181,31 @@ record actual subjects, executed checks and remaining limits.
 
 ## Run the checks
 
+The adaptive-authoring consolidation selects Horos 8's canonical ordinary
+library surface. Deliberate cleanup fixtures now use
+`horos.source.library.cleanup`; no evaluator or portable-state family changes
+are needed. The session behavior suite imports Horos's ordinary package client
+from the authenticated package snapshot. It executes the Search callable and
+nested bounded record retained across Reader's scoped operation, then checks
+the independently specified result 42. This complements Horos's exported-client
+shape assertions and image-admission check with actual Kosmos execution.
+
+The selected dependency and regenerated packaged evaluator must be qualified
+together. Source overrides still have to produce the exact `build.zig.zon`
+package hash. Neither a version match nor an earlier prerequisite run qualifies
+the consolidation candidate. Saved tasks retain their existing program/runtime
+binding; rollback restores the previous complete tuple rather than combining
+the old packaged evaluator with a new dependency manifest.
+
+The rebuilt consolidation evaluator bundle is 275,293 bytes, unchanged in size
+from the qualified prerequisite. Comparing its complete bytes with that bundle
+after replacing only the embedded Horos package identifier yields equality.
+The new artifact SHA-256 is
+`b3c148f348a579cb5456a6bf6f5fdedf44a9e2a3a5d664eade1f51fcc28e11fa`.
+This establishes unchanged evaluator-image content for these two builds; it
+does not make arbitrary saved-task bindings interchangeable. Final execution
+qualification remains a separate requirement.
+
 From a source checkout, native checks use the pinned Zig toolchain, `tar`, and
 the source dependency:
 

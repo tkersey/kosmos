@@ -9,6 +9,21 @@ test {
     _ = @import("source_regressions.zig");
 }
 
+test "behavior: exported mixed library client returns its scoped callable result" {
+    var compiled = try horos.program.lower(testing.allocator, @import("authoring_client").Application);
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var input: [17]u8 = @splat(0);
+    std.mem.writeInt(u64, input[1..9], 7, .little);
+    std.mem.writeInt(u64, input[9..17], 35, .little);
+    var session = try Session.initImage(testing.allocator, image, &input);
+    defer session.deinit();
+    const result = try drive(&session, null);
+    try testing.expect(result == .completed);
+    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0, 0, 0, 0, 0 }, try session.bytes(&result.completed));
+}
+
 test "ownership: encoded cursors export canonical immutable checkpoints and restore as values" {
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
@@ -2266,7 +2281,7 @@ test "behavior: cancellation preserves cleanup at entry yield request and answer
     defer b.deinit();
     const unit = try b.scalar(void);
     const integer = try b.scalar(u64);
-    const info = try horos.library.cleanup.exitInfo(&b, integer);
+    const info = try horos.source.library.cleanup.exitInfo(&b, integer);
     const read_effect = try b.effect(.{
         .identity = "cancel/read",
         .payload = unit,

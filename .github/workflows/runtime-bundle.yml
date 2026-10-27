@@ -151,7 +151,7 @@ jobs:
             exit 1
           fi
           case "${{ matrix.lane }}" in
-            sessions) group=behavior; expected=54 ;;
+            sessions) group=behavior; expected=55 ;;
             session-ownership) group=ownership; expected=17 ;;
             source-regressions) group=regressions; expected=17 ;;
           esac
