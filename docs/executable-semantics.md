@@ -273,6 +273,14 @@ The producer supplies no trusted purity or consumer-identity flags. This path
 constructs a new guest program; it grants no live checkpoint or realization
 transport for the original guest.
 
+Successful proposal generation does not certify consumer-boundary eligibility.
+`source.consumer.inspect` describes that boundary; independent relation validation
+establishes each rewrite. The producer copies the selected closed term graph,
+including bindings, conditionals, calls, failures, yields and product/sum
+destructuring. Recursive calls retain their original targets. One fresh mapping
+per inline step preserves shared records and lexical shadowing, while explicit
+parameter bindings retain strict argument order and evaluation.
+
 The shared product-to-Boolean example executes the producer itself on Kosmos,
 decodes its proposal, independently validates it, and executes both callers on
 dynamic inputs. Structural lowering removes two call entries from the selected
@@ -280,7 +288,7 @@ route (three to one), while total transitions increase from eleven to thirteen
 because strict finite bindings remain. The other caller stays at three calls
 and eleven transitions. The existing semantic compiler already optimizes both
 versions; no additional backend speedup is claimed. In this sample, proposal
-construction uses 4,937 or 4,763 base transitions, with 1,299 input bytes and
+construction uses 6,643 or 6,469 base transitions, with 1,299 input bytes and
 4,818 output bytes.
 
 Horos's logical-context examples also run through the ordinary Session owner.

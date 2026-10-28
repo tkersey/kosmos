@@ -1198,6 +1198,195 @@ test "generated consumer composition inspects dynamic sites and emits checked in
     }
     try std.testing.expectEqual(@as(usize, 2), count);
     try expectSharedConsumerCall(&producer);
+    try expectConsumerTermBodies(&producer);
+}
+
+const ConsumerBody = enum { value, bind, conditional, call, fail, yield_then, match_sum, unpack };
+const ConsumerArgument = enum { parameter, computed, fault, duplicate, indirect };
+const ConsumerCase = struct {
+    body: ConsumerBody,
+    consumer: bool = false,
+    argument: ConsumerArgument = .parameter,
+};
+
+fn expectConsumerTermBodies(producer: *const base.Prepared) !void {
+    for (std.enums.values(ConsumerBody)) |body| {
+        for ([_]bool{ false, true }) |consumer| try expectConsumerCase(producer, .{
+            .body = body,
+            .consumer = consumer,
+        });
+    }
+    for ([_]ConsumerArgument{ .computed, .fault, .duplicate, .indirect }) |argument|
+        try expectConsumerCase(producer, .{ .body = .value, .argument = argument });
+}
+
+fn consumerCaseInput(b: *source.Builder, case: ConsumerCase) !source.Module {
+    const e = try Author.init(b);
+    const producer = try b.declare(&.{ e.integer, e.integer }, e.integer, &.{}, &.{});
+    const consumer = try b.declare(&.{ e.integer, e.integer }, e.integer, &.{}, &.{});
+    const entry = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    try b.define(producer, try consumerCaseBody(
+        e,
+        producer,
+        if (case.consumer) .value else case.body,
+    ));
+    try b.define(consumer, try consumerCaseBody(
+        e,
+        consumer,
+        if (case.consumer) case.body else .value,
+    ));
+    const argument = try e.param(entry, 0);
+    const variable = try b.variable(e.integer);
+    const result = try b.reference(variable);
+    const extra = switch (case.argument) {
+        .parameter => argument,
+        .computed => try e.binary(.integer_bit_xor, argument, e.one),
+        .fault => try e.binary(.integer_div, argument, e.zero),
+        .duplicate => result,
+        .indirect => try e.binary(.integer_bit_xor, result, result),
+    };
+    var calls: [2]u64 = undefined;
+    for (0..2) |index| {
+        const position = if (case.consumer) 1 - index else index;
+        calls[position] = if (position == 0)
+            try e.call(producer, &.{ argument, argument })
+        else
+            try e.call(consumer, &.{ result, extra });
+    }
+    try b.define(entry, try b.bind(variable, calls[0], calls[1]));
+    return b.module(entry, e.unit);
+}
+
+fn consumerCaseBody(e: Author, function: u64, body: ConsumerBody) !u64 {
+    const input = try e.param(function, 0);
+    const returned = try e.b.pure(input);
+    return switch (body) {
+        .value => returned,
+        .fail => e.fail(),
+        .yield_then => e.b.term(.{ .yield_then = returned }),
+        .conditional => e.when(
+            try e.binary(.less, input, e.one),
+            returned,
+            try e.b.pure(try e.binary(.integer_bit_xor, input, e.one)),
+        ),
+        .call => e.when(
+            try e.binary(.equal, input, e.zero),
+            returned,
+            try e.call(function, &.{ e.zero, try e.param(function, 1) }),
+        ),
+        .bind => blk: {
+            const variable = e.b.parameter(function, 0);
+            const flipped = try e.b.pure(try e.binary(.integer_bit_xor, input, e.one));
+            break :blk e.b.bind(variable, flipped, try e.b.bind(variable, flipped, returned));
+        },
+        .match_sum, .unpack => consumerCaseDestructure(e, input, body),
+    };
+}
+
+fn consumerCaseDestructure(e: Author, input: u64, body: ConsumerBody) !u64 {
+    const first = try e.b.variable(e.integer);
+    const second = try e.b.variable(e.integer);
+    const fields: []const u64 = &.{ e.integer, e.integer };
+    if (body == .match_sum) {
+        const sum = try e.b.schema(.{ .sum = fields });
+        return e.b.term(.{ .match_sum = .{
+            .value = try e.variant(sum, 1, input),
+            .cases = &.{
+                .{ .variable = first, .body = try e.b.pure(try e.b.reference(first)) },
+                .{ .variable = second, .body = try e.b.pure(try e.b.reference(second)) },
+            },
+        } });
+    }
+    const product = try e.b.schema(.{ .product = fields });
+    return e.b.term(.{ .unpack_product = .{
+        .value = try e.tuple(product, &.{ try e.binary(.integer_bit_xor, input, e.one), input }),
+        .variables = &.{ first, second },
+        .body = try e.b.pure(try e.b.reference(second)),
+    } });
+}
+
+fn expectConsumerCase(producer: *const base.Prepared, case: ConsumerCase) !void {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try consumerCaseInput(&b, case);
+    const site: source.consumer.Site = .{
+        .function = module.entry,
+        .binding = module.functions[@intCast(module.entry)].body.?,
+    };
+    var inspected = try source.consumer.inspect(a, module, site, .{});
+    defer inspected.deinit();
+    const blocked = case.argument == .duplicate or case.argument == .indirect;
+    if (blocked) {
+        try std.testing.expect(inspected.outcome == .blocked);
+        try std.testing.expectEqual(
+            if (case.argument == .duplicate)
+                @as(std.meta.Tag(source.consumer.Blocker), .multiple_consumer_arguments)
+            else
+                .indirect_consumer_argument,
+            std.meta.activeTag(inspected.outcome.blocked),
+        );
+    } else {
+        try std.testing.expect(inspected.outcome == .boundary);
+        try std.testing.expect(inspected.outcome.boundary.blocker == null);
+    }
+    const input = try projection.encode(@import("semantic/transformation.zig").ConsumerInput, a, .{
+        .module = module,
+        .site = site,
+    });
+    defer a.free(input);
+    var generated = try runGenerated(producer, input);
+    defer generated.deinit();
+    try validateGenerated(module, generated.value, &.{});
+    if (!blocked) {
+        var expected = try source.consumer.compose(a, module, site, .{});
+        defer expected.deinit();
+        try std.testing.expectEqual(expected.steps.len, generated.value.steps.len);
+        for (expected.steps, generated.value.steps) |left, right| {
+            try std.testing.expectEqual(left.rule.inline_call, right.rule.inline_call);
+            try std.testing.expect(data.record.equal(
+                source.Module,
+                left.successor,
+                right.successor,
+            ));
+        }
+        try std.testing.expect(data.record.equal(
+            source.Module,
+            expected.module,
+            generated.value.selected,
+        ));
+    }
+    for ([_]source.Module{ module, generated.value.selected }) |selected|
+        try expectConsumerCaseExecution(selected, case);
+}
+
+fn expectConsumerCaseExecution(module: source.Module, case: ConsumerCase) !void {
+    var prepared = try support.prepare(module);
+    defer prepared.deinit();
+    for ([_]u64{ 0, 7 }) |value| {
+        var input: [8]u8 = undefined;
+        std.mem.writeInt(u64, &input, value, .little);
+        var session = try base.Session.start(a, &prepared, &input, .{});
+        defer session.deinit();
+        var outcome = try session.run(null);
+        if (case.body == .yield_then) {
+            try std.testing.expect(outcome == .yielded);
+            try session.resumeYield();
+            outcome = try session.run(null);
+        }
+        if (case.body == .fail or case.argument == .fault) {
+            try std.testing.expect(outcome == .failed);
+            try std.testing.expectEqual(@as(usize, 0), (try session.bytes(&outcome.failed)).len);
+        } else {
+            try std.testing.expect(outcome == .completed);
+            const expected = switch (case.body) {
+                .call => 0,
+                .conditional => if (value < 1) value else value ^ 1,
+                else => value,
+            };
+            const result = try session.bytes(&outcome.completed);
+            try std.testing.expectEqual(expected, std.mem.readInt(u64, result[0..8], .little));
+        }
+    }
 }
 
 fn expectSharedConsumerCall(producer: *const base.Prepared) !void {
