@@ -86,7 +86,6 @@ const Generator = struct {
     ctx: Id,
     graph: graphs.Definition,
     refs: references.Definition,
-    frame_refs: references.Definition,
     capture_refs: references.Definition,
     list: tables.Definition,
     lists: maps.Definition,
@@ -348,7 +347,6 @@ fn defineC(
         .ctx = ctx,
         .graph = try graphs.define(e.b, m),
         .refs = node_refs,
-        .frame_refs = try references.define(data.process_state.Activation, e.b),
         .capture_refs = try references.define(g.Capture, e.b),
         .list = list,
         .lists = lists,
@@ -470,9 +468,7 @@ fn emitRunFrame(
     optional_frame: anytype,
     nil: Id,
     present: Id,
-    public: Id,
-    mapped_public: Id,
-    hydrated: Id,
+    rebased: Id,
 ) Error!Id {
     return try e.b.term(
         .{
@@ -482,20 +478,14 @@ fn emitRunFrame(
                     .{ .variable = nil, .body = try e.b.pure(
                         try e.variant(optional_frame, 0, e.unit_value),
                     ) },
-                    .{ .variable = present, .body = try e.b.bind(public, try e.call(
-                        c.m.frames.to_public,
-                        &.{try e.b.reference(present)},
-                    ), try e.b.bind(mapped_public, try e.call(
-                        c.frame_refs.rebase,
-                        &.{ try e.b.reference(public), mapping },
-                    ), try e.b.bind(hydrated, try e.call(
-                        c.m.frames.from_public,
-                        &.{try e.b.reference(mapped_public)},
+                    .{ .variable = present, .body = try e.b.bind(rebased, try e.call(
+                        c.m.frames.rebase_references,
+                        &.{ try e.b.reference(present), mapping },
                     ), try e.b.pure(try e.variant(
                         optional_frame,
                         1,
-                        try e.b.reference(hydrated),
-                    ))))) },
+                        try e.b.reference(rebased),
+                    ))) },
                 },
             },
         },
@@ -617,17 +607,13 @@ fn emitScanScan(c: Generator, e: anytype) Error!void {
     const frame = try e.field(try e.b.reference(element), 1);
     const initial = try e.b.variable(c.list.table);
     const collected = try e.b.variable(c.list.table);
-    const public_frame = try e.b.variable(c.m.frames.public);
     const nil = try e.b.variable(e.unit);
     const present = try e.b.variable(c.m.frames.schema);
     const frames = try e.b.term(.{ .match_sum = .{ .value = frame, .cases = &.{
         .{ .variable = nil, .body = try e.b.pure(try e.b.reference(initial)) },
-        .{ .variable = present, .body = try e.b.bind(public_frame, try e.call(
-            c.m.frames.to_public,
-            &.{try e.b.reference(present)},
-        ), try e.call(c.frame_refs.walk, &.{
-            try e.b.reference(public_frame), try e.b.reference(initial),
-        })) },
+        .{ .variable = present, .body = try e.call(c.m.frames.walk_references, &.{
+            try e.b.reference(present), try e.b.reference(initial),
+        }) },
     } } });
     const immutable = try e.b.variable(e.boolean);
     var choose = try e.b.pure(try e.b.constant(bool, false));
@@ -761,9 +747,7 @@ fn emitRebase(c: Generator, e: anytype) Error!void {
     const optional_frame = e.b.schemas.items[@intCast(c.m.nodes.element)].product[1];
     const nil = try e.b.variable(e.unit);
     const present = try e.b.variable(c.m.frames.schema);
-    const public = try e.b.variable(c.m.frames.public);
-    const mapped_public = try e.b.variable(c.m.frames.public);
-    const hydrated = try e.b.variable(c.m.frames.schema);
+    const rebased = try e.b.variable(c.m.frames.schema);
     const frame = try emitRunFrame(
         c,
         e,
@@ -772,9 +756,7 @@ fn emitRebase(c: Generator, e: anytype) Error!void {
         optional_frame,
         nil,
         present,
-        public,
-        mapped_public,
-        hydrated,
+        rebased,
     );
     const target = try e.b.variable(c.refs.map.optional);
     const nodes = try e.b.variable(c.m.nodes.table);

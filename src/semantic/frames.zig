@@ -5,6 +5,7 @@ const source = @import("horos").source;
 const projection = @import("projection.zig");
 const maps = @import("map.zig");
 const table = @import("table.zig");
+const references = @import("references.zig");
 const Author = @import("author.zig").Author;
 const Id = data.program.Id;
 const Error = source.Error;
@@ -29,6 +30,8 @@ pub const Definition = struct {
     prune: Id,
     retain: Id,
     discards: Id,
+    walk_references: Id,
+    rebase_references: Id,
 };
 
 pub fn define(b: *source.Builder) Error!Definition {
@@ -68,7 +71,175 @@ pub fn define(b: *source.Builder) Error!Definition {
     try emitCommon(e, owners, scopes, d, rescope);
     try emitPrune(e, d, retained);
     try emitLoop(e, value, owners, schema, d);
+    try emitReferences(e, d);
     return cache.finish(b, d);
+}
+
+const TreeRebase = struct {
+    result: Id,
+    rebase: Id,
+    values: references.ValueRebaseDefinition,
+};
+
+fn emitReferences(e: Author, d: Definition) Error!void {
+    const b = e.b;
+    const values = try references.define(data.graph.Value, b);
+    const changes = try references.defineValueRebase(b);
+    const result = try b.schema(.{ .sum = &.{ e.unit, d.slots.tree } });
+    const tree: TreeRebase = .{
+        .result = result,
+        .rebase = try b.declare(&.{ d.slots.tree, changes.map.tree }, result, &.{}, &.{}),
+        .values = changes,
+    };
+    const walk = try emitReferenceWalk(e, d, values);
+    try b.define(d.walk_references, try e.call(walk, &.{
+        try e.field(try e.param(d.walk_references, 0), 2),
+        try e.param(d.walk_references, 1),
+    }));
+    try emitTreeRebase(e, d, tree);
+    const frame = try e.param(d.rebase_references, 0);
+    const mapping = try e.param(d.rebase_references, 1);
+    const changed = try b.variable(result);
+    const nil = try b.variable(e.unit);
+    const replacement = try b.variable(d.slots.tree);
+    const apply = try b.bind(changed, try e.call(tree.rebase, &.{
+        try e.field(frame, 2), mapping,
+    }), try b.term(.{ .match_sum = .{
+        .value = try b.reference(changed),
+        .cases = &.{
+            .{ .variable = nil, .body = try b.pure(frame) },
+            .{ .variable = replacement, .body = try b.pure(try e.replace(
+                frame,
+                2,
+                try b.reference(replacement),
+            )) },
+        },
+    } }));
+    try b.define(d.rebase_references, try e.when(
+        try isEmpty(e, mapping),
+        try b.pure(frame),
+        apply,
+    ));
+}
+
+fn emitReferenceWalk(e: Author, d: Definition, values: references.Definition) Error!Id {
+    const b = e.b;
+    const walk = try b.declare(
+        &.{ d.slots.tree, values.refs.table },
+        values.refs.table,
+        &.{},
+        &.{},
+    );
+    const nil = try b.variable(e.unit);
+    const leaf = try b.variable(d.slots.entry);
+    const fork = try b.variable(d.slots.branch);
+    const ordinary = try b.variable(try projection.schema(data.graph.Value, b));
+    const raw = try b.variable(try projection.schema(Scalar, b));
+    const prior = try e.param(walk, 1);
+    const after_left = try b.variable(values.refs.table);
+    const node = try b.reference(fork);
+    const entry = try b.term(.{ .match_sum = .{
+        .value = try e.field(try b.reference(leaf), 1),
+        .cases = &.{
+            .{ .variable = ordinary, .body = try e.call(values.walk, &.{
+                try b.reference(ordinary), prior,
+            }) },
+            .{ .variable = raw, .body = try b.pure(prior) },
+        },
+    } });
+    try b.define(walk, try b.term(.{ .match_sum = .{
+        .value = try e.param(walk, 0),
+        .cases = &.{
+            .{ .variable = nil, .body = try b.pure(prior) },
+            .{ .variable = leaf, .body = entry },
+            .{ .variable = fork, .body = try b.bind(after_left, try e.call(walk, &.{
+                try e.field(node, 1), prior,
+            }), try e.call(walk, &.{ try e.field(node, 2), try b.reference(after_left) })) },
+        },
+    } }));
+    return walk;
+}
+
+fn emitTreeRebase(e: Author, d: Definition, tree: TreeRebase) Error!void {
+    const b = e.b;
+    const nil = try b.variable(e.unit);
+    const leaf = try b.variable(d.slots.entry);
+    const fork = try b.variable(d.slots.branch);
+    try b.define(tree.rebase, try b.term(.{ .match_sum = .{
+        .value = try e.param(tree.rebase, 0),
+        .cases = &.{
+            .{ .variable = nil, .body = try b.pure(try e.variant(tree.result, 0, e.unit_value)) },
+            .{ .variable = leaf, .body = try rebaseEntry(e, d, tree, try b.reference(leaf)) },
+            .{ .variable = fork, .body = try rebaseBranch(e, d, tree, try b.reference(fork)) },
+        },
+    } }));
+}
+
+fn rebaseEntry(e: Author, d: Definition, tree: TreeRebase, entry: Id) Error!Id {
+    const b = e.b;
+    const value = try projection.schema(data.graph.Value, b);
+    const ordinary = try b.variable(value);
+    const raw = try b.variable(try projection.schema(Scalar, b));
+    const changed = try b.variable(tree.values.result);
+    const nil = try b.variable(e.unit);
+    const replacement = try b.variable(value);
+    const unchanged = try b.pure(try e.variant(tree.result, 0, e.unit_value));
+    const next_slot = try e.variant(d.slot, 0, try b.reference(replacement));
+    const next_entry = try e.replace(entry, 1, next_slot);
+    const next_tree = try e.variant(d.slots.tree, 1, next_entry);
+    const rebase = try b.bind(changed, try e.call(tree.values.rebase, &.{
+        try b.reference(ordinary), try e.param(tree.rebase, 1),
+    }), try b.term(.{ .match_sum = .{
+        .value = try b.reference(changed),
+        .cases = &.{
+            .{ .variable = nil, .body = unchanged },
+            .{ .variable = replacement, .body = try b.pure(try e.variant(
+                tree.result,
+                1,
+                next_tree,
+            )) },
+        },
+    } }));
+    return b.term(.{ .match_sum = .{
+        .value = try e.field(entry, 1),
+        .cases = &.{
+            .{ .variable = ordinary, .body = rebase },
+            .{ .variable = raw, .body = unchanged },
+        },
+    } });
+}
+
+fn changedBranch(e: Author, d: Definition, tree: TreeRebase, node: Id, l: Id, r: Id) Error!Id {
+    const branch = try e.tuple(d.slots.branch, &.{ try e.field(node, 0), l, r });
+    return e.b.pure(try e.variant(tree.result, 1, try e.variant(d.slots.tree, 2, branch)));
+}
+
+fn rebaseBranch(e: Author, d: Definition, tree: TreeRebase, node: Id) Error!Id {
+    const b = e.b;
+    const mapping = try e.param(tree.rebase, 1);
+    const left = try e.field(node, 1);
+    const right = try e.field(node, 2);
+    const left_change = try b.variable(tree.result);
+    const right_change = try b.variable(tree.result);
+    const l = try b.reference(left_change);
+    const r = try b.reference(right_change);
+    const left_new = try e.payload(l, 1);
+    const right_new = try e.payload(r, 1);
+    const left_same = try e.when(
+        try isEmpty(e, r),
+        try b.pure(try e.variant(tree.result, 0, e.unit_value)),
+        try changedBranch(e, d, tree, node, left, right_new),
+    );
+    const left_changed = try e.when(
+        try isEmpty(e, r),
+        try changedBranch(e, d, tree, node, left_new, right),
+        try changedBranch(e, d, tree, node, left_new, right_new),
+    );
+    return b.bind(left_change, try e.call(tree.rebase, &.{ left, mapping }), try b.bind(
+        right_change,
+        try e.call(tree.rebase, &.{ right, mapping }),
+        try e.when(try isEmpty(e, l), left_same, left_changed),
+    ));
 }
 
 const Walk = enum { remove, scope, prune };
@@ -426,11 +597,19 @@ fn defineD(
     live: Id,
     keys: anytype,
 ) Error!Definition {
+    const refs = try references.define(data.graph.Value, e.b);
     return .{
         .schema = schema,
         .public = public,
         .slot = slot_type,
         .slots = slots,
+        .walk_references = try e.b.declare(
+            &.{ schema, refs.refs.table },
+            refs.refs.table,
+            &.{},
+            &.{},
+        ),
+        .rebase_references = try e.b.declare(&.{ schema, refs.map.tree }, schema, &.{}, &.{}),
         .read_raw = try e.b.declare(&.{ schema, e.integer }, e.integer, &.{}, &.{}),
         .write_raw = try e.b.declare(&.{ schema, e.integer, scalar }, schema, &.{}, &.{}),
         .valid = try e.b.declare(&.{schema}, e.boolean, &.{}, &.{}),

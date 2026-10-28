@@ -17,14 +17,21 @@ test {
 test "downstream packaged core equals independently rebuilt and validated source" {
     const retained = @import("semantic_packaged.zig");
 
-    var admitted = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    const rebuilt = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "semantic-core.kar",
+        a,
+        .unlimited,
+    );
+    defer a.free(rebuilt);
+    var admitted = try artifact.Admitted.init(a, rebuilt, artifact.digest(rebuilt));
     defer admitted.deinit();
     try expectSourceExport(&admitted);
     var exported = try @import("semantic/compiler.zig").exportSource(a, &admitted);
     defer exported.deinit();
     try @import("semantic/analysis_tests.zig").expectDisclosedAnalysis(exported.value);
     try retained.check(admitted.content.value.manifest.compiler.horos_package);
-    try std.testing.expectEqualSlices(u8, packaged.bytes, retained.bytes);
+    try std.testing.expectEqualSlices(u8, rebuilt, retained.bytes);
     try std.testing.expectError(
         error.PackagedCompilerMismatch,
         retained.check("different-compiler-package"),

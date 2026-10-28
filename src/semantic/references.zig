@@ -18,6 +18,108 @@ pub const Definition = struct {
     refs: tables.Definition,
 };
 
+pub const ValueRebaseDefinition = struct {
+    result: Id,
+    rebase: Id,
+    map: maps.Definition,
+};
+
+pub fn defineValueRebase(b: *source.Builder) Error!ValueRebaseDefinition {
+    comptime guardValueLayout();
+    const cache = try b.specialization(
+        ValueRebaseDefinition,
+        "kosmos.semantic.references.value-rebase/1",
+        0,
+    );
+    if (cache.cached) |saved| return saved;
+    const e = try Author.init(b);
+    const value = try projection.schema(g.Value, b);
+    const node = try define(g.NodeRef, b);
+    const result = try b.schema(.{ .sum = &.{ e.unit, value } });
+    const d: ValueRebaseDefinition = .{
+        .result = result,
+        .rebase = try b.declare(&.{ value, node.map.tree }, result, &.{}, &.{}),
+        .map = node.map,
+    };
+    try emitValueRebase(e, d, node);
+    return cache.finish(b, d);
+}
+
+fn guardFields(comptime T: type, comptime names: anytype, comptime types: anytype) void {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |info| info,
+        .@"union" => |info| info,
+        else => @compileError("expected graph aggregate"),
+    };
+    if (info.field_names.len != names.len) @compileError("graph layout changed");
+    inline for (names, types, 0..) |name, Field, i| {
+        if (!std.mem.eql(u8, info.field_names[i], name) or info.field_types[i] != Field)
+            @compileError("graph layout changed");
+    }
+}
+
+fn guardValueLayout() void {
+    const Body = @FieldType(g.Value, "body");
+    guardFields(g.Value, .{ "schema", "body" }, .{ Id, Body });
+    guardFields(g.NodeRef, .{"id"}, .{Id});
+    guardFields(g.BlobRef, .{"id"}, .{Id});
+    guardFields(g.OwnedRef, .{"node"}, .{g.NodeRef});
+    guardFields(Body, .{ "scalar", "blob", "reference", "owned" }, .{
+        [8]u8, g.BlobRef, g.NodeRef, g.OwnedRef,
+    });
+    const info = @typeInfo(Body).@"union";
+    if (info.tag_type != g.ValueTag) @compileError("graph value tags changed");
+    inline for (info.field_names, 0..) |name, i| {
+        if (@backingInt(@field(g.ValueTag, name)) != i)
+            @compileError("graph value tags changed");
+    }
+}
+
+fn emitValueRebase(e: Author, d: ValueRebaseDefinition, node: Definition) Error!void {
+    const b = e.b;
+    const Body = @FieldType(g.Value, "body");
+    const info = @typeInfo(Body).@"union";
+    const Case = std.meta.Elem(@FieldType(@FieldType(source.ast.Term, "match_sum"), "cases"));
+    var cases: [info.field_types.len]Case = undefined;
+    inline for (info.field_types, 0..) |Payload, i| {
+        const variable = try b.variable(try projection.schema(Payload, b));
+        const tag: g.ValueTag = @fromBackingInt(@intCast(i));
+        cases[i] = .{ .variable = variable, .body = switch (tag) {
+            .scalar, .blob => try b.pure(try e.variant(d.result, 0, e.unit_value)),
+            .reference, .owned => try valueReferenceChange(e, d, node, tag, variable),
+        } };
+    }
+    try b.define(d.rebase, try b.term(.{ .match_sum = .{
+        .value = try e.field(try e.param(d.rebase, 0), 1),
+        .cases = &cases,
+    } }));
+}
+
+fn valueReferenceChange(
+    e: Author,
+    d: ValueRebaseDefinition,
+    node: Definition,
+    comptime tag: g.ValueTag,
+    variable: Id,
+) Error!Id {
+    const b = e.b;
+    const original = try e.param(d.rebase, 0);
+    const payload = try b.reference(variable);
+    const old = if (tag == .owned) try e.field(payload, 0) else payload;
+    const mapped = try b.variable(try projection.schema(g.NodeRef, b));
+    const replacement = try b.reference(mapped);
+    const next = if (tag == .owned) try e.replace(payload, 0, replacement) else replacement;
+    const body = try projection.schema(@FieldType(g.Value, "body"), b);
+    const changed = try e.replace(original, 1, try e.variant(body, @backingInt(tag), next));
+    return b.bind(mapped, try e.call(node.rebase, &.{
+        old, try e.param(d.rebase, 1),
+    }), try e.when(
+        try e.binary(.equal, try e.field(old, 0), try e.field(replacement, 0)),
+        try b.pure(try e.variant(d.result, 0, e.unit_value)),
+        try b.pure(try e.variant(d.result, 1, changed)),
+    ));
+}
+
 fn contains(comptime T: type, comptime Ref: type) bool {
     return comptime blk: {
         @setEvalBranchQuota(100_000);

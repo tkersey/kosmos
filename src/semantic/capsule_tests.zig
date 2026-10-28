@@ -681,59 +681,31 @@ test "advance and finish retain recovery at every bounded cut" {
 }
 
 test "outer capsule retains clone microprogress and requires exact consumed custody" {
-    var selected = try artifact.Admitted.init(
+    var generic = try artifact.Admitted.init(
         a,
         @import("packaged_runtime").bytes,
         artifact.digest(@import("packaged_runtime").bytes),
     );
-    defer selected.deinit();
-    var b = source.Builder.init(a);
-    defer b.deinit();
-    const image = try support.encode(try source.examples.cloned(&b));
+    defer generic.deinit();
+    const image = try rawCloneGuest();
     defer a.free(image);
     var prepared = try base.Prepared.init(a, image);
     defer prepared.deinit();
-    var original = try driver.Driver.start(a, &prepared, &selected, .{ .arguments = &.{} });
-    var original_live = true;
-    defer if (original_live) original.deinit();
-    var initialized = try original.pump(null);
-    initialized.event.deinit();
-    try seekCloneRebase(&original, &selected);
-    try std.testing.expectError(error.GuestCutUnavailable, original.checkpoint(a));
-    const provenance: capsule.Provenance = .{
-        .execution = @splat(3),
-        .custody = @splat(7),
-        .publication = null,
-    };
-    const bytes = try capsule.publish(a, &original, .outer_execution, provenance);
+    const guest = try prepared.acquire();
+    defer guest.release();
+    const bytes = try @import("compiler.zig").compile(a, .{
+        .horos_package = generic.content.value.manifest.compiler.horos_package,
+        .guest = guest.admitted(),
+    });
     defer a.free(bytes);
-    try inspectOuterView(&original, &selected, bytes);
-    const before = try original.outer.checkpoint(a);
-    defer a.free(before);
-    var custody = try checkRejectedCustody(&prepared, &selected, bytes, provenance);
-    // The publisher retires at its publication fence before destination use.
-    original.deinit();
-    original_live = false;
-    var restored = try capsule.restore(a, &prepared, &selected, bytes, custody.verifier());
-    defer restored.deinit();
-    const after = try restored.outer.checkpoint(a);
-    defer a.free(after);
-    try std.testing.expectEqualSlices(u8, before, after);
-    try std.testing.expectError(error.UnauthorizedCapsule, capsule.restore(
-        a,
-        &prepared,
-        &selected,
-        bytes,
-        custody.verifier(),
-    ));
-    var completed = try restored.pump(null);
-    try std.testing.expect(completed == .event and completed.event.value == .cut);
-    completed.event.deinit();
-    const checkpoint = try restored.checkpoint(a);
-    defer a.free(checkpoint);
-    var state = try data.state_image.decodeGraph(a, checkpoint);
-    defer state.deinit();
-    try data.state_admission.validateAdmitted(a, restored.guest.admitted(), state.state);
+    var specialized = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer specialized.deinit();
+    const realizations = [_]*artifact.Admitted{ &generic, &specialized };
+    for (realizations, 0..) |selected, i| try checkCloneCapsules(.{
+        .prepared = &prepared,
+        .selected = selected,
+        .other = realizations[1 - i],
+    }, image);
 }
 
 fn inspectOuterView(
@@ -869,43 +841,6 @@ test "public resident resumes every admitted outer operation and owns its output
     inline for (std.meta.tags(driver.Operation)) |operation| {
         try checkOperationCapsule(&prepared, provenance, operation);
     }
-}
-
-fn seekCloneRebase(original: *driver.Driver, selected: *artifact.Admitted) !void {
-    var found = false;
-    for (0..400) |_| {
-        const control: @import("service.zig").Control =
-            if (original.last_cut.?.status == .yielded) .resume_yield else .none;
-        try original.submit(.{ .advance = .{ .control = control, .quantum = 1 } });
-        for (0..std.math.maxInt(usize)) |_| {
-            var step = try original.pump(16);
-            if (step == .event) {
-                step.event.deinit();
-                break;
-            }
-            try std.testing.expect(step == .suspended);
-            const current = original.outer.roots.current orelse continue;
-            const frame = try original.outer.frames.get(current.id);
-            var rebase = false;
-            for (selected.content.value.recovery.anchors) |anchor| {
-                if (anchor.role == .clone_rebase and anchor.function == frame.function)
-                    rebase = true;
-            }
-            if (!rebase) continue;
-            const inspection = try @import("realization.zig").inspect(
-                a,
-                &original.outer,
-                original.selected,
-                original.guest.admitted(),
-            );
-            if (inspection.clone_rebases == 0) continue;
-            found = true;
-            break;
-        } else return error.PumpBoundExhausted;
-        if (found) break;
-        if (original.last_cut.?.status == .completed) return error.MissingClonePhase;
-    }
-    try std.testing.expect(found);
 }
 
 fn checkRejectedCustody(
@@ -1166,4 +1101,648 @@ fn checkRestoredOutput(restored: *@import("session.zig").Resident, expected: dri
         }
         break;
     } else return error.PumpBoundExhausted;
+}
+
+fn rawCloneGuest() ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try @import("author.zig").Author.init(&b);
+    const effect = try b.effect(.{
+        .identity = "test/raw-clone",
+        .payload = e.unit,
+        .result = e.integer,
+        .control_use = .multi,
+        .external = false,
+    });
+    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = e.integer,
+        .answer = e.integer,
+        .capture_bound = &.{ e.integer, cap },
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .multi,
+    } } });
+    const entry = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const body = try b.declare(&.{cap}, e.integer, &.{effect}, &.{});
+    const returns = try b.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const clause = try b.declare(&.{ e.unit, token }, e.integer, &.{}, &.{});
+    try defineRawCloneBody(e, entry, body, effect);
+    try defineRawCloneClause(e, clause);
+    try b.define(returns, try b.pure(try e.param(returns, 0)));
+    const handler = try b.handler(.{
+        .mode = .deep,
+        .input = e.integer,
+        .answer = e.integer,
+        .return_function = returns,
+        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
+    });
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = e.integer,
+        .effects = &.{effect},
+        .capture_bound = &.{e.integer},
+    } } });
+    try b.define(entry, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = try b.lambda(body, computation),
+    } }));
+    return support.encode(b.module(entry, e.unit));
+}
+
+fn defineRawCloneBody(
+    e: @import("author.zig").Author,
+    entry: data.program.Id,
+    body: data.program.Id,
+    effect: data.program.Id,
+) !void {
+    const b = e.b;
+    const raw = try b.variable(e.integer);
+    const first = try b.variable(e.integer);
+    const second = try b.variable(e.integer);
+    const perform = try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try e.param(body, 0),
+        .payload = e.unit_value,
+    } });
+    const answer = try b.pure(try e.binary(.integer_add, try b.reference(raw), try e.binary(
+        .integer_add,
+        try b.reference(first),
+        try b.reference(second),
+    )));
+    const suffix = try b.bind(second, perform, answer);
+    try b.define(body, try b.bind(raw, try b.pure(try e.binary(
+        .integer_bit_xor,
+        try e.param(entry, 0),
+        e.one,
+    )), try b.bind(first, perform, try b.term(.{ .yield_then = suffix }))));
+}
+
+fn defineRawCloneClause(e: @import("author.zig").Author, clause: data.program.Id) !void {
+    const b = e.b;
+    const first = try b.variable(e.integer);
+    const second = try b.variable(e.integer);
+    const token = try e.param(clause, 1);
+    const resume_first = try b.term(.{ .resume_value = .{
+        .resumption = token,
+        .argument = try b.constant(u64, 5),
+    } });
+    const resume_second = try b.term(.{ .resume_value = .{
+        .resumption = token,
+        .argument = try b.constant(u64, 7),
+    } });
+    const sum = try b.pure(try e.binary(
+        .integer_add,
+        try b.reference(first),
+        try b.reference(second),
+    ));
+    try b.define(clause, try b.bind(first, resume_first, try b.bind(second, resume_second, sum)));
+}
+
+const CloneRegion = struct {
+    kind: enum { walk, rebase },
+    function: data.program.Id,
+    slot: data.program.Id,
+    schema: data.program.Id,
+    tree: bool,
+};
+
+fn cloneRegions(exported: *const @import("compiler.zig").ExportedSource) ![]CloneRegion {
+    const frames = exported.definition.machine.frames;
+    var regions: std.ArrayList(CloneRegion) = .empty;
+    errdefer regions.deinit(a);
+    for ([_]data.program.Id{ frames.walk_references, frames.rebase_references }, 0..) |root, kind| {
+        var slice = try source.slice.extract(a, exported.value.generic.module, .{ .entry = root });
+        defer slice.deinit();
+        for (slice.maps.functions, 0..) |selected, original| {
+            if (selected == null) continue;
+            const module = exported.value.generic.module;
+            const function = module.functions[original];
+            if (function.parameters.len != 2) continue;
+            const schema = module.variables[@intCast(function.parameters[0])];
+            if (schema != frames.schema and schema != frames.slots.tree) continue;
+            try appendCloneRegions(exported, @intCast(original), .{
+                .kind = @fromBackingInt(@intCast(kind)),
+                .function = 0,
+                .slot = 0,
+                .schema = 0,
+                .tree = schema == frames.slots.tree,
+            }, &regions);
+        }
+    }
+    try std.testing.expect(regions.items.len >= 2);
+    return regions.toOwnedSlice(a);
+}
+
+fn appendCloneRegions(
+    exported: *const @import("compiler.zig").ExportedSource,
+    original: data.program.Id,
+    region: CloneRegion,
+    regions: *std.ArrayList(CloneRegion),
+) !void {
+    try appendCloneBindings(exported, original, region, regions);
+    if (exported.value.evidence.derivation) |derivation| {
+        for (derivation.functions) |function| {
+            if (function.before != original or function.arguments[0] == .known) continue;
+            try appendCloneBindings(exported, function.after, region, regions);
+        }
+    }
+}
+
+fn appendCloneBindings(
+    exported: *const @import("compiler.zig").ExportedSource,
+    function: data.program.Id,
+    region: CloneRegion,
+    regions: *std.ArrayList(CloneRegion),
+) !void {
+    const variable = exported.value.selected.module.functions[@intCast(function)].parameters[0];
+    for (exported.value.parameters) |binding| {
+        if (binding.source_function != function or binding.variable != variable) continue;
+        var actual = region;
+        actual.function = binding.function;
+        actual.slot = binding.slot;
+        actual.schema = binding.schema;
+        try regions.append(a, actual);
+    }
+}
+
+const RawSlot = struct { key: u64, schema: u64, bits: u64 };
+const FrameContents = struct { raw: []RawSlot, references: usize };
+const OuterValues = @import("../interpreter_v2/values.zig").Values;
+
+fn rawFrameContents(values: *OuterValues, root: data.graph.Value) !FrameContents {
+    var pending: std.ArrayList(data.graph.Value) = .empty;
+    var raw: std.ArrayList(RawSlot) = .empty;
+    var references_found: usize = 0;
+    try pending.append(values.allocator, root);
+    while (pending.pop()) |current| {
+        const tree = try values.split(current);
+        switch (tree.tag) {
+            0 => {},
+            1 => {
+                const entry = try values.split(tree.fields[0]);
+                const slot = try values.split(entry.fields[1]);
+                if (slot.tag == 1) {
+                    const scalar = try values.split(slot.fields[0]);
+                    try raw.append(values.allocator, .{
+                        .key = try outerNatural(values, entry.fields[0]),
+                        .schema = try outerNatural(values, scalar.fields[0]),
+                        .bits = try outerNatural(values, scalar.fields[1]),
+                    });
+                } else {
+                    const value = try values.split(slot.fields[0]);
+                    const body = try values.split(value.fields[1]);
+                    if (body.tag == 2 or body.tag == 3) references_found += 1;
+                }
+            },
+            2 => {
+                const branch = try values.split(tree.fields[0]);
+                try pending.append(values.allocator, branch.fields[2]);
+                try pending.append(values.allocator, branch.fields[1]);
+            },
+            else => return error.InvalidFrame,
+        }
+    }
+    return .{ .raw = try raw.toOwnedSlice(values.allocator), .references = references_found };
+}
+
+fn outerNatural(values: *OuterValues, value: data.graph.Value) !u64 {
+    return std.mem.readInt(u64, (try values.bytes(&value))[0..8], .little);
+}
+
+fn outerTableAt(values: *OuterValues, table_value: data.graph.Value, index: u64) !data.graph.Value {
+    const table_fields = try values.split(table_value);
+    const count = try outerNatural(values, table_fields.fields[0]);
+    if (index >= count) return error.InvalidReference;
+    var remaining = count - index - 1;
+    var forest = table_fields.fields[1];
+    for (0..64) |_| {
+        const item = try values.split(forest);
+        if (item.tag != 1) return error.InvalidTable;
+        const pair = try values.split(item.fields[0]);
+        var tree = pair.fields[0];
+        var parts = try values.split(tree);
+        const size = if (parts.tag == 0) 1 else try outerNatural(
+            values,
+            (try values.split(parts.fields[0])).fields[2],
+        );
+        if (remaining >= size) {
+            remaining -= size;
+            forest = pair.fields[1];
+            continue;
+        }
+        for (0..64) |_| {
+            if (parts.tag == 0) return parts.fields[0];
+            const branch = try values.split(parts.fields[0]);
+            const half = (try outerNatural(values, branch.fields[2])) / 2;
+            tree = branch.fields[if (remaining < half) 1 else 0];
+            if (remaining >= half) remaining -= half;
+            parts = try values.split(tree);
+        }
+        return error.InvalidTable;
+    }
+    return error.InvalidTable;
+}
+
+const CloneProgress = struct {
+    walk: bool = false,
+    rebase: bool = false,
+    before: bool = false,
+    after: bool = false,
+    index: u64 = 0,
+    original: u64 = 0,
+    destination: u64 = 0,
+    raw: []RawSlot = &.{},
+};
+
+fn cloneFrameContents(
+    values: *OuterValues,
+    nodes: data.graph.Value,
+    index: u64,
+) !?FrameContents {
+    const node = try values.split(try outerTableAt(values, nodes, index));
+    const optional = try values.split(node.fields[1]);
+    if (optional.tag == 0) return null;
+    const frame = try values.split(optional.fields[0]);
+    return try rawFrameContents(values, frame.fields[2]);
+}
+
+fn cloneCursorProgress(
+    values: *OuterValues,
+    parameters: []const data.graph.Value,
+    cursor: u64,
+    progress: *CloneProgress,
+    require_raw: bool,
+) !bool {
+    const originals = try values.split(parameters[2]);
+    const count = try outerNatural(values, originals.fields[0]);
+    const machine = try values.split(parameters[0]);
+    const nodes = machine.fields[@backingInt(@import("machine.zig").Field.nodes)];
+    if (!progress.before and cursor < count) {
+        const reference = try values.split(try outerTableAt(values, parameters[2], cursor));
+        const id = try outerNatural(values, reference.fields[0]);
+        const contents = (try cloneFrameContents(values, nodes, id)) orelse return false;
+        if ((require_raw and contents.raw.len == 0) or contents.references == 0) return false;
+        progress.raw = try a.dupe(RawSlot, contents.raw);
+        progress.index = cursor;
+        progress.original = id;
+        progress.destination = (try outerNatural(values, (try values.split(nodes)).fields[0])) -
+            count + cursor;
+        progress.before = true;
+        return true;
+    }
+    if (progress.before and !progress.after and cursor == progress.index + 1) {
+        const old = (try cloneFrameContents(values, nodes, progress.original)) orelse
+            return error.MissingOriginalFrame;
+        const next = (try cloneFrameContents(values, nodes, progress.destination)) orelse
+            return error.MissingClonedFrame;
+        try std.testing.expectEqualDeep(progress.raw, old.raw);
+        try std.testing.expectEqualDeep(progress.raw, next.raw);
+        try std.testing.expect(next.references > 0);
+        progress.after = true;
+        return true;
+    }
+    return false;
+}
+
+fn inspectCloneCursor(
+    owner: *driver.Driver,
+    cursors: []const CloneCursor,
+    progress: *CloneProgress,
+) !void {
+    if (progress.after) return;
+    const current = owner.outer.roots.current orelse return;
+    const frame = try owner.outer.frames.get(current.id);
+    const reader = try owner.outer.frames.slots.reader(frame.view);
+    for (cursors) |binding| {
+        if (binding.function != frame.function) continue;
+        var parameters: [3]data.graph.Value = undefined;
+        for (binding.parameters, &parameters) |parameter, *value| {
+            value.* = reader.at(@intCast(parameter.slot)) catch |err| switch (err) {
+                error.UninitializedSlot => return,
+                else => return err,
+            };
+            try std.testing.expectEqual(parameter.schema, value.schema);
+        }
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        var values: OuterValues = .{
+            .allocator = scratch.allocator(),
+            .schemas = owner.outer.program.schemas,
+            .store = &owner.outer.store,
+            .aggregate_storage = .structured,
+        };
+        const cursor = switch (binding.cursor) {
+            .known => |constant| constant,
+            .slot => |parameter| try outerNatural(&values, reader.at(
+                @intCast(parameter.slot),
+            ) catch |err| switch (err) {
+                error.UninitializedSlot => return,
+                else => return err,
+            }),
+        };
+        if (!try cloneCursorProgress(
+            &values,
+            &parameters,
+            cursor,
+            progress,
+            owner.selected.content.value.guest != null,
+        )) return;
+        try validateCloneCursor(owner, &values, &parameters, cursor);
+        const inspection = try @import("realization.zig").inspect(
+            a,
+            &owner.outer,
+            owner.selected,
+            owner.guest.admitted(),
+        );
+        try std.testing.expect(inspection.committed > 0);
+    }
+}
+
+fn mixedCloneRegion(owner: *driver.Driver, regions: []const CloneRegion) !?CloneRegion {
+    const current = owner.outer.roots.current orelse return null;
+    const frame = try owner.outer.frames.get(current.id);
+    const reader = try owner.outer.frames.slots.reader(frame.view);
+    for (regions) |region| {
+        if (region.function != frame.function) continue;
+        const argument = reader.at(@intCast(region.slot)) catch |err| switch (err) {
+            error.UninitializedSlot => continue,
+            else => return err,
+        };
+        try std.testing.expectEqual(region.schema, argument.schema);
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        var values: OuterValues = .{
+            .allocator = scratch.allocator(),
+            .schemas = owner.outer.program.schemas,
+            .store = &owner.outer.store,
+            .aggregate_storage = .structured,
+        };
+        const tree = if (region.tree) argument else (try values.split(argument)).fields[2];
+        const contents = try rawFrameContents(&values, tree);
+        const raw_present = contents.raw.len > 0 or owner.selected.content.value.guest == null;
+        if (raw_present and contents.references > 0) return region;
+    }
+    return null;
+}
+
+const CloneTransfer = struct {
+    prepared: *base.Prepared,
+    selected: *artifact.Admitted,
+    other: *artifact.Admitted,
+};
+
+fn transferCloneRegion(
+    owner: *driver.Driver,
+    live: *bool,
+    transfer: CloneTransfer,
+) !void {
+    try std.testing.expectError(error.GuestCutUnavailable, owner.checkpoint(a));
+    const inspection = try @import("realization.zig").inspect(
+        a,
+        &owner.outer,
+        owner.selected,
+        owner.guest.admitted(),
+    );
+    try std.testing.expect(inspection.committed > 0);
+    const provenance: capsule.Provenance = .{
+        .execution = @splat(3),
+        .custody = @splat(7),
+        .publication = null,
+    };
+    const bytes = try capsule.publish(a, owner, .outer_execution, provenance);
+    defer a.free(bytes);
+    try inspectOuterView(owner, transfer.selected, bytes);
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    var custody = try checkRejectedCustody(transfer.prepared, transfer.selected, bytes, provenance);
+    try std.testing.expectError(error.InvalidCapsule, capsule.restore(
+        a,
+        transfer.prepared,
+        transfer.other,
+        bytes,
+        custody.verifier(),
+    ));
+    try std.testing.expect(!custody.consumed);
+    owner.deinit();
+    live.* = false;
+    owner.* = try capsule.restore(
+        a,
+        transfer.prepared,
+        transfer.selected,
+        bytes,
+        custody.verifier(),
+    );
+    live.* = true;
+    try std.testing.expect(custody.consumed);
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectError(error.UnauthorizedCapsule, capsule.restore(
+        a,
+        transfer.prepared,
+        transfer.selected,
+        bytes,
+        custody.verifier(),
+    ));
+}
+
+fn pumpCloneCommand(
+    owner: *driver.Driver,
+    live: *bool,
+    transfer: CloneTransfer,
+    regions: []const CloneRegion,
+    cursors: []const CloneCursor,
+    progress: *CloneProgress,
+) !void {
+    for (0..8_000_000) |_| {
+        var step = try owner.pump(1);
+        defer step.deinit();
+        if (step == .event) {
+            try std.testing.expect(step.event.value == .cut);
+            return;
+        }
+        try std.testing.expect(step == .suspended);
+        try inspectCloneCursor(owner, cursors, progress);
+        const region = (try mixedCloneRegion(owner, regions)) orelse continue;
+        const visited = if (region.kind == .walk) &progress.walk else &progress.rebase;
+        if (visited.*) continue;
+        try transferCloneRegion(owner, live, transfer);
+        visited.* = true;
+    }
+    return error.PumpBoundExhausted;
+}
+
+fn checkCloneCapsules(transfer: CloneTransfer, image: []const u8) !void {
+    var exported = try @import("compiler.zig").exportSource(a, transfer.selected);
+    defer exported.deinit();
+    const regions = try cloneRegions(&exported);
+    defer a.free(regions);
+    const cursors = try cloneCursorBindings(&exported);
+    defer a.free(cursors);
+    const input = std.mem.toBytes(@as(u64, 17));
+    var owner = try driver.Driver.start(a, transfer.prepared, transfer.selected, .{
+        .arguments = &input,
+    });
+    var live = true;
+    defer if (live) owner.deinit();
+    var initialized = try owner.pump(null);
+    initialized.deinit();
+    var reference = try @import("native_baseline").Session.initImage(a, image, &input);
+    defer reference.deinit();
+    var progress: CloneProgress = .{};
+    defer a.free(progress.raw);
+    for (0..400) |_| {
+        const yielded = owner.last_cut.?.status == .yielded;
+        if (yielded) try reference.resumeYield();
+        try owner.submit(.{ .advance = .{
+            .control = if (yielded) .resume_yield else .none,
+            .quantum = 1,
+        } });
+        const expected = try reference.run(1);
+        try pumpCloneCommand(&owner, &live, transfer, regions, cursors, &progress);
+        const actual = try owner.checkpoint(a);
+        defer a.free(actual);
+        const canonical = try reference.checkpoint(a);
+        defer a.free(canonical);
+        try std.testing.expectEqualSlices(u8, canonical, actual);
+        if (expected == .completed) {
+            var state = try data.state_image.decodeGraph(a, actual);
+            defer state.deinit();
+            try data.state_admission.validateAdmitted(a, owner.guest.admitted(), state.state);
+            var observed = try owner.exchange(.observe);
+            defer observed.deinit();
+            try std.testing.expect(observed.value == .observation);
+            try std.testing.expect(observed.value.observation == .completed);
+            try std.testing.expectEqualSlices(
+                u8,
+                try reference.bytes(&expected.completed),
+                observed.value.observation.completed,
+            );
+            std.debug.print(
+                "clone recovery staged={any} raw_slots={d} walk={any} " ++
+                    "rebase={any} cursor={any}/{any}\n",
+                .{
+                    transfer.selected.content.value.guest != null,
+                    progress.raw.len,
+                    progress.walk,
+                    progress.rebase,
+                    progress.before,
+                    progress.after,
+                },
+            );
+            try std.testing.expect(
+                progress.walk and progress.rebase and progress.before and progress.after,
+            );
+            return;
+        }
+    }
+    return error.UnfinishedTest;
+}
+
+const CloneCursor = struct {
+    function: data.program.Id,
+    parameters: [3]artifact.Parameter,
+    cursor: union(enum) { slot: artifact.Parameter, known: u64 },
+};
+
+fn cloneCursorBindings(exported: *const @import("compiler.zig").ExportedSource) ![]CloneCursor {
+    var cursors: std.ArrayList(CloneCursor) = .empty;
+    errdefer cursors.deinit(a);
+    const original = exported.definition.clone.rebase;
+    const dynamic: [4]source.specialize.Knowledge = @splat(.dynamic);
+    try appendCloneCursor(exported, original, &dynamic, &cursors);
+    if (exported.value.evidence.derivation) |derivation| {
+        for (derivation.functions) |function| {
+            if (function.before != original) continue;
+            try appendCloneCursor(exported, function.after, function.arguments, &cursors);
+        }
+    }
+    try std.testing.expect(cursors.items.len > 0);
+    return cursors.toOwnedSlice(a);
+}
+
+fn appendCloneCursor(
+    exported: *const @import("compiler.zig").ExportedSource,
+    function: data.program.Id,
+    knowledge: []const source.specialize.Knowledge,
+    cursors: *std.ArrayList(CloneCursor),
+) !void {
+    try std.testing.expectEqual(@as(usize, 4), knowledge.len);
+    var cursor: CloneCursor = undefined;
+    var dynamic: usize = 0;
+    var emitted: ?data.program.Id = null;
+    for (knowledge, 0..) |argument, i| {
+        if (argument == .known) {
+            if (i != 3 or argument.known.bytes.len != 8) return error.InvalidCloneBinding;
+            cursor.cursor = .{ .known = std.mem.readInt(u64, argument.known.bytes[0..8], .little) };
+            continue;
+        }
+        const variable = exported.value.selected.module.functions[
+            @intCast(function)
+        ].parameters[dynamic];
+        dynamic += 1;
+        var found = false;
+        for (exported.value.parameters) |binding| {
+            if (binding.source_function != function or binding.variable != variable) continue;
+            if (emitted) |prior| try std.testing.expectEqual(prior, binding.function);
+            emitted = binding.function;
+            const parameter: artifact.Parameter = .{
+                .ordinal = i,
+                .slot = binding.slot,
+                .schema = binding.schema,
+            };
+            if (i == 3) {
+                cursor.cursor = .{ .slot = parameter };
+            } else cursor.parameters[i] = parameter;
+            found = true;
+            break;
+        }
+        if (!found) return;
+    }
+    cursor.function = emitted orelse return error.InvalidCloneBinding;
+    try cursors.append(a, cursor);
+}
+
+fn validateCloneCursor(
+    owner: *driver.Driver,
+    values: *OuterValues,
+    parameters: []const data.graph.Value,
+    cursor: u64,
+) !void {
+    const helper = owner.selected.helpers[3].program();
+    const entry = helper.functions[@intCast(helper.roots.entry)];
+    try std.testing.expectEqual(@as(usize, 4), entry.inputs.len);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+    for (parameters, 0..) |parameter, i| {
+        const actual = try data.schema.encodeOwned(
+            a,
+            owner.outer.program.schemas,
+            parameter.schema,
+        );
+        defer a.free(actual);
+        const expected = try data.schema.encodeOwned(
+            a,
+            helper.schemas,
+            entry.layout.slots[@intCast(entry.inputs[i])],
+        );
+        defer a.free(expected);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+        try bytes.appendSlice(a, try values.bytes(&parameter));
+    }
+    try bytes.appendSlice(a, &std.mem.toBytes(cursor));
+    var validator = try base.Session.start(
+        a,
+        &owner.selected.helper_executables[3],
+        bytes.items,
+        .{},
+    );
+    defer validator.deinit();
+    const outcome = try validator.run(null);
+    try std.testing.expect(outcome == .completed);
+    var valid = try projection.decode(bool, a, try validator.bytes(&outcome.completed));
+    defer valid.deinit();
+    try std.testing.expect(valid.value);
 }

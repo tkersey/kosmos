@@ -145,3 +145,129 @@ The owning view tests cover later-root priority, duplicate roots and edges,
 competing shortest paths, cycles and incomplete absence. They also check that
 adding 423 edges after the decisive first edge adds no base transitions. The
 full Protean process fixture separately qualifies integration and deadlines.
+
+## Direct frame traversal, 2026-10-27
+
+The matched parent is Kosmos `6dd76e2c0ef62496b7c92b868a4bd656381ccd03`,
+semantic source `db1f6e65bd0a4a7272f21971670fff474c9c0c0a272de69ca46e346894b397f3`.
+The candidate semantic source is
+`08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a`, with packaged
+artifact `b288ae2f5b94efc1c1ed263a83051ebd539202ad160a778337607fd0d0169aa8`.
+Both use Horos `013d783dd45a7994f1c888f66f98a7003c173a79`, exact Zig 0.17.0,
+native `safe`, Apple M2 Pro and macOS 27.2. The dependency package is
+`horos-8.0.0-flclaFkFVQBKG0Iqo_c4I6U8mhZqTO358ywkjB63B6Sg`.
+
+Reproduction uses `zig build bench-semantics -Doptimize=safe
+-Deconomy-workload=multi_shot` at each revision. Two invocations per revision ran
+in parent/candidate order, without other session-owned qualification or review
+processes during measurement. Each invocation retains the three inputs and three
+execution repetitions per input: eighteen observations per base realization below.
+The second pair reused the exact built executables. Construction/admission medians
+have only two observations. These are local measurements, not tail estimates or
+an isolated attribution of every timing difference to cloning.
+
+The unchanged 316-byte guest image has identity
+`4e6b620fb5119075c9acd72816ca731a9965231ab468c82d21b8d77b9470ce15`. Every realization
+compares complete canonical checkpoints and outcomes with the immutable native
+reference for identical controls. Each execution retains 23 guest transitions,
+three effects and six cuts. The full benchmark, including its sixteen generated
+scalar edits and independently validated derived candidate, completes.
+
+### Focused frame work
+
+`check-semantics` includes the dynamic frame driver in `frame_tests.zig`. It builds
+bindings, mapping and prefix before a yield, then measures discovery and rebasing
+between yields, before public observation. One pair of compiled helper images is
+reused across the six inputs. Keys are spaced by 1024; raw bits are a fixed
+nontrivial pattern plus slot ordinal. Ordinary references alternate between 7 and
+8. The matching map is `{7 -> 8, 8 -> 9}`; the disjoint map is `{99 -> 100}`.
+The reference prefix contains 91. Both implementations execute on the actual base.
+
+| Slots | Reference occurrences | Mapping | Discovery transitions, public/direct | Rebase transitions, public/direct |
+| --- | --- | --- | ---: | ---: |
+| 8 | 2 | matching | 955 / 142 | 2401 / 258 |
+| 64 | 2 | matching | 8146 / 646 | 23366 / 1502 |
+| 256 | 2 | matching | 32892 / 2374 | 100924 / 5734 |
+| 16 | 16 | matching | 1901 / 881 | 4812 / 986 |
+| 64 | 2 | disjoint | 8146 / 646 | 23350 / 1448 |
+| 64 | 0 | matching | 8181 / 575 | 23426 / 1402 |
+
+The tests assert lower work rather than fixed totals. They also compare exact
+ordered references and public activations, retain predecessor observations, and
+inspect raw tags, schemas and all bits separately from public projection. Additional
+cases cover empty, partial and self maps, one-step replacement, owner order,
+identity-domain collisions, repeated aliases and sparse u64 boundary keys.
+
+Source-to-lowered-function counters observe conversion entries in the public
+composition and zero such entries during either direct helper interval. A separate
+emitted-call-graph probe found projection and scalar packing reachable from the
+parent clone scan, and projection, packing and hydration reachable from its remap.
+None is reachable from either candidate clone entry, although those functions
+remain emitted for other consumers. Raw-slot observations establish preservation
+independently of these counters. Unchanged tree paths are reused by construction;
+no native pointer-identity or zero-allocation claim follows.
+
+### Integrated costs
+
+Medians; times are milliseconds. Requested allocation excludes allocator metadata
+and RSS. The existing meter exposes live/peak bytes, not allocation-call counts.
+
+| Realization | Base transitions, parent/candidate | Execution ms, parent/candidate | Live bytes, parent/candidate | Peak bytes, parent/candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Generic | 53852 / 53476 | 13.854 / 13.729 | 181824 / 182571 | 270900 / 271646 |
+| Specialized | 64979 / 64669 | 17.441 / 17.353 | 166173 / 165999 | 253014 / 252851 |
+| Instrumented | 54234 / 53858 | 13.967 / 13.808 | 182413 / 182571 | 271488 / 271646 |
+
+The deterministic integrated work reduction is 0.70% generic and 0.48% specialized;
+this fixed guest does not establish scaling with captured-frame width. Generic
+peak allocation increases by 746 bytes (0.28%), while specialized peak decreases
+by 163 bytes. The two matched runs show no material execution or allocation
+regression. Integrated timing differences are small relative to local variation; these
+samples establish no wall-time speedup. Projection and restoration remain
+separately measured observations.
+
+| Realization | Guest projection ms, parent/candidate | Guest restore ms, parent/candidate | Outer checkpoint ms, parent/candidate | Outer restore ms, parent/candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Generic | 7.030 / 7.051 | 0.105 / 0.105 | 0.896 / 0.902 | 1.734 / 1.712 |
+| Specialized | 7.025 / 7.056 | 0.545 / 0.553 | 2.312 / 2.273 | 3.712 / 3.726 |
+
+Restore peaks remain 29,874 requested bytes generic and 22,116 specialized.
+Outer checkpoints remain specific to their producing artifact; their bytes are
+not a cross-artifact equivalence test.
+
+### Artifact and construction tradeoffs
+
+The generic package grows from 275,293 to 276,094 bytes. Admission retains
+7,878,994 bytes versus 7,842,128, with peak 8,910,846 versus 8,873,980. Its observed
+admission median rises from 35.173 to 37.707 ms. Generic construction changes from
+294.977 to 312.031 ms, independent validation from 201.107 to 219.848 ms, and
+construction peak from 852,233,177 to 850,086,812 requested bytes.
+
+| Specialized multi-shot artifact | Parent | Candidate |
+| --- | ---: | ---: |
+| Construction ms | 5955.750 | 5982.971 |
+| Independent validation ms | 3516.132 | 3515.145 |
+| Construction peak requested bytes | 10050470069 | 9222205592 |
+| Artifact bytes | 19180715 | 19168148 |
+| Executable bytes | 3352149 | 3350503 |
+| Evidence bytes | 15701036 | 15690391 |
+| Recovery anchors | 14 | 14 |
+
+The initial candidate exposed a separate cost in compact relation-evidence
+decoding: each reconstructed module was decoded and then copied in full. The
+larger source exhausted the existing 64-million work budget during sixteen-edit
+validation. Retaining decoded source backing and
+ordinary rule storage removes that duplicate copy. The work budget, sixteen edits,
+canonical delta checks and independent relation checks are unchanged. Encoded
+specialization proofs continue through the existing Horos decoder.
+
+For the generated sixteen-edit candidate, validation peak drops from 2,207,225,264
+to 1,872,651,074 requested bytes while its median time changes from 978.402 to 988.839 ms.
+Derivation peak increases from 2,229,827,832 to 2,264,720,023 bytes; its artifact,
+executable and evidence sizes change from 709188/96136/485556 to
+711871/96997/487654 bytes. These construction costs are separate from ordinary
+guest execution and must not be added to its live/peak allocation figures.
+
+A nonempty reference map still scans every retained binding. This change makes no
+constant-time instantiation, changed-only scan, universal speedup or zero-allocation
+claim. The PR records qualification and review results for its delivered head.
