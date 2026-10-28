@@ -3,7 +3,7 @@
 //! These fingerprints select that checked content; they are not derivation proof.
 const std = @import("std");
 pub const bytes = @embedFile("semantic-core.kar");
-pub const horos_package = "horos-8.0.0-flclaGL9VQC9u_4oS-nfKxuYgs3_-FuBPX-AaDSKYYDh";
+pub const horos_package = "horos-8.0.0-flclaBwOVgDnaS2LHJOfTrQRrcjOa3v3-kSxrrluswJC";
 pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
 pub const artifact_sha256 = "5a103483670b8ca7862137017fe66ad9b2116811ce86af5fba9ea43c6825f033";
 
