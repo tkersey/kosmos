@@ -111,6 +111,13 @@ The representation law therefore depends on the following frame operations:
   emitting ordinary guest bindings. `valid` independently rejects malformed map
   structure, including duplicate keys. Guest admission then checks the
   reconstructed schema, width, layout, liveness and ownership.
+- Continuation cloning walks frame bindings directly in key order, retaining the
+  reference accumulator's prefix and repeated occurrences. Reference rebasing
+  applies the existing NodeRef map once, retains raw scalar tags and all 64 bits,
+  and rebuilds only changed leaves and their ancestors. Unchanged subtrees, frame
+  metadata and the lexical owner sequence are reused. Nonempty mappings still
+  require a full retained-binding traversal. Public projection and the independent
+  clone-phase validator remain separate from these operations.
 
 Hydration wraps each admitted ordinary binding in the ordinary-value variant, making every
 admitted guest cut available to either realization. This is a rule argument
@@ -202,6 +209,13 @@ rejects unsupported changes. Kosmos then derives recovery mappings and checks
 the final runtime and helper images against that source. Intermediate evidence
 uses reconstructible canonical byte deltas; every reconstructed step remains
 subject to the same checker. Resource exhaustion is not approval.
+
+Evidence decoding retains each reconstructed byte buffer with its decoded source
+module in the validation arena. Ordinary relation fields reuse their decoded
+storage; encoded specialization proofs still use the Horos record decoder.
+This avoids copying an already decoded source module for every ordinary relation
+step. Decoding and independent relation validation retain their existing work
+budgets, canonical-delta checks and complete source comparisons.
 
 `RuntimeTransformation.scalar` and `.layout` construct ordinary Horos producer
 programs. Their inputs contain source records and selected objectives; their

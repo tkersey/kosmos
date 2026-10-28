@@ -187,12 +187,32 @@ test "source command predecessor remains available at every base cut through clo
     defer guest.deinit();
     const program = try projection.programBytes(a, guest);
     defer a.free(program);
+    for ([_]bool{ false, true }) |staged| try checkClonePredecessor(guest, program, staged);
+}
+
+fn checkClonePredecessor(
+    guest: *const data.program_image.Admitted,
+    program: []const u8,
+    staged: bool,
+) !void {
     var b = source.Builder.init(a);
     defer b.deinit();
-    const d = try service.define(&b);
+    const d = if (staged) try service.defineStaged(&b) else try service.define(&b);
+    const m = try machines.define(&b);
+    const module = b.module(d.entry, try b.scalar(void));
+    var specialized: ?source.specialize.Output = if (staged)
+        try source.specialize.specialize(a, module, .{
+            .function = d.entry,
+            .arguments = &.{ .{ .known = .{ .schema = m.program, .bytes = program } }, .dynamic },
+            .context = context(guest.identity()),
+            .policy = .{ .work = 8_000_000, .keys_per_function = 128, .depth = 1024 },
+        })
+    else
+        null;
+    defer if (specialized) |*output| output.deinit();
     var compiled = try source.lowerObserved(
         a,
-        b.module(d.entry, try b.scalar(void)),
+        if (specialized) |*output| output.module() else module,
         .{ .recovery = true },
     );
     defer compiled.deinit();
@@ -202,24 +222,36 @@ test "source command predecessor remains available at every base cut through clo
     defer owner.release();
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
-    const anchors = try commandAnchors(scratch.allocator(), &compiled, d, &b);
+    const anchors = try commandAnchors(
+        scratch.allocator(),
+        &compiled,
+        d,
+        &b,
+        if (specialized) |*output| output else null,
+    );
     const initial = try projection.encode(service.Initial, a, .{ .arguments = &.{} });
     defer a.free(initial);
-    const arguments = try std.mem.concat(a, u8, &.{ program, initial });
+    const arguments = if (staged) try a.dupe(u8, initial) else try std.mem.concat(a, u8, &.{
+        program, initial,
+    });
     defer a.free(arguments);
     var session = try base.Session.start(a, &prepared, arguments, .{
         .effects = owner.admitted().program().effects,
     });
     defer session.deinit();
-    var first = try support.event(&session);
+    try checkPredecessorCuts(&session, anchors);
+}
+
+fn checkPredecessorCuts(session: *base.Session, anchors: []const std.ArrayList(Anchor)) !void {
+    var first = try support.event(session);
     defer first.deinit();
     var control: service.Control = .none;
     var outer_steps: usize = 0;
     var completed = false;
     for (0..400) |_| {
-        try support.send(&session, .{ .advance = .{ .control = control, .quantum = 1 } });
-        try expectCommandAnchors(&session, anchors, &outer_steps);
-        var cut = try support.event(&session);
+        try support.send(session, .{ .advance = .{ .control = control, .quantum = 1 } });
+        try expectCommandAnchors(session, anchors, &outer_steps);
+        var cut = try support.event(session);
         defer cut.deinit();
         try std.testing.expect(cut.value == .cut);
         if (cut.value.cut.status == .completed) {
@@ -575,6 +607,7 @@ fn commandAnchors(
     compiled: *const source.Compiled,
     d: service.Definition,
     b: *source.Builder,
+    specialized: ?*const source.specialize.Output,
 ) ![]std.ArrayList(Anchor) {
     const anchors = try allocator.alloc(
         std.ArrayList(Anchor),
@@ -582,18 +615,42 @@ fn commandAnchors(
     );
     @memset(anchors, .empty);
     for (compiled.parameters) |binding| {
-        const wanted = ((binding.source_function == d.loop or
-            binding.source_function == d.dispatch) and
-            binding.variable == b.parameter(binding.source_function, 1)) or
-            (binding.source_function == d.publish and
-                (binding.variable == b.parameter(d.publish, 1) or
-                    binding.variable == b.parameter(d.publish, 2)));
+        var wanted = false;
+        for ([_][2]data.program.Id{
+            .{ d.loop, 1 }, .{ d.dispatch, 1 }, .{ d.publish, 1 }, .{ d.publish, 2 },
+        }) |role| {
+            if (matchesCommandBinding(b, specialized, binding, role)) wanted = true;
+        }
         if (wanted) try anchors[@intCast(binding.function)].append(allocator, .{
             .slot = binding.slot,
             .schema = binding.schema,
         });
     }
     return anchors;
+}
+
+fn matchesCommandBinding(
+    b: *source.Builder,
+    specialized: ?*const source.specialize.Output,
+    binding: source.RecoveryBinding,
+    role: [2]data.program.Id,
+) bool {
+    if (specialized) |output| {
+        for (output.functions.items) |function| {
+            if (function.before != role[0] or function.after != binding.source_function or
+                function.arguments[@intCast(role[1])] == .known) continue;
+            var parameter: usize = 0;
+            for (function.arguments[0..@intCast(role[1])]) |argument| {
+                if (argument != .known) parameter += 1;
+            }
+            return binding.variable == output.builder.functions.items[
+                @intCast(function.after)
+            ].parameters[parameter];
+        }
+        return false;
+    }
+    return binding.source_function == role[0] and
+        binding.variable == b.parameter(role[0], @intCast(role[1]));
 }
 
 fn expectCommandAnchors(

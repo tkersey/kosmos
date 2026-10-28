@@ -287,8 +287,9 @@ fn decodeEvidenceWithPolicy(
     const stored = try data.record.readBounded(StoredEvidence, &reader, a, &remaining);
     try reader.finish();
     const steps = try a.alloc(relation.Step, stored.steps.len);
-    var successor = try moduleBytes(a, stored.selected);
-    defer a.free(successor);
+    const initial = try moduleBytes(a, stored.selected);
+    defer a.free(initial);
+    var successor: []const u8 = initial;
     var index = steps.len;
     while (index != 0) {
         index -= 1;
@@ -303,11 +304,7 @@ fn decodeEvidenceWithPolicy(
             &remaining,
         );
         try module_reader.finish();
-        steps[index] = try relation.decodeRecordStep(a, .{
-            .successor = module,
-            .rule = record.rule,
-        }, &remaining);
-        a.free(successor);
+        steps[index] = try retainDecodedStep(a, module, record.rule, &remaining);
         successor = restored;
     }
     return .{
@@ -318,6 +315,24 @@ fn decodeEvidenceWithPolicy(
         .selected = stored.selected,
         .interfaces = stored.interfaces,
         .recovery = stored.recovery,
+    };
+}
+
+fn retainDecodedStep(
+    a: std.mem.Allocator,
+    module: source.ast.Module,
+    rule: relation.RecordRule,
+    remaining: *usize,
+) !relation.Step {
+    return switch (rule) {
+        .specialization => try relation.decodeRecordStep(a, .{
+            .successor = module,
+            .rule = rule,
+        }, remaining),
+        inline else => |payload, tag| .{
+            .successor = module,
+            .rule = @unionInit(relation.Rule, @tagName(tag), payload),
+        },
     };
 }
 
