@@ -387,7 +387,7 @@ fn configureArtifactImages(
 const RuntimeModules = struct {
     runtime_source: std.Build.LazyPath,
     packaged_runtime: *std.Build.Module,
-    rebuilt_runtime: *std.Build.Module,
+    rebuilt_directory: std.Build.LazyPath,
 };
 
 fn configureRuntimeModules(
@@ -408,19 +408,12 @@ fn configureRuntimeModules(
         .target = b.graph.host,
         .optimize = host_modules.host_mode,
     });
-    // The source correspondence test must always receive an independent rebuild,
-    // including when `check` is requested with the packaged-runtime option.
-    const rebuilt_runtime = if (!options.use_packaged_runtime) packaged_runtime else rebuilt: {
+    const rebuilt_directory = if (!options.use_packaged_runtime)
+        runtime_files.getDirectory()
+    else rebuilt: {
         const files = b.addWriteFiles();
         _ = files.addCopyFile(artifact_images.semantic_artifact, "semantic-core.kar");
-        break :rebuilt b.createModule(.{
-            .root_source_file = files.add(
-                "runtime.zig",
-                "pub const bytes = @embedFile(\"semantic-core.kar\");\n",
-            ),
-            .target = b.graph.host,
-            .optimize = host_modules.host_mode,
-        });
+        break :rebuilt files.getDirectory();
     };
     dependencies.public_kosmos.addImport(
         "packaged_runtime",
@@ -438,7 +431,7 @@ fn configureRuntimeModules(
     return .{
         .runtime_source = runtime_source,
         .packaged_runtime = packaged_runtime,
-        .rebuilt_runtime = rebuilt_runtime,
+        .rebuilt_directory = rebuilt_directory,
     };
 }
 
@@ -656,6 +649,16 @@ fn configureDriver(
         "check-native",
         "Check native storage, source semantics, sessions and restore without an interpreter",
     );
+    const retained_files = b.addWriteFiles();
+    _ = retained_files.addCopyFile(b.path("src/semantic-core.kar"), "semantic-core.kar");
+    const retained_runtime = b.createModule(.{
+        .root_source_file = retained_files.add(
+            "runtime.zig",
+            "pub const bytes = @embedFile(\"semantic-core.kar\");\n",
+        ),
+        .target = b.graph.host,
+        .optimize = host_modules.host_mode,
+    });
     const driver_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_driver.zig"),
         .target = b.graph.host,
@@ -665,12 +668,17 @@ fn configureDriver(
             .module = host_modules.source_data,
         }, .{ .name = "horos", .module = host_modules.horos }, .{
             .name = "packaged_runtime",
-            .module = runtime_modules.rebuilt_runtime,
+            .module = retained_runtime,
         } },
     }) });
     const run_driver_tests = b.addRunArtifact(driver_tests);
-    b.step("build-semantic-driver-check", "Build the native semantic driver test artifact")
-        .dependOn(&driver_tests.step);
+    const build_driver = b.step(
+        "build-semantic-driver-check",
+        "Build the native semantic driver test artifact and independently rebuilt core",
+    );
+    build_driver.dependOn(&driver_tests.step);
+    runtime_modules.rebuilt_directory.addStepDependencies(build_driver);
+    run_driver_tests.setCwd(runtime_modules.rebuilt_directory);
     run_driver_tests.has_side_effects = true;
     b.step(
         "check-semantic-driver",
