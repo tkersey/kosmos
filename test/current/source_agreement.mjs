@@ -23,7 +23,8 @@ assert(["all", "first", "second"].includes(group));
 const selected = name => {
   const index = requiredExamples.indexOf(name);
   assert(index >= 0, `unaccounted source fixture: ${name}`);
-  return group === "all" || name === "borrow-operands" || index % 2 === (group === "first" ? 0 : 1);
+  const parity = name === "queens-dfs" ? 1 : index % 2;
+  return group === "all" || name === "borrow-operands" || parity === (group === "first" ? 0 : 1);
 };
 const selectedExamples = requiredExamples.filter(selected);
 const { execute } = await import(pathToFileURL(oraclePath).href);
