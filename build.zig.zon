@@ -5,8 +5,8 @@
     .fingerprint = 0xda7fbe49074dc2bd,
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#07d6ef5839c58c3685d0625d0cacc2efaa5ef646",
-            .hash = "horos-8.0.0-flclaBwOVgDnaS2LHJOfTrQRrcjOa3v3-kSxrrluswJC",
+            .url = "git+https://github.com/tkersey/horos#7d34f2c72e818665be4d519fde4f2cef9c986048",
+            .hash = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
             .lazy = true,
         },
     },

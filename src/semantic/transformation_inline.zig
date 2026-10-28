@@ -843,6 +843,17 @@ fn defineEntry(e: Author, d: Definition) !void {
     var body = try e.b.bind(result, try e.call(d.inline_call, &.{
         try e.b.reference(intermediate), second,
     }), try e.b.pure(proposal));
+    const shared_steps = try e.b.primitive(
+        try shape(e, []const source.relation.RecordStep),
+        .sequence,
+        &.{try step(e, try e.b.reference(intermediate), first)},
+        0,
+    );
+    const shared_proposal = try e.tuple(try shape(e, compiler.RecordProposal), &.{
+        try e.b.reference(intermediate),                                        shared_steps,
+        try e.literal(@FieldType(compiler.RecordProposal, "interfaces"), null),
+    });
+    body = try e.when(try e.binary(.equal, first, second), try e.b.pure(shared_proposal), body);
     body = try e.b.bind(intermediate, try e.call(d.inline_call, &.{ module, first }), body);
     body = try requireConsumer(e, d, module, binding, body);
     const function = try e.required(

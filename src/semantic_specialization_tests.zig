@@ -1197,6 +1197,52 @@ test "generated consumer composition inspects dynamic sites and emits checked in
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
+    try expectSharedConsumerCall(&producer);
+}
+
+fn expectSharedConsumerCall(producer: *const base.Prepared) !void {
+    const transformation = @import("semantic/transformation.zig");
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const e = try Author.init(&builder);
+    const increment = try builder.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    try builder.define(increment, try builder.pure(try e.binary(
+        .integer_add,
+        try e.param(increment, 0),
+        e.one,
+    )));
+    const entry = try builder.declare(&.{e.integer}, e.integer, &.{}, &.{});
+    const call = try e.call(increment, &.{try e.param(entry, 0)});
+    const binding = try builder.bind(builder.parameter(entry, 0), call, call);
+    try builder.define(entry, binding);
+    const module = builder.module(entry, e.unit);
+    var original = try support.prepare(module);
+    defer original.deinit();
+    const input = try projection.encode(transformation.ConsumerInput, a, .{
+        .module = module,
+        .site = .{ .function = entry, .binding = binding },
+    });
+    defer a.free(input);
+    var generated = try runGenerated(producer, input);
+    defer generated.deinit();
+    try std.testing.expectEqual(@as(usize, 1), generated.value.steps.len);
+    try std.testing.expect(generated.value.steps[0].rule == .inline_call);
+    try std.testing.expectEqual(call, generated.value.steps[0].rule.inline_call);
+    try validateGenerated(module, generated.value, &.{});
+    var selected = try support.prepare(generated.value.selected);
+    defer selected.deinit();
+    for ([_]u64{ 0, 17, 99 }) |value| {
+        var arguments: [8]u8 = undefined;
+        std.mem.writeInt(u64, &arguments, value, .little);
+        for ([_]*const base.Prepared{ &original, &selected }) |program| {
+            var session = try base.Session.start(a, program, &arguments, .{});
+            defer session.deinit();
+            const outcome = try session.run(null);
+            try std.testing.expect(outcome == .completed);
+            const result = try session.bytes(&outcome.completed);
+            try std.testing.expectEqual(value + 2, std.mem.readInt(u64, result[0..8], .little));
+        }
+    }
 }
 
 fn expectConsumerDynamic(original: source.Module, selected: source.Module, first_site: bool) !void {

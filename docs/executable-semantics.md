@@ -265,9 +265,10 @@ request with zero allowance; further guest steps still require remaining allowan
 
 `RuntimeTransformation.consumer` authors a pure Horos program whose
 `ConsumerInput` contains an immutable source module and selected consumer site.
-It emits the existing `RecordProposal`: a candidate plus two finite
-`inline_call` steps. Horos's independent source relation checks the actual
-records, fresh bindings, strict argument evaluation and complete successor.
+It emits the existing `RecordProposal`: a candidate plus one finite
+`inline_call` step per distinct producer/consumer call ID. Shared call records
+still execute at each dynamic use. Horos's independent source relation checks
+the actual records, fresh bindings, strict argument evaluation and complete successor.
 The producer supplies no trusted purity or consumer-identity flags. This path
 constructs a new guest program; it grants no live checkpoint or realization
 transport for the original guest.
@@ -279,7 +280,7 @@ route (three to one), while total transitions increase from eleven to thirteen
 because strict finite bindings remain. The other caller stays at three calls
 and eleven transitions. The existing semantic compiler already optimizes both
 versions; no additional backend speedup is claimed. In this sample, proposal
-construction uses 4,923 or 4,749 base transitions, with 1,299 input bytes and
+construction uses 4,937 or 4,763 base transitions, with 1,299 input bytes and
 4,818 output bytes.
 
 Horos's logical-context examples also run through the ordinary Session owner.
