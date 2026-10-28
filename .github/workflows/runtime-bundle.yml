@@ -235,7 +235,7 @@ jobs:
         run: |
           group=first
           if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
-          zig build check-source -Dsource-group="$group" \
+          zig build check-source -Dsource-group="$group" -Dfixture-profile=prepared_only \
             -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'
