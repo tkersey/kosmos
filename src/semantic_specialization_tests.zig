@@ -1159,6 +1159,107 @@ fn runGenerated(
     return projection.decode(@import("semantic/compiler.zig").RecordProposal, a, bytes);
 }
 
+test "generated consumer composition inspects dynamic sites and emits checked inline steps" {
+    const transformation = @import("semantic/transformation.zig");
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    var producer = try support.prepare(try transformation.consumer(&builder));
+    defer producer.deinit();
+    var subject = source.Builder.init(a);
+    defer subject.deinit();
+    const module = try source.examples.consumerComposition(&subject);
+    var count: usize = 0;
+    for (module.functions, 0..) |function, id| {
+        const body = function.body orelse continue;
+        if (module.terms[@intCast(body)] != .bind) continue;
+        const site: source.consumer.Site = .{ .function = id, .binding = body };
+        var inspected = try source.consumer.inspect(a, module, site, .{});
+        defer inspected.deinit();
+        if (inspected.outcome != .boundary) continue;
+        const input = try projection.encode(transformation.ConsumerInput, a, .{
+            .module = module,
+            .site = site,
+        });
+        defer a.free(input);
+        var generated = try runGenerated(&producer, input);
+        defer generated.deinit();
+        try validateGenerated(module, generated.value, &.{});
+        var expected = try source.consumer.compose(a, module, site, .{});
+        defer expected.deinit();
+        try std.testing.expect(data.record.equal(
+            source.Module,
+            expected.module,
+            generated.value.selected,
+        ));
+        try std.testing.expectEqual(@as(usize, 2), generated.value.steps.len);
+        for (generated.value.steps) |step| try std.testing.expect(step.rule == .inline_call);
+        try expectConsumerDynamic(module, generated.value.selected, count == 0);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+fn expectConsumerDynamic(original: source.Module, selected: source.Module, first_site: bool) !void {
+    try reportConsumerSemanticBaseline(original, selected);
+    var before = try support.prepare(original);
+    defer before.deinit();
+    var after = try support.prepare(selected);
+    defer after.deinit();
+    for ([_][3]u64{ .{ 7, 3, 4 }, .{ 17, 9, 24 }, .{ 0, 0, 0 } }) |values| {
+        for ([_]bool{ false, true }) |first| {
+            var input: [25]u8 = undefined;
+            for (values, 0..) |value, index|
+                std.mem.writeInt(u64, input[index * 8 ..][0..8], value, .little);
+            input[24] = @intFromBool(first);
+            var prior = try base.Session.start(a, &before, &input, .{});
+            defer prior.deinit();
+            var successor = try base.Session.start(a, &after, &input, .{});
+            defer successor.deinit();
+            const functions = try a.alloc(
+                u64,
+                @max(prior.program.functions.len, successor.program.functions.len),
+            );
+            defer a.free(functions);
+            for (functions, 0..) |*id, index| id.* = index;
+            var prior_entries: u64 = 0;
+            var successor_entries: u64 = 0;
+            prior.entry_counter = .{ .functions = functions, .count = &prior_entries };
+            successor.entry_counter = .{ .functions = functions, .count = &successor_entries };
+            const left = try prior.run(null);
+            const right = try successor.run(null);
+            try std.testing.expect(left == .completed and right == .completed);
+            const wanted = if (first)
+                (values[0] & values[1]) < values[2]
+            else
+                (values[0] ^ values[1]) == values[2];
+            const expected = [_]u8{@intFromBool(wanted)};
+            try std.testing.expectEqualSlices(u8, &expected, try prior.bytes(&left.completed));
+            try std.testing.expectEqualSlices(u8, &expected, try successor.bytes(&right.completed));
+            if (first == first_site) {
+                try std.testing.expect(successor_entries < prior_entries);
+            } else try std.testing.expectEqual(prior_entries, successor_entries);
+            std.debug.print("consumer calls={d}/{d} base transitions={d}/{d}\n", .{
+                prior_entries, successor_entries, prior.transitions, successor.transitions,
+            });
+        }
+    }
+}
+
+fn reportConsumerSemanticBaseline(original: source.Module, selected: source.Module) !void {
+    var before = try source.lowerObserved(a, original, .{ .contract = .semantic });
+    defer before.deinit();
+    var after = try source.lowerObserved(a, selected, .{ .contract = .semantic });
+    defer after.deinit();
+    var counts: [2]usize = .{ 0, 0 };
+    for ([_]data.activation.Program{ before.program, after.program }, &counts) |program, *count|
+        for (program.blocks) |block| {
+            if (block.terminator == .call) count.* += 1;
+        };
+    std.debug.print("existing semantic optimizer call records={d}/{d}\n", .{
+        counts[0], counts[1],
+    });
+}
+
 fn validateGenerated(
     original: source.Module,
     proposed: @import("semantic/compiler.zig").RecordProposal,

@@ -261,6 +261,36 @@ guest-work allowance is exhausted. The multi-reply interpretation applies suppli
 replies at pending requests without consuming guest work, including a retained
 request with zero allowance; further guest steps still require remaining allowance.
 
+## Consumer-aware program construction
+
+`RuntimeTransformation.consumer` authors a pure Horos program whose
+`ConsumerInput` contains an immutable source module and selected consumer site.
+It emits the existing `RecordProposal`: a candidate plus two finite
+`inline_call` steps. Horos's independent source relation checks the actual
+records, fresh bindings, strict argument evaluation and complete successor.
+The producer supplies no trusted purity or consumer-identity flags. This path
+constructs a new guest program; it grants no live checkpoint or realization
+transport for the original guest.
+
+The shared product-to-Boolean example executes the producer itself on Kosmos,
+decodes its proposal, independently validates it, and executes both callers on
+dynamic inputs. Structural lowering removes two call entries from the selected
+route (three to one), while total transitions increase from eleven to thirteen
+because strict finite bindings remain. The other caller stays at three calls
+and eleven transitions. The existing semantic compiler already optimizes both
+versions; no additional backend speedup is claimed. In this sample, proposal
+construction uses 4,923 or 4,749 base transitions, with 1,299 input bytes and
+4,818 output bytes.
+
+Horos's logical-context examples also run through the ordinary Session owner.
+They retain explicit Reader values across yield and fresh-instance restore,
+restore the outer scope, isolate branch annotations, and give cleanup the
+snapshot retained at protection establishment. For counts zero, four and
+twelve, replacing the current frame keeps checkpoint size at 109 bytes;
+retaining snapshots produces 109, 209 and 410 bytes. Graph/control and requested
+allocator bytes are reported separately. These finite observations establish
+neither constant physical memory nor persistent sharing.
+
 ## Evidence and physical limits
 
 The pure hypothetical-reply example admits argument and reply bytes against the
