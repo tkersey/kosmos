@@ -557,7 +557,7 @@ fn disposalTokenSchemas(c: anytype) !u64 {
 }
 
 fn disposalFunctions(c: anytype) !h.source.Module {
-    const info = try h.library.cleanup.exitInfo(c.b, c.unit);
+    const info = try h.source.library.cleanup.exitInfo(c.b, c.unit);
     const main = try c.b.declare(&.{}, c.integer, c.residual_effects, &.{});
     const outer = try c.b.declare(&.{c.cap_e}, c.integer, c.outer_effects, &.{});
     const ret_e = try c.b.declare(&.{c.integer}, c.integer, &.{}, &.{});

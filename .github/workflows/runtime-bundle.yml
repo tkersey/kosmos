@@ -62,8 +62,11 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -75,6 +78,38 @@ jobs:
             mv .zig-cache-upload .zig-cache
           fi
           mkdir -p .zig-cache/tmp
+      - name: Record native compiler and restored target identities
+        if: matrix.lane == 'native' || matrix.lane == 'source'
+        run: |
+          builtin_target() {
+            awk '
+              /^pub const (cpu|os):/ { active=1 }
+              active {
+                gsub(/^[[:space:]]+/, "")
+                printf "%s ", $0
+              }
+              active && /^};/ { print ""; active=0 }
+            '
+          }
+          zig version
+          sha256sum "$(command -v zig)"
+          printf 'CURRENT NATIVE TARGET\n'
+          zig build-exe --show-builtin -fno-llvm -Osafe -mcpu=native \
+            --global-cache-dir "$RUNNER_TEMP/zig-target-diagnostic-global" \
+            --cache-dir "$RUNNER_TEMP/zig-target-diagnostic-local" |
+            builtin_target
+          cached_builtins=()
+          if [ -d .zig-cache/b ]; then
+            mapfile -t cached_builtins < <(
+              find .zig-cache/b -mindepth 2 -maxdepth 2 \
+                -type f -name builtin.zig -print | LC_ALL=C sort
+            )
+          fi
+          printf 'RESTORED BUILTINS: %s; displaying at most 32\n' "${#cached_builtins[@]}"
+          for builtin_file in "${cached_builtins[@]:0:32}"; do
+            sha256sum "$builtin_file"
+            builtin_target < "$builtin_file"
+          done
       - name: Compile native qualification and independently rebuild the core
         if: matrix.lane == 'native'
         run: |
@@ -130,7 +165,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Check native owners and independently rebuild the core
         if: matrix.lane == 'native'
         run: |
@@ -151,7 +186,7 @@ jobs:
             exit 1
           fi
           case "${{ matrix.lane }}" in
-            sessions) group=behavior; expected=54 ;;
+            sessions) group=behavior; expected=55 ;;
             session-ownership) group=ownership; expected=17 ;;
             source-regressions) group=regressions; expected=17 ;;
           esac
@@ -238,7 +273,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   runtime-complete:
     name: Runtime qualification budget
     needs: qualify

@@ -140,10 +140,10 @@ retaining every restore, transfer checkpoint, byte comparison and source asserti
 CI runs session behavior, session ownership/failure, source regression, native
 semantic, specialization/publication, two source-agreement and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
-82 named cases (52 behavior, 14 ownership/failure, 16 source regressions) and
+86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and
 the anonymous import sentinel. Standalone test executables show each case and
 require the complete selected count; the ordinary `check-sessions` target still
-runs all 83 cases together. Source-agreement partitions select disjoint fixture
+runs all 87 cases together. Source-agreement partitions select disjoint fixture
 sets while retaining every mode, instruction frontier, cancellation and comparison;
 together they execute all 70 fixtures and report their actual observation counts. The native semantic
 group rebuilds the source artifact, while specialization and publication use the
@@ -151,8 +151,10 @@ same authenticated packaged artifact. It does not invoke `check-native` and then
 overlapping `check`. Native test run steps always execute, even when compilation
 is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional
-ABI fixture peer. Compiler caches may reuse content across dependency-lock changes;
-Zig's input hashes and the dependency admission guards remain authoritative.
+ABI fixture peer. Compiler caches may reuse content across dependency-lock changes.
+Cache lookup prefers the same lane across dependency-lock changes before its
+legacy cache fallbacks. Zig's input hashes and the dependency admission guards
+remain authoritative; a cache hit never replaces test execution.
 The native lane compiles its existing test artifacts and independently rebuilt
 core before retaining the bounded compiler cache. It then executes the original
 check roots, so a later test timeout does not discard completed compilation.
@@ -180,6 +182,33 @@ interface remain. Prior release results do not qualify a successor; PR summaries
 record actual subjects, executed checks and remaining limits.
 
 ## Run the checks
+
+The adaptive-authoring consolidation selects Horos 8's canonical ordinary
+library surface. Deliberate cleanup fixtures now use
+`horos.source.library.cleanup`; no evaluator or portable-state family changes
+are needed. The session behavior suite imports Horos's ordinary package client
+from the authenticated package snapshot. It executes the Search callable and
+nested bounded record retained across Reader's scoped operation, then checks
+the independently specified result 42. This complements Horos's exported-client
+shape assertions and image-admission check with actual Kosmos execution.
+
+The selected dependency and regenerated packaged evaluator must be qualified
+together. Source overrides still have to produce the exact `build.zig.zon`
+package hash. Neither a version match nor an earlier prerequisite run qualifies
+the consolidation candidate. Saved tasks retain their existing program/runtime
+binding; rollback restores the previous complete tuple rather than combining
+the old packaged evaluator with a new dependency manifest.
+
+The rebuilt consolidation evaluator bundle is 275,293 bytes, unchanged in size
+from the qualified prerequisite. Comparing its complete bytes with that bundle
+after replacing only the embedded Horos package identifier yields equality.
+The current artifact digest and selected Horos package identity are recorded in
+[`src/semantic_packaged.zig`](../src/semantic_packaged.zig), alongside the checked
+source digest. The exact qualified revision and command outcomes are recorded in
+[the consolidation PR](https://github.com/tkersey/kosmos/pull/76).
+This establishes unchanged evaluator-image content for these two builds; it
+does not make arbitrary saved-task bindings interchangeable. Final execution
+qualification remains a separate requirement.
 
 From a source checkout, native checks use the pinned Zig toolchain, `tar`, and
 the source dependency:

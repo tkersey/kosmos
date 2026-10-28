@@ -590,6 +590,12 @@ fn configureSessions(
     host_modules: HostModules,
     publication: Publication,
 ) Sessions {
+    const authoring_client = b.createModule(.{
+        .root_source_file = dependencies.source.path(b, "examples/authoring_client.zig"),
+        .target = b.graph.host,
+        .optimize = host_modules.host_mode,
+        .imports = &.{.{ .name = "horos", .module = host_modules.horos }},
+    });
     const borrow_returns = b.createModule(
         .{
             .root_source_file = dependencies.source.path(b, "test/v2/borrow_returns.zig"),
@@ -611,6 +617,9 @@ fn configureSessions(
         }, .{
             .name = "borrow_return_fixtures",
             .module = borrow_returns,
+        }, .{
+            .name = "authoring_client",
+            .module = authoring_client,
         } },
     }), .filters = if (options.session_group) |group| switch (group) {
         .behavior => &.{"stable_source.test.behavior: "},
