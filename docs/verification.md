@@ -1,8 +1,8 @@
 # Verification boundaries
 
 [TigerStyle](https://github.com/tkersey/kosmos/blob/main/docs/tiger-style.md) adds a concurrent development-source gate. Its native
-auditor self-tests and committed-change ratchet must pass along with all existing
-runtime qualification lanes. `Complete qualification` requires both results.
+auditor self-tests and full-source audit of the committed candidate must pass
+along with all existing runtime qualification lanes. `Complete qualification` requires both results.
 Runtime qualification retains its 600-second workflow budget; TigerStyle is
 exempt from that budget and has an independent 10-minute job timeout.
 

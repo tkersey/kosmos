@@ -340,6 +340,17 @@ pub const Resident = struct {
         if (destination != .record) finished.outcome.deinit();
         state.generation = generation;
         transaction.commit(session);
+        compactCommitted(session);
+        return .{
+            .outcome = published,
+            .checkpoint = receipt,
+            .allocator = if (destination == .encoded) destination.encoded else null,
+            .trace = trace,
+            .guest_work = @intCast(session.transitions -% transitions_before),
+        };
+    }
+
+    fn compactCommitted(session: *runtime.Session) void {
         const committed_store = if (@hasField(runtime.Session, "driver"))
             &session.driver.outer.store
         else
@@ -347,13 +358,6 @@ pub const Resident = struct {
         committed_store.compactImported() catch |err| switch (err) {
             error.OutOfMemory => {},
             else => std.debug.panic("invalid committed storage: {s}", .{@errorName(err)}),
-        };
-        return .{
-            .outcome = published,
-            .checkpoint = receipt,
-            .allocator = if (destination == .encoded) destination.encoded else null,
-            .trace = trace,
-            .guest_work = @intCast(session.transitions -% transitions_before),
         };
     }
 

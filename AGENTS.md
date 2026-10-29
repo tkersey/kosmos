@@ -5,8 +5,8 @@ Preserve the execution, ownership and publication laws in [verification](docs/ve
 and [executable semantics](docs/executable-semantics.md).
 
 Use exact Zig 0.17.0. Run the affected native qualification roots and the TigerStyle
-ratchet against the committed candidate. Every required check must finish successfully;
-an interrupted, skipped or inconclusive run leaves verification outstanding.
+full-source gate against the committed candidate. Every required check must finish
+successfully; an interrupted, skipped or inconclusive run leaves verification outstanding.
 
 Express intent through names, types, ownership and operations. Do not add explanatory
 comments in source, tests or examples. Keep mandatory legal notices and machine directives.

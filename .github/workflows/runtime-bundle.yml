@@ -27,11 +27,10 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
-      - name: Check committed Zig changes and the native auditor
+      - name: Check every tracked Zig file and the native auditor
         env:
-          TIGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'd777cfa402da97ff2299686f8365324b2f9b368c' }}
           TIGER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: bash tools/tiger-style.sh "$TIGER_BASE" "$TIGER_HEAD"
+        run: bash tools/tiger-style.sh "$TIGER_HEAD"
       - name: Verify TigerStyle selection and failure behavior
         run: bash tools/test-tiger-style.sh
   qualify:
