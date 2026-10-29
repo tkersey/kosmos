@@ -276,7 +276,6 @@ pub fn Slots(comptime Value: type) type {
 
         pub fn release(self: *Self, handle: Handle) Error!void {
             const entry = try self.lookupView(handle);
-            // Protection may fork a view and relocate the handle table.
             self.views.lockPointers();
             defer self.views.unlockPointers();
             self.retire(handle.index, entry);
@@ -363,6 +362,7 @@ pub fn Slots(comptime Value: type) type {
                 }
             }
             try self.protect(handle);
+            // Protection may fork a view and relocate the handle table.
             self.views.lockPointers();
             defer self.views.unlockPointers();
             const entry = try self.lookupView(handle);
