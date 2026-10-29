@@ -5,5 +5,5 @@ Describe the required behavior, its owning construction, and any compatibility i
 ## Verification
 
 Record the exact candidate, commands and completed results. Include the TigerStyle
-ratchet and affected qualification roots. Explain resource bounds, failure/retry
-behavior and independent observations when those contracts change.
+full-source gate and affected qualification roots. Explain resource bounds,
+failure/retry behavior and independent observations when those contracts change.

@@ -1,8 +1,8 @@
 # TigerStyle for Kosmos
 
-This contract applies to new and materially changed Zig code, including tests,
+This contract applies to every tracked Zig file, including implementation, tests,
 examples and build tools. It adapts the
-[skills-zig TigerStyle contract](https://github.com/tkersey/skills-zig/blob/23d1fa5715ef50e2db1e9fa79b5b3fd6223ee4ca/docs/engineering/TIGER_STYLE.md)
+[skills-zig TigerStyle contract](https://github.com/tkersey/skills-zig/blob/ac19a3fabd0b32fae3f6bf1becf5368c724e96f3/docs/engineering/TIGER_STYLE.md)
 to Kosmos's executable semantics and native/WASM runtime. Safety, performance and
 developer experience are the priorities, in that order.
 
@@ -71,20 +71,23 @@ termination or recovery correctness.
 
 ## Source shape
 
-Keep new functions and test blocks within 70 physical lines, with descriptive
+Keep functions and test blocks within 70 physical lines, with descriptive
 names and narrow responsibilities. Keep Zig source lines within 100 columns;
 passive multiline-string data is exempt from the line-length check. Use spaces,
 remove trailing whitespace and resolve `TODO`, `FIXME` and `HACK` markers before
-merging changed code.
+merging code.
 
 Express explanations through names, types, ownership and operations. Do not add
 explanatory comments to source, tests or examples. Mandatory legal notices and
 required machine directives remain permitted. Put engineering rationale in the
 PR description when it helps assess the actual change.
 
-The inherited checker counts a comptime type factory's complete body against the
-function limit, including returned declarations. It is a source-shape heuristic,
-not a measure of runtime complexity or a reason to weaken a type contract.
+The auditor counts each function or test block's own physical lines. Nested
+functions and methods have independent limits; their lines do not inflate the
+enclosing type factory. Shared lines still count for each owner containing code
+on that line. Blank lines belong to their enclosing function. Type-returning
+factories and mandatory inline expansion do not create native recursive frames;
+their nested runtime functions still receive recursion checks.
 
 ## Performance and verification
 
@@ -106,41 +109,46 @@ actual commands and outcomes in the PR. Runtime qualification retains its
 600-second workflow budget. TigerStyle verification is exempt from that budget
 and remains required, with an independent 10-minute job timeout.
 
-## Run the adoption ratchet
+## Run the full-source gate
 
-From a clean source checkout with Git, Bash and Zig 0.17.0 available, commit the
+From a clean source checkout with Git 2.43+, Bash and Zig 0.17.0 available, commit the
 candidate and run:
 
 ```sh
-bash tools/tiger-style.sh origin/main HEAD
+bash tools/tiger-style.sh HEAD
 ```
 
-The launcher pins the native auditor to an immutable `skills-zig` commit, runs
-its self-tests, and audits changes from the merge base to the selected head.
-The checked-out committed head must match the requested head. Acquisition and
-tool errors fail the gate. Binary-classified Zig changes and changed Zig file
-types, such as replacing source with a symlink, fail rather than silently omit
-source from the audit. The auditor is a development dependency, outside the
+The optional argument defaults to `HEAD`. The checked-out committed head must
+match the requested head. The launcher selects every tracked `.zig` file from
+that commit and reads its raw Git blob, without checkout filters or archive
+substitutions. It runs the pinned native auditor's self-tests and fully audits
+every selected file. Diagnostics retain the original path below a temporary
+per-file directory. Working-tree edits cannot substitute the audited bytes.
+Unchanged files and pure renames receive the same checks as new code. There is no baseline, allowlist or historical-debt
+exemption.
+
+The native auditor remains pinned to an immutable `skills-zig` commit. Acquisition
+and tool errors fail the gate. Binary-classified Zig files, nonregular source
+such as symlinks, and a candidate with no tracked Zig source fail rather than
+silently omit source. The auditor is a development dependency, outside the
 runtime package and `build.zig.zon` dependency graph.
 
-The adoption gate checks added lines in existing files and fully audits new Zig
-files. Full-file checks additionally recognize direct recursion and overlong
-functions/test blocks. The source scanner is heuristic: multiline spellings,
-indirect recursion, ownership and progress require review. In changed existing
-files, reviewers also enforce function size and native recursion obligations.
-Unchanged historical code, including a pure rename, remains inherited debt.
-Added violating lines fail, and files classified as additions receive the full
-audit. A passing diff audit is not a claim that the entire repository conforms.
+Full-file checks parse Zig syntax and recognize direct recursion and overlong
+functions/test blocks, including nested declarations. Line-level rules remain
+heuristic: multiline error/loop spellings, indirect recursion, ownership and
+progress still require review. Passing the automated gate does not establish
+those semantic obligations.
 
 Run `bash tools/test-tiger-style.sh` after changing the launcher or auditor pin.
-Its temporary Git histories check valid changes, unchanged legacy debt,
-added-line and new-file failures, invalid revisions, dirty indexes/worktrees,
-binary diffs and changed file types. CI runs these probes without retaining
-generated fixtures.
+Its temporary Git histories check unchanged violations, unrelated changes, pure
+renames, valid source, added violations, long existing functions, malformed
+source, invalid revisions, dirty indexes/worktrees, hidden and concurrent edits,
+checkout filters, export attributes, binary source/classification,
+nonregular files and empty source selection. CI runs these probes without
+retaining generated fixtures.
 
 Runtime qualification runs concurrently with TigerStyle. `Runtime qualification
 budget` checks the runtime lanes against 600 seconds from workflow start without
 waiting for TigerStyle. The existing `Complete qualification` check then requires
 both the runtime budget gate and TigerStyle to succeed. The dedicated TigerStyle
-job checks the exact PR head, with the PR base supplied separately, and remains
-active for main pushes and manual runs.
+job checks the exact PR head and remains active for main pushes and manual runs.

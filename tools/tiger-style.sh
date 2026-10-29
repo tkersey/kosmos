@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GIT_NO_REPLACE_OBJECTS=1
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-    printf 'Usage: bash tools/tiger-style.sh BASE [HEAD]\n' >&2
+if [[ $# -gt 1 ]]; then
+    printf 'Usage: bash tools/tiger-style.sh [HEAD]\n' >&2
     exit 64
 fi
 
-auditor_revision=23d1fa5715ef50e2db1e9fa79b5b3fd6223ee4ca
+auditor_revision=ac19a3fabd0b32fae3f6bf1becf5368c724e96f3
 repository=$(git rev-parse --show-toplevel)
 cd "$repository"
 
-base=$(git rev-parse --verify --end-of-options "$1^{commit}")
-head=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
+head=$(git rev-parse --verify --end-of-options "${1:-HEAD}^{commit}")
 if [[ "$head" != "$(git rev-parse --verify HEAD)" ]]; then
     printf 'TigerStyle requires HEAD to be the requested candidate.\n' >&2
     exit 1
@@ -21,23 +21,39 @@ if ! git diff --quiet --no-ext-diff --no-textconv "$head" -- ||
     printf 'TigerStyle requires a clean committed candidate; commit tracked changes first.\n' >&2
     exit 1
 fi
-base=$(git merge-base "$base" "$head")
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/tiger-style.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
-git diff --no-ext-diff --no-textconv --name-only -z --diff-filter=T \
-    "$base" "$head" -- ':(glob)**/*.zig' > "$scratch/type-changes"
-if [[ -s "$scratch/type-changes" ]]; then
-    printf 'TigerStyle cannot audit changed Zig file types; preserve regular source files.\n' >&2
+paths=()
+git ls-tree -r -z --full-tree "$head" > "$scratch/sources"
+while IFS= read -r -d '' entry; do
+    metadata=${entry%%$'\t'*}
+    path=${entry#*$'\t'}
+    [[ "$path" == *.zig ]] || continue
+    mode=${metadata%% *}
+    if [[ "$mode" != 100644 && "$mode" != 100755 ]] ||
+        [[ ! -f "$path" || -L "$path" ]]; then
+        printf 'TigerStyle requires regular tracked Zig files: %s\n' "$path" >&2
+        exit 1
+    fi
+    blob=${metadata##* }
+    destination="$scratch/source/${#paths[@]}/$path"
+    mkdir -p -- "${destination%/*}"
+    git cat-file blob "$blob" > "$destination"
+    paths+=("$destination")
+done < "$scratch/sources"
+if [[ ${#paths[@]} -eq 0 ]]; then
+    printf 'TigerStyle requires at least one tracked Zig file.\n' >&2
     exit 1
 fi
 
-git diff --no-ext-diff --no-textconv --no-renames --numstat -z \
-    --diff-filter=ACMR "$base" "$head" -- ':(glob)**/*.zig' > "$scratch/changes"
+empty_tree=$(git hash-object -t tree --stdin </dev/null)
+git --attr-source="$head" diff --no-ext-diff --no-textconv --no-renames --numstat -z \
+    "$empty_tree" "$head" -- '*.zig' > "$scratch/changes"
 while IFS= read -r -d '' change; do
     if [[ "$change" == $'-\t-\t'* ]]; then
-        printf 'TigerStyle cannot audit a binary-classified Zig change: %s\n' "$change" >&2
+        printf 'TigerStyle cannot audit a binary-classified Zig file: %s\n' "$change" >&2
         exit 1
     fi
 done < "$scratch/changes"
@@ -51,7 +67,6 @@ if [[ "$(git -C "$scratch/auditor" rev-parse HEAD)" != "$auditor_revision" ]]; t
     exit 1
 fi
 
-printf 'TigerStyle: base=%s head=%s auditor=%s\n' "$base" "$head" "$auditor_revision"
+printf 'TigerStyle: head=%s auditor=%s\n' "$head" "$auditor_revision"
 zig test "$scratch/auditor/tools/tiger_style/main.zig"
-zig run "$scratch/auditor/tools/tiger_style/main.zig" -- \
-    audit-diff --base "$base" --head "$head"
+zig run "$scratch/auditor/tools/tiger_style/main.zig" -- audit-files "${paths[@]}"

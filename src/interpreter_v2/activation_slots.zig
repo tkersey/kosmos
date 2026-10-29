@@ -4,12 +4,12 @@
 //! Handles and node addresses must never enter portable State or identity.
 const std = @import("std");
 
-pub fn Slots(comptime Value: type) type {
+const bits = 4;
+const width = 1 << bits;
+const maximum_depth = (@bitSizeOf(usize) - bits + bits - 1) / bits;
+
+fn SlotLayout(comptime Value: type) type {
     return struct {
-        const Self = @This();
-        const bits = 4;
-        const width = 1 << bits;
-        const maximum_depth = (@bitSizeOf(usize) - bits + bits - 1) / bits;
         const Node = union(enum) { empty, page: *Page, branch: *Branch };
         const Page = struct {
             references: usize = 1,
@@ -33,38 +33,6 @@ pub fn Slots(comptime Value: type) type {
             const bytes: [*]u8 = @ptrCast(page);
             const items: [*]Value = @ptrCast(@alignCast(bytes + value_offset));
             return items[0..page.capacity];
-        }
-        fn rank(initialized: u16, slot: usize) usize {
-            if (slot & (width - 1) == 0) return 0;
-            return @popCount(initialized & (mask(slot) - 1));
-        }
-        fn physicalIndex(page: *const Page, initialized: u16, slot: usize) usize {
-            return if (page.capacity == width) slot & (width - 1) else rank(initialized, slot);
-        }
-        fn createPage(self: *Self, count: usize) Error!*Page {
-            const capacity = std.math.ceilPowerOfTwoAssert(usize, @max(1, count));
-            const page: *Page = if (capacity == width)
-                @ptrCast(try self.allocator.create(DensePage))
-            else blk: {
-                const bytes = try self.allocator.alignedAlloc(
-                    u8,
-                    page_alignment,
-                    pageBytes(capacity),
-                );
-                break :blk @ptrCast(bytes.ptr);
-            };
-            page.* = .{ .capacity = @intCast(capacity) };
-            self.statistics.live_pages += 1;
-            self.statistics.peak_pages = @max(
-                self.statistics.peak_pages,
-                self.statistics.live_pages,
-            );
-            self.statistics.live_page_bytes += pageBytes(capacity);
-            self.statistics.peak_page_bytes = @max(
-                self.statistics.peak_page_bytes,
-                self.statistics.live_page_bytes,
-            );
-            return page;
         }
         const Branch = struct { references: usize = 1, children: [width]Node = @splat(.empty) };
         const View = struct {
@@ -100,15 +68,112 @@ pub fn Slots(comptime Value: type) type {
             peak_page_bytes: usize = 0,
             packed_moves: u64 = 0,
         };
+    };
+}
+
+fn SlotIterator(comptime Store: type) type {
+    return struct {
+        const Visit = struct { node: Store.Node, depth: u8, base: usize };
+        store: *Store,
+        handle: Store.Handle,
+        revision: u64,
+        pending: [maximum_depth * (width - 1) + 1]Visit = undefined,
+        length: usize = 0,
+        page: ?*Store.Page = null,
+        live: u16 = 0,
+        base: usize = 0,
+
+        pub fn next(self: *@This()) Store.Error!?Store.Binding {
+            if ((try self.store.lookupView(self.handle)).revision != self.revision)
+                return error.StaleIterator;
+            while (self.live == 0) {
+                if (self.length == 0) return null;
+                self.length -= 1;
+                const current = self.pending[self.length];
+                if (current.depth == 0) {
+                    self.page = current.node.page;
+                    self.live = current.node.page.initialized;
+                    self.base = current.base;
+                } else {
+                    var index: usize = width;
+                    while (index != 0) {
+                        index -= 1;
+                        const child = current.node.branch.children[index];
+                        if (child == .empty) continue;
+                        std.debug.assert(self.length < self.pending.len);
+                        self.pending[self.length] = .{
+                            .node = child,
+                            .depth = current.depth - 1,
+                            .base = current.base | (index << @intCast(bits * current.depth)),
+                        };
+                        self.length += 1;
+                    }
+                }
+            }
+            const index = @ctz(self.live);
+            self.live &= self.live - 1;
+            return .{ .slot = self.base + index, .value = Store.values(self.page.?)[
+                Store.physicalIndex(self.page.?, self.page.?.initialized, index)
+            ] };
+        }
+    };
+}
+
+pub fn Slots(comptime Value: type) type {
+    return struct {
+        const Self = @This();
+        const Layout = SlotLayout(Value);
+        const Node = Layout.Node;
+        const Page = Layout.Page;
+        const Branch = Layout.Branch;
+        const View = Layout.View;
+        const DensePage = Layout.DensePage;
+        const page_alignment = Layout.page_alignment;
+        const pageBytes = Layout.pageBytes;
+        const values = Layout.values;
+        pub const Handle = Layout.Handle;
+        pub const Binding = Layout.Binding;
+        pub const ReadError = Layout.ReadError;
+        pub const Error = Layout.Error;
+        pub const Statistics = Layout.Statistics;
+        fn rank(initialized: u16, slot: usize) usize {
+            if (slot & (width - 1) == 0) return 0;
+            return @popCount(initialized & (mask(slot) - 1));
+        }
+        fn physicalIndex(page: *const Page, initialized: u16, slot: usize) usize {
+            return if (page.capacity == width) slot & (width - 1) else rank(initialized, slot);
+        }
+        fn createPage(self: *Self, count: usize) Error!*Page {
+            const capacity = std.math.ceilPowerOfTwoAssert(usize, @max(1, count));
+            const page: *Page = if (capacity == width)
+                @ptrCast(try self.allocator.create(DensePage))
+            else blk: {
+                const bytes = try self.allocator.alignedAlloc(
+                    u8,
+                    page_alignment,
+                    pageBytes(capacity),
+                );
+                break :blk @ptrCast(bytes.ptr);
+            };
+            page.* = .{ .capacity = @intCast(capacity) };
+            self.statistics.live_pages += 1;
+            self.statistics.peak_pages = @max(
+                self.statistics.peak_pages,
+                self.statistics.live_pages,
+            );
+            self.statistics.live_page_bytes += pageBytes(capacity);
+            self.statistics.peak_page_bytes = @max(
+                self.statistics.peak_page_bytes,
+                self.statistics.live_page_bytes,
+            );
+            return page;
+        }
 
         allocator: std.mem.Allocator,
         instance: u64,
         views: std.ArrayList(View) = .empty,
         free_view: usize = std.math.maxInt(usize),
         statistics: Statistics = .{},
-        /// Embedded owners install this only for an active transaction. The
-        /// store address is supplied at the call, so moving the containing owner
-        /// never leaves a cached context pointer behind.
         before_mutation: ?*const fn (*Self, usize) Error!void = null,
         var next_instance = std.atomic.Value(usize).init(1);
 
@@ -133,8 +198,6 @@ pub fn Slots(comptime Value: type) type {
             self.* = undefined;
         }
 
-        /// Allocated node bytes and reserved handle-table capacity, excluding
-        /// allocator overhead and the separately owned payload graph.
         pub fn retainedBytes(self: *const Self) usize {
             return self.statistics.live_page_bytes +
                 self.statistics.live_directories * @sizeOf(Branch) +
@@ -192,9 +255,6 @@ pub fn Slots(comptime Value: type) type {
             return (try self.lookupView(handle)).generation != std.math.maxInt(u64);
         }
 
-        /// Move ownership without copying or allocating. Old descriptors and
-        /// iterators lose access even though the new owner retains the same root.
-        /// A containing owner can preflight several views before transferring any.
         pub fn transfer(self: *Self, handle: Handle) error{
             InvalidHandle,
             CapacityExceeded,
@@ -207,8 +267,6 @@ pub fn Slots(comptime Value: type) type {
             return result;
         }
 
-        /// Acquire the containing owner's entry version before changing either
-        /// its descriptor metadata or this root. Independent forks have no owner.
         pub fn protect(self: *Self, handle: Handle) Error!void {
             const owner = (try self.lookupView(handle)).owner;
             if (owner != std.math.maxInt(usize)) {
@@ -236,8 +294,6 @@ pub fn Slots(comptime Value: type) type {
             self.drop(root);
         }
 
-        /// Publish a tentative view after all other fallible operation work.
-        /// Consumes the candidate handle. Failure leaves both logical views intact.
         pub fn commit(self: *Self, target: Handle, candidate: Handle) Error!void {
             if (target.index == candidate.index) return error.InvalidHandle;
             {
@@ -315,8 +371,6 @@ pub fn Slots(comptime Value: type) type {
             self.statistics.writes +|= 1;
         }
 
-        /// Reclamation after the evaluator has selected live values AND required
-        /// disposition. This operation itself has no authority to discard owners.
         pub fn retainOnly(self: *Self, handle: Handle, selected: []const usize) Error!void {
             const original = (try self.lookupView(handle)).*;
             if (original.revision == std.math.maxInt(u64)) return error.CapacityExceeded;
@@ -603,51 +657,7 @@ pub fn Slots(comptime Value: type) type {
             return result;
         }
 
-        pub const Iterator = struct {
-            const Visit = struct { node: Node, depth: u8, base: usize };
-            store: *Self,
-            handle: Handle,
-            revision: u64,
-            pending: [maximum_depth * (width - 1) + 1]Visit = undefined,
-            length: usize = 0,
-            page: ?*Page = null,
-            live: u16 = 0,
-            base: usize = 0,
-
-            pub fn next(self: *Iterator) Error!?Binding {
-                if ((try self.store.lookupView(self.handle)).revision != self.revision)
-                    return error.StaleIterator;
-                while (self.live == 0) {
-                    if (self.length == 0) return null;
-                    self.length -= 1;
-                    const current = self.pending[self.length];
-                    if (current.depth == 0) {
-                        self.page = current.node.page;
-                        self.live = current.node.page.initialized;
-                        self.base = current.base;
-                    } else {
-                        var index: usize = width;
-                        while (index != 0) {
-                            index -= 1;
-                            const child = current.node.branch.children[index];
-                            if (child == .empty) continue;
-                            std.debug.assert(self.length < self.pending.len);
-                            self.pending[self.length] = .{
-                                .node = child,
-                                .depth = current.depth - 1,
-                                .base = current.base | (index << @intCast(bits * current.depth)),
-                            };
-                            self.length += 1;
-                        }
-                    }
-                }
-                const index = @ctz(self.live);
-                self.live &= self.live - 1;
-                return .{ .slot = self.base + index, .value = values(self.page.?)[
-                    physicalIndex(self.page.?, self.page.?.initialized, index)
-                ] };
-            }
-        };
+        pub const Iterator = SlotIterator(Self);
     };
 }
 

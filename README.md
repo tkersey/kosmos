@@ -117,7 +117,7 @@ migration and qualification requirements.
 See [verification](docs/verification.md) for the current coverage and the
 remaining migration boundaries.
 
-New and materially changed Zig code follows [TigerStyle for Kosmos](https://github.com/tkersey/kosmos/blob/main/docs/tiger-style.md).
-Run its committed-change ratchet alongside the affected qualification roots.
+Every tracked Zig file follows [TigerStyle for Kosmos](https://github.com/tkersey/kosmos/blob/main/docs/tiger-style.md).
+Run its full-source gate alongside the affected qualification roots.
 
 Source builds and existing v1 authenticated acquisition/verification are documented in [runtime bundles](docs/runtime-bundles.md).
