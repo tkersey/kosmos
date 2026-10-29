@@ -4666,3 +4666,195 @@ fn residentTransitionAllocations(
     defer output.deinit();
     return counting.alloc_index - allocation_start;
 }
+test "behavior: logical context restores scopes attachments snapshots and cleanup" {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.logicalContext(&builder),
+    );
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    for ([_]u64{ 10, 37 }) |seed| for ([_]bool{ false, true }) |cancel|
+        try logicalScopeRestoration(image, seed, cancel);
+}
+
+fn logicalScopeRestoration(image: []const u8, seed: u64, cancel: bool) !void {
+    var input: [8]u8 = undefined;
+    std.mem.writeInt(u64, &input, seed, .little);
+    var original = try Session.initImage(testing.allocator, image, &input);
+    var alive = true;
+    defer if (alive) original.deinit();
+    try testing.expect(try drive(&original, null) == .yielded);
+    const checkpoint = try original.checkpoint(testing.allocator);
+    defer testing.allocator.free(checkpoint);
+    original.deinit();
+    alive = false;
+    var restored = try Session.restoreImage(testing.allocator, image, checkpoint);
+    defer restored.deinit();
+    if (cancel) {
+        try restored.cancel(.{ .text = "logical scope cancelled" });
+    } else try restored.resumeYield();
+    const cleanup = try drive(&restored, null);
+    try testing.expect(cleanup == .requested);
+    try testing.expectEqualStrings(
+        "logical-context/cleanup",
+        restored.program.effects[@intCast(cleanup.requested.effect)].identity,
+    );
+    var payload: horos.data.wire.Reader = .{
+        .input = try restored.bytes(&cleanup.requested.payload),
+    };
+    try expectLogicalFrames(&payload, &.{ seed, 20 });
+    try payload.finish();
+    const cleaning = try restored.checkpoint(testing.allocator);
+    defer testing.allocator.free(cleaning);
+    var finished = try Session.restoreImage(testing.allocator, image, cleaning);
+    defer finished.deinit();
+    try answerWithValue(&finished, &.{});
+    const result = try drive(&finished, null);
+    if (cancel) return testing.expect(result == .cancelled);
+    try testing.expect(result == .completed);
+    var output: horos.data.wire.Reader = .{ .input = try finished.bytes(&result.completed) };
+    try expectLogicalFrames(&output, &.{ seed, 20 });
+    try expectLogicalFrames(&output, &.{seed});
+    try expectLogicalFrames(&output, &.{ seed, 20 });
+    try output.finish();
+}
+
+fn expectLogicalFrames(reader: *horos.data.wire.Reader, metadata: []const u64) !void {
+    try testing.expectEqual(metadata.len, try reader.natural());
+    for (metadata) |value| {
+        try testing.expectEqual(@as(u64, 1), try reader.fixed(u64));
+        try testing.expectEqual(@as(u64, 7), try reader.fixed(u64));
+        try testing.expectEqual(value, try reader.fixed(u64));
+    }
+}
+
+test "behavior: logical context branches preserve immutable prefixes and sibling annotations" {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.logicalBranching(&builder),
+    );
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    for ([_]u64{ 10, 37 }) |seed| {
+        var input: [8]u8 = undefined;
+        std.mem.writeInt(u64, &input, seed, .little);
+        var session = try Session.initImage(testing.allocator, image, &input);
+        defer session.deinit();
+        const result = try drive(&session, null);
+        try testing.expect(result == .completed);
+        var output: horos.data.wire.Reader = .{ .input = try session.bytes(&result.completed) };
+        try testing.expectEqual(@as(u64, 2), try output.natural());
+        try expectLogicalFrames(&output, &.{ seed, 202 });
+        try expectLogicalFrames(&output, &.{ seed, 101 });
+        try output.finish();
+    }
+}
+
+const LogicalRetentionMetrics = struct {
+    nodes: usize,
+    controls: usize,
+    checkpoint_bytes: usize,
+    live_bytes: usize,
+    peak_bytes: usize,
+    guest_work: usize,
+    base_work: usize,
+};
+
+test "behavior: logical context replacement and retained history report distinct storage" {
+    for ([_]u64{ 0, 4, 12 }) |count| {
+        const replaced = try logicalRetentionWitness(false, count);
+        const retained = try logicalRetentionWitness(true, count);
+        if (count != 0) try testing.expect(retained.checkpoint_bytes > replaced.checkpoint_bytes);
+    }
+}
+
+fn logicalRetentionWitness(retain: bool, count: u64) !LogicalRetentionMetrics {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    var compiled = try source.lower(
+        testing.allocator,
+        try source.examples.logicalRetention(&builder, retain),
+    );
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    var prepared = try @import("kosmos").Prepared.init(testing.allocator, image);
+    defer prepared.deinit();
+    var budget: @import("kosmos").AllocationBudget = .{
+        .parent = testing.allocator,
+        .limit = std.math.maxInt(usize),
+    };
+    var input: [8]u8 = undefined;
+    std.mem.writeInt(u64, &input, count, .little);
+    var session = try Session.start(budget.allocator(), &prepared, &input);
+    defer session.deinit();
+    for (0..count + 1) |index| {
+        try testing.expect(try drive(&session, null) == .yielded);
+        if (index != count) try session.resumeYield();
+    }
+    const checkpoint = try session.checkpoint(testing.allocator);
+    defer testing.allocator.free(checkpoint);
+    var snapshot = try guestState(&session);
+    defer snapshot.deinit();
+    var controls: usize = 0;
+    for (snapshot.state.nodes) |node| controls += @intFromBool(node.record == .control);
+    const metrics: LogicalRetentionMetrics = .{
+        .nodes = snapshot.state.nodes.len,
+        .controls = controls,
+        .checkpoint_bytes = checkpoint.len,
+        .live_bytes = budget.live,
+        .peak_bytes = budget.peak,
+        .guest_work = session.transitions,
+        .base_work = session.driver.outer.transitions,
+    };
+    std.debug.print(
+        "logical retention: history={} count={d} metrics={any}\n",
+        .{ retain, count, metrics },
+    );
+    var restored = try Session.restore(testing.allocator, &prepared, checkpoint);
+    defer restored.deinit();
+    try restored.resumeYield();
+    const result = try drive(&restored, null);
+    try testing.expect(result == .completed);
+    var output: horos.data.wire.Reader = .{ .input = try restored.bytes(&result.completed) };
+    try expectLogicalFrames(&output, &.{if (count == 0) 0 else 1});
+    try testing.expectEqual(if (retain) count else 0, try output.natural());
+    if (retain) for (0..count) |index| try expectLogicalFrames(&output, &.{count - index});
+    try output.finish();
+    return metrics;
+}
+
+test "behavior: logical context query selects newest matching domain and key" {
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    var compiled = try source.lower(testing.allocator, try source.examples.logicalQuery(&builder));
+    defer compiled.deinit();
+    const image = try programBytes(compiled.program);
+    defer testing.allocator.free(image);
+    for ([_]u64{ 1, 2, 3 }) |domain| {
+        var input: [128]u8 = undefined;
+        var writer: horos.data.wire.Writer = .{ .output = &input };
+        try writer.natural(3);
+        for ([_][3]u64{ .{ 1, 7, 10 }, .{ 1, 7, 20 }, .{ 2, 7, 30 } }) |frame|
+            for (frame) |value| try writer.fixed(u64, value);
+        try writer.fixed(u64, domain);
+        try writer.fixed(u64, 7);
+        var session = try Session.initImage(testing.allocator, image, input[0..writer.position]);
+        defer session.deinit();
+        const result = try drive(&session, null);
+        try testing.expect(result == .completed);
+        var output: horos.data.wire.Reader = .{ .input = try session.bytes(&result.completed) };
+        try testing.expectEqual(@as(u64, if (domain == 3) 0 else 1), try output.natural());
+        if (domain != 3) try testing.expectEqual(
+            @as(u64, if (domain == 1) 20 else 30),
+            try output.fixed(u64),
+        );
+        try output.finish();
+    }
+}

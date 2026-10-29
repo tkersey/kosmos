@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     const kernel = configureKernel(b, options, wasm_modules);
     const runtime_profile = configureRuntimeProfile(b, options, wasm_modules, kernel);
     const packages = configurePackages(b, kernel, runtime_profile);
-    const fixtures = configureFixtures(b, host_modules, publication);
+    const fixtures = configureFixtures(b, options, host_modules, publication);
     const foreign_checks = configureForeignChecks(b, kernel, packages, fixtures);
     const source_checks = configureSourceChecks(b, options, dependencies, kernel, fixtures);
     const portable_checks = configurePortableChecks(b, kernel, fixtures);
@@ -65,6 +65,7 @@ pub fn build(b: *std.Build) void {
 
 const SessionGroup = enum { behavior, ownership, regressions };
 const SourceGroup = enum { first, second };
+const FixtureProfile = enum { full, prepared_only };
 
 const Options = struct {
     target: std.Build.ResolvedTarget,
@@ -73,6 +74,7 @@ const Options = struct {
     use_packaged_runtime: bool,
     session_group: ?SessionGroup,
     source_group: ?SourceGroup,
+    fixture_profile: FixtureProfile,
     economy_workload: ?[]const u8,
     input_capacity: usize,
     working_capacity: usize,
@@ -107,6 +109,11 @@ fn configureOptions(b: *std.Build) Options {
         "source-group",
         "Select an exhaustive half of the source fixtures (default: all)",
     );
+    const fixture_profile = b.option(
+        FixtureProfile,
+        "fixture-profile",
+        "Select native fixture commands (default: full)",
+    ) orelse .full;
     const economy_workload = b.option(
         []const u8,
         "economy-workload",
@@ -126,6 +133,7 @@ fn configureOptions(b: *std.Build) Options {
         .use_packaged_runtime = use_packaged_runtime,
         .session_group = session_group,
         .source_group = source_group,
+        .fixture_profile = fixture_profile,
         .economy_workload = economy_workload,
         .input_capacity = capacities.input_capacity,
         .working_capacity = capacities.working_capacity,
@@ -937,7 +945,14 @@ const Fixtures = struct {
     current_fixtures: *std.Build.Step.InstallArtifact,
 };
 
-fn configureFixtures(b: *std.Build, host_modules: HostModules, publication: Publication) Fixtures {
+fn configureFixtures(
+    b: *std.Build,
+    options: Options,
+    host_modules: HostModules,
+    publication: Publication,
+) Fixtures {
+    const fixture_options = b.addOptions();
+    fixture_options.addOption(bool, "prepared_only", options.fixture_profile == .prepared_only);
     const fixture = b.addExecutable(.{ .name = "current-fixtures", .root_module = b.createModule(.{
         .root_source_file = b.path("test/current/fixtures.zig"),
         .target = b.graph.host,
@@ -947,6 +962,7 @@ fn configureFixtures(b: *std.Build, host_modules: HostModules, publication: Publ
             .module = host_modules.horos,
         } },
     }) });
+    fixture.root_module.addOptions("fixture_options", fixture_options);
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{
         .override = .{ .custom = "current/bin" },
     } });

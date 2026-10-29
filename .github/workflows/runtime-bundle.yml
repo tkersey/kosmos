@@ -186,7 +186,7 @@ jobs:
             exit 1
           fi
           case "${{ matrix.lane }}" in
-            sessions) group=behavior; expected=55 ;;
+            sessions) group=behavior; expected=59 ;;
             session-ownership) group=ownership; expected=17 ;;
             source-regressions) group=regressions; expected=17 ;;
           esac
@@ -235,7 +235,7 @@ jobs:
         run: |
           group=first
           if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
-          zig build check-source -Dsource-group="$group" \
+          zig build check-source -Dsource-group="$group" -Dfixture-profile=prepared_only \
             -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'

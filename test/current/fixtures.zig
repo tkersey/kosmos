@@ -1,6 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const runtime = @import("kosmos");
+const fixture_options = @import("fixture_options");
 
 pub fn main(init: std.process.Init) !void {
     var arguments = std.process.Args.Iterator.init(init.minimal.args);
@@ -8,7 +9,10 @@ pub fn main(init: std.process.Init) !void {
     const mode = arguments.next() orelse return error.MissingMode;
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
-    if (std.mem.eql(u8, mode, "prepared-invoke-stream")) {
+    if (comptime fixture_options.prepared_only) {
+        if (!std.mem.eql(u8, mode, "prepared-invoke-stream")) return error.InvalidMode;
+        try preparedStream(init.gpa, init.io, &output.interface);
+    } else if (std.mem.eql(u8, mode, "prepared-invoke-stream")) {
         try preparedStream(init.gpa, init.io, &output.interface);
     } else if (std.mem.eql(u8, mode, "specialized-invoke")) {
         try specializedInvoke(init.gpa, init.io, &output.interface);

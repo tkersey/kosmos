@@ -11,6 +11,8 @@ pub const layout = @import("transformation_layout.zig").define;
 pub const LayoutInput = @import("transformation_layout.zig").Input;
 pub const indexedLayout = @import("transformation_layout.zig").defineIndexed;
 pub const IndexedLayoutInput = @import("transformation_layout.zig").IndexedInput;
+pub const consumer = @import("transformation_inline.zig").define;
+pub const ConsumerInput = @import("transformation_inline.zig").Input;
 
 pub const Input = struct {
     module: source.ast.Module,
