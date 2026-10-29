@@ -111,7 +111,7 @@ and remains required, with an independent 10-minute job timeout.
 
 ## Run the full-source gate
 
-From a clean source checkout with Git, Bash and Zig 0.17.0 available, commit the
+From a clean source checkout with Git 2.43+, Bash and Zig 0.17.0 available, commit the
 candidate and run:
 
 ```sh
@@ -119,8 +119,11 @@ bash tools/tiger-style.sh HEAD
 ```
 
 The optional argument defaults to `HEAD`. The checked-out committed head must
-match the requested head. The launcher selects every tracked `.zig` file, runs
-the pinned native auditor's self-tests and fully audits every selected file.
+match the requested head. The launcher selects every tracked `.zig` file from
+that commit and reads its raw Git blob, without checkout filters or archive
+substitutions. It runs the pinned native auditor's self-tests and fully audits
+every selected file. Diagnostics retain the original path below a temporary
+per-file directory. Working-tree edits cannot substitute the audited bytes.
 Unchanged files and pure renames receive the same checks as new code. There is no baseline, allowlist or historical-debt
 exemption.
 
@@ -139,7 +142,8 @@ those semantic obligations.
 Run `bash tools/test-tiger-style.sh` after changing the launcher or auditor pin.
 Its temporary Git histories check unchanged violations, unrelated changes, pure
 renames, valid source, added violations, long existing functions, malformed
-source, invalid revisions, dirty indexes/worktrees, binary source/classification,
+source, invalid revisions, dirty indexes/worktrees, hidden and concurrent edits,
+checkout filters, export attributes, binary source/classification,
 nonregular files and empty source selection. CI runs these probes without
 retaining generated fixtures.
 

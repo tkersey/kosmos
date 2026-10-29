@@ -76,6 +76,48 @@ git show "$valid:existing.zig" > existing.zig
 expect_failure 'requires a clean committed candidate'
 git reset --quiet --hard "$valid"
 
+printf 'fn hidden() void {\n    while (true) {}\n}\n' > existing.zig
+commit_fixture hidden-committed-violation
+git update-index --assume-unchanged existing.zig
+printf 'fn hidden() void {}\n' > existing.zig
+expect_failure 'tiger-style/loop-bound'
+git update-index --no-assume-unchanged existing.zig
+git reset --quiet --hard "$valid"
+
+mutate_during_fetch() (
+    export replacement=$1
+    shift
+    git() {
+        if [[ " $* " == *' fetch --quiet --depth=1 '* ]]; then
+            printf '%s\n' "$replacement" > existing.zig
+        fi
+        command git "$@"
+    }
+    export -f git
+    "$@"
+)
+
+printf 'fn raced() void {\n    while (true) {}\n}\n' > existing.zig
+commit_fixture concurrent-committed-violation
+mutate_during_fetch 'fn raced() void {}' expect_failure 'tiger-style/loop-bound'
+git reset --quiet --hard "$valid"
+mutate_during_fetch 'fn raced() void { while (true) {} }' expect_success
+git reset --quiet --hard "$valid"
+
+printf 'fn exported() void {\n    while (true) {}\n}\n' > existing.zig
+printf 'existing.zig export-ignore export-subst\n' > .gitattributes
+commit_fixture export-attributes
+expect_failure 'tiger-style/loop-bound'
+git reset --quiet --hard "$valid"
+
+git config filter.tiger.clean 'sed "s/harmless();/while (true) {}/"'
+git config filter.tiger.smudge 'sed "s/while (true) {}/harmless();/"'
+printf 'existing.zig filter=tiger\n' > .gitattributes
+printf 'fn filtered() void {\n    harmless();\n}\n' > existing.zig
+commit_fixture filtered-committed-violation
+expect_failure 'tiger-style/loop-bound'
+git reset --quiet --hard "$valid"
+
 printf 'fn bad() void {\n    fail() catch unreachable;\n}\n' >> existing.zig
 commit_fixture added-line
 expect_failure 'tiger-style/error-handling'
@@ -103,6 +145,10 @@ git reset --quiet --hard "$valid"
 printf 'existing.zig -diff\n' > .gitattributes
 commit_fixture inherited-binary-classification
 expect_failure 'cannot audit a binary-classified Zig file'
+git update-index --assume-unchanged .gitattributes
+printf '' > .gitattributes
+expect_failure 'cannot audit a binary-classified Zig file'
+git update-index --no-assume-unchanged .gitattributes
 git reset --quiet --hard "$valid"
 
 printf '\0' >> existing.zig
@@ -120,4 +166,4 @@ git rm --quiet -- '*.zig'
 commit_fixture no-source
 expect_failure 'requires at least one tracked Zig file'
 
-printf 'TigerStyle integration passed: all tracked source, inherited debt, renames, malformed/binary/type rejection, revisions and clean candidates.\n'
+printf 'TigerStyle integration passed: committed source, concurrent edits, filters, inherited debt, renames, malformed/binary/type rejection, revisions and clean candidates.\n'

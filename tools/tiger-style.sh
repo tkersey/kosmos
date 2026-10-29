@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GIT_NO_REPLACE_OBJECTS=1
 
 if [[ $# -gt 1 ]]; then
     printf 'Usage: bash tools/tiger-style.sh [HEAD]\n' >&2
@@ -25,17 +26,22 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/tiger-style.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
 paths=()
-git ls-files --stage -z -- '*.zig' > "$scratch/sources"
+git ls-tree -r -z --full-tree "$head" > "$scratch/sources"
 while IFS= read -r -d '' entry; do
     metadata=${entry%%$'\t'*}
     path=${entry#*$'\t'}
+    [[ "$path" == *.zig ]] || continue
     mode=${metadata%% *}
     if [[ "$mode" != 100644 && "$mode" != 100755 ]] ||
         [[ ! -f "$path" || -L "$path" ]]; then
         printf 'TigerStyle requires regular tracked Zig files: %s\n' "$path" >&2
         exit 1
     fi
-    paths+=("./$path")
+    blob=${metadata##* }
+    destination="$scratch/source/${#paths[@]}/$path"
+    mkdir -p -- "${destination%/*}"
+    git cat-file blob "$blob" > "$destination"
+    paths+=("$destination")
 done < "$scratch/sources"
 if [[ ${#paths[@]} -eq 0 ]]; then
     printf 'TigerStyle requires at least one tracked Zig file.\n' >&2
@@ -43,7 +49,7 @@ if [[ ${#paths[@]} -eq 0 ]]; then
 fi
 
 empty_tree=$(git hash-object -t tree --stdin </dev/null)
-git diff --no-ext-diff --no-textconv --no-renames --numstat -z \
+git --attr-source="$head" diff --no-ext-diff --no-textconv --no-renames --numstat -z \
     "$empty_tree" "$head" -- '*.zig' > "$scratch/changes"
 while IFS= read -r -d '' change; do
     if [[ "$change" == $'-\t-\t'* ]]; then
