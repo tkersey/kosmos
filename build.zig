@@ -1064,6 +1064,8 @@ fn configureSourceChecks(
         std.Build.LazyPath.cache_root.path(b, "source-examples"),
         .{ .make_absolute = true },
     );
+    source_examples.has_side_effects = true;
+    source_examples.expectExitCode(0);
     const source_agreement = b.addSystemCommand(&.{"node"});
     source_agreement.addFileArg2(b.path("test/current/source_agreement.mjs"), .{});
     source_agreement.addFileArg2(kernel.current_kernel.getEmittedBin(), .{});
@@ -1083,6 +1085,7 @@ fn configureSourceChecks(
     source_agreement.has_side_effects = true;
     source_agreement.expectExitCode(0);
     const source_report = b.addSystemCommand(&.{"cat"});
+    source_report.addFileArg2(source_examples.captureStdOut(.{}), .{});
     source_report.addFileArg2(source_agreement.captureStdOut(.{}), .{});
     source_report.has_side_effects = true;
     b.step(
