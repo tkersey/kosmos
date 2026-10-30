@@ -11,7 +11,7 @@ import {parseEvidenceJson} from './evidence-json.mjs';
 import {readRecord} from './record.mjs';
 import {parseVersion} from './version.mjs';
 import {validateImpact} from './impact.mjs';
-import {selectPublishedSource} from './kosmos-upstream-selection.mjs';
+import {selectPublishedSource,admitFrozenSource} from './kosmos-upstream-selection.mjs';
 import {mechanicalPaths, proposalMessage, proposalCommitOid, nativeCandidateBinding} from './kosmos-proposal.mjs';
 
 const execute = promisify(execFile), maximumSourceBytes = 64 * 1024 * 1024;
@@ -156,17 +156,25 @@ function admittedRelease(value, id) {
   return {id, source: record.source, ...value, recordBytes: bytes};
 }
 
-async function discover(reader, admit, root, selected, versionPreparation) {
+async function discover(reader, admit, root, selected, versionDecision) {
   await reader.verifyRepository();
-  const releases = await reader.releases(), admitted = [];
-  for (const release of releases) {
-    assert.ok(Array.isArray(release.assets), 'release asset discovery missing');
-    if (!release.assets.some(asset => asset.name === 'release.json')) continue;
-    const value = await admit({repository: 'tkersey/horos', releaseId: release.id,
-      outputDirectory: join(root, `release-${release.id}`)});
-    admitted.push(admittedRelease(value, release.id));
+  const admitted=[];
+  const admitOne=async id=>{
+    const value=await admit({repository:'tkersey/horos',releaseId:id,outputDirectory:join(root,`release-${id}`)});
+    return admittedRelease(value,id);
+  };
+  let successor;
+  if(versionDecision!==undefined){
+    successor=await admitFrozenSource(reader,selected,versionDecision.horosReleaseId,admitOne);
+    assert.equal(successor.recordSha256,versionDecision.horosRecordSha256,'frozen upstream record changed');
+  }else{
+    for(const release of await reader.releases()){
+      assert.ok(Array.isArray(release.assets),'release asset discovery missing');
+      if(!release.assets.some(asset=>asset.name==='release.json'))continue;
+      admitted.push(await admitOne(release.id));
+    }
+    successor=await selectPublishedSource(reader,selected,admitted);
   }
-  const successor=await selectPublishedSource(reader,selected,admitted,{publicationRequired:versionPreparation});
   if(successor?.source.commit===selected.commit)assert.equal(successor.record.source.packageIdentity,selected.packageIdentity,'selected publication package differs');
   if (successor === null) return null;
   if (successor.record.source.commit !== selected.commit) {
@@ -249,8 +257,7 @@ export async function prepareKosmos({base, baseTree, tool: toolInput, compiler: 
   assert.equal(manifest.sha256, sha256(fileBytes(join(repository, 'build.zig.zon'))));
   assert.equal(manifest.minimumCompiler, '0.17.0'); parseVersion(manifest.version);
   oid(manifest.horos.commit); assert.equal(manifest.horos.url, `git+https://github.com/tkersey/horos#${manifest.horos.commit}`);
-  const versionPreparation = versionDecision !== undefined;
-  const successor = await discover(reader, admit, root, manifest.horos, versionPreparation);
+  const successor = await discover(reader, admit, root, manifest.horos, versionDecision);
   if (successor === null) {
     await sourceState(root, repository, base, baseTree);
     return {status: 'unchanged', base, baseTree, selected: manifest.horos};

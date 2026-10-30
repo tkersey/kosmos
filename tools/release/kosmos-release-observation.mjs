@@ -192,8 +192,11 @@ export function retireKosmosProposal({client, native, actor, command = githubCom
 }
 
 export async function frozenKosmosCandidate(pull,source,{client,command=githubCommand,readCandidate=storedKosmosCandidate,
-  readResult=readReviewResult,qualification=originalKosmosQualification}={}){
-  if(pull===null)return null;
+  readResult=readReviewResult,qualification=originalKosmosQualification,readPreparation=readKosmosPreparation}={}){
+  if(pull===null){
+    const original=await readPreparation({base:source.commit},command);
+    return original?.candidate??null;
+  }
   const candidate=await readCandidate(pull.head.sha,{client,command});
   const result=await readResult({repository:'tkersey/kosmos',base:candidate.base,head:candidate.head,tree:candidate.tree,purpose:'pull'},command);
   let frozen=true;

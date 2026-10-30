@@ -108,12 +108,12 @@ test('own approved version preparation reuses exact selected publication without
 
 test('development pin ahead of all publications does not downgrade',async t=>{
   const f=fixture(t);f.options.reader.forward=async()=>false;
-  assert.equal((await f.prepare()).status,'unchanged');assert.deepEqual(f.state.calls,['manifest']);
+  assert.equal((await f.prepare({versionDecision:undefined})).status,'unchanged');assert.deepEqual(f.state.calls,['manifest']);
 });
 
 test('legacy releases without canonical record cannot be successor authority',async t=>{
   const f=fixture(t);f.options.reader.releases=async()=>[{id:8,assets:[{name:'source.tar'}]}];
-  assert.equal((await f.prepare()).status,'unchanged');
+  assert.equal((await f.prepare({versionDecision:undefined})).status,'unchanged');
 });
 
 test('admitted upstream record still must match independently cloned Git tree',async t=>{
@@ -243,4 +243,17 @@ test('source equivalence cannot authorize an upstream package version downgrade'
   const f=fixture(t);squashCounterpart(f);f.record.source.version='0.9.0';f.record.tag='v0.9.0';
   f.record.source.packageIdentity=`horos-0.9.0-${'a'.repeat(44)}`;
   await assert.rejects(f.prepare(),/upstream version downgrade/);assert.deepEqual(f.state.calls,['manifest']);
+});
+
+test('native generation consumes the exact admitted decision without rediscovering a newer upstream',async t=>{
+  const f=fixture(t),calls=[];f.options.reader.releases=async()=>assert.fail('a frozen native decision cannot rediscover newer releases');
+  const admit=f.options.admitPublishedRelease;
+  f.options.admitPublishedRelease=async request=>{calls.push(request.releaseId);assert.equal(request.releaseId,7);return admit(request);};
+  const result=await f.prepare();assert.equal(result.candidate.horos.releaseId,7);
+  assert.deepEqual(calls,[7]);assert.deepEqual(f.state.calls,['manifest','prepare','check']);
+});
+test('native generation rejects a different record under the frozen release identity',async t=>{
+  const f=fixture(t),decision=f.decision();decision.horosRecordSha256='f'.repeat(64);
+  await assert.rejects(f.prepare({versionDecision:decision}),/frozen upstream record changed/);
+  assert.deepEqual(f.state.calls,['manifest']);
 });

@@ -135,3 +135,9 @@ test('only closed blocked owner or original terminal failed qualification permit
   assert.deepEqual(await frozenKosmosCandidate(f.pull,{commit:base},options),f.candidate);
   await assert.rejects(frozenKosmosCandidate(f.pull,{commit:'f'.repeat(40)},options),/stale base/);
 });
+
+test('original prepared candidate stays frozen before its first PR is created',async()=>{
+  const f=await fixture(),readPreparation=async value=>{assert.deepEqual(value,{base});return {candidate:f.candidate};};
+  assert.deepEqual(await frozenKosmosCandidate(null,{commit:base},{readPreparation}),f.candidate);
+  assert.equal(await frozenKosmosCandidate(null,{commit:base},{readPreparation:async()=>null}),null);
+});

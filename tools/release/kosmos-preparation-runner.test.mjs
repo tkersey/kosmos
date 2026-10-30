@@ -107,3 +107,22 @@ test('preparation workflow uses read authority, original start and bounded isola
   assert.ok(text.indexOf('Preserve original generation start')<text.indexOf('Generate frozen native candidate'));
   assert.match(text,/apparmor_parser --replace/);assert.match(text,/archive: false/);assert.match(text,/app-token.mjs revoke/);
 });
+
+test('frozen planner admits only the chosen publication and ignores unrelated newer failures',async()=>{
+  const record=metadata('horos'),selected={commit:'e'.repeat(40),packageIdentity:`horos-0.1.0-${'a'.repeat(44)}`},calls=[];
+  const reader={async api(){return {sha:selected.commit,tree:{sha:'f'.repeat(40)}};},async verifyRepository(){},
+    async releases(){assert.fail('unrelated newer malformed publications are outside frozen admission');},
+    async forward(a,b){return a===b||(a===selected.commit&&b===record.source.commit);}};
+  const admit=async request=>{calls.push(request.releaseId);assert.equal(request.releaseId,1);
+    return {id:1,record,recordSha256:sha256(encodeRecord(record)),payloads:new Map()};};
+  assert.equal((await discoverHorosRelease(selected,{releaseId:1,reader,admit})).id,1);assert.deepEqual(calls,[1]);
+});
+
+test('generation revalidates the frozen selected release rather than latest discovery',async()=>{
+  const f=fixture(),plan=await f.run();let admitted=false;
+  const options={client:f.options.client,native:{},sourceReader:async()=>source,
+    select:async input=>{assert.deepEqual(input.frozen,{base,horos:{releaseId:plan.decision.horosReleaseId,recordSha256:plan.decision.horosRecordSha256}});return f.state.plan;},
+    prepare:async input=>{await input.admitVersionDecision({decisionBytes:encodeRecord(plan.decision)});admitted=true;throw Error('test native execution boundary');}};
+  await assert.rejects(generateKosmosPreparation({plan,tool:{path:'/tool',sourceCommit:base},compiler:{path:'/zig',sourceCommit:base},outputDirectory:'/unused',runId:1},options),/test native execution boundary/);
+  assert.equal(admitted,true);
+});

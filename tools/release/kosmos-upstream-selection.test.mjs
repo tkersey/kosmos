@@ -43,3 +43,37 @@ test('ambiguous equal-tree counterparts and mismatched owning tree fail closed',
   const f=fixture();await assert.rejects(selectPublishedSource(f.reader,f.selected,[f.equivalent,{id:3,source:{commit:other,tree}}],{publicationRequired:true}),/ambiguous/);
   await assert.rejects(selectPublishedSource(f.reader,{commit:pin,tree:changed},[]),/Git tree differs/);
 });
+
+import {admitFrozenSource} from './kosmos-upstream-selection.mjs';
+for(const kind of ['forward','equivalent'])test(`frozen ${kind} publication ignores malformed or breaking newer releases`,async()=>{
+  const f=fixture(),chosen=kind==='equivalent'?f.equivalent:f.next,admissions=[];
+  if(kind==='forward')f.pairs.add(`${pin}:${successor}`);
+  f.reader.releases=async()=>assert.fail('exact admitted frozen release must not discover newer publications');
+  const value=await admitFrozenSource(f.reader,f.selected,chosen.id,async id=>{admissions.push(id);assert.equal(id,chosen.id);return chosen;});
+  assert.equal(value,chosen);assert.deepEqual(admissions,[chosen.id]);
+});
+test('frozen divergent successor authenticates only a matching equivalent publication anchor',async()=>{
+  const f=fixture(),admissions=[];f.pairs.add(`${counterpart}:${successor}`);
+  f.reader.releases=async()=>[{id:3},{id:4},{id:1}];
+  const readHint=async(_,release)=>release.id===3?null:release.id===4?{source:{commit:other,tree:changed}}:{source:f.equivalent.source};
+  const value=await admitFrozenSource(f.reader,f.selected,2,async id=>{admissions.push(id);return id===2?f.next:f.equivalent;},{readHint});
+  assert.equal(value,f.next);assert.deepEqual(admissions,[2,1]);
+});
+test('a source-equivalent hint never substitutes for full anchor admission',async()=>{
+  const f=fixture();f.pairs.add(`${counterpart}:${successor}`);f.reader.releases=async()=>[{id:1}];
+  await assert.rejects(admitFrozenSource(f.reader,f.selected,2,async id=>{if(id===1)throw Error('invalid signed record');return f.next;},
+    {readHint:async()=>({source:f.equivalent.source})}),/no authenticated/);
+});
+test('frozen different-tree publication behind development source is rejected before hint discovery',async()=>{
+  const f=fixture();f.pairs.add(`${successor}:${pin}`);f.reader.releases=async()=>assert.fail('no anchor can authorize downgrade');
+  await assert.rejects(admitFrozenSource(f.reader,f.selected,2,async()=>f.next),/predates/);
+});
+
+test('nonexistent source in an unrelated equivalent-tree hint cannot block a real admitted anchor',async()=>{
+  const f=fixture(),admissions=[];f.pairs.add(`${counterpart}:${successor}`);const forward=f.reader.forward;
+  f.reader.forward=async(a,b)=>{if(a===other)throw Error('404 missing hinted source');return forward(a,b);};
+  f.reader.releases=async()=>[{id:3},{id:1}];
+  const readHint=async(_,release)=>({source:release.id===3?{commit:other,tree}:f.equivalent.source});
+  assert.equal(await admitFrozenSource(f.reader,f.selected,2,async id=>{admissions.push(id);return id===2?f.next:f.equivalent;},{readHint}),f.next);
+  assert.deepEqual(admissions,[2,1]);
+});

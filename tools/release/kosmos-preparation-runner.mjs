@@ -77,7 +77,8 @@ export async function generateKosmosPreparation({plan,tool,compiler,outputDirect
   const admitVersionDecision=async({decisionBytes})=>{
     assert.notEqual(await automationMode(client),'off','automation disabled before native generation');
     const source=await sourceReader(client);assert.deepEqual(source,plan.source,'source changed before generation');
-    const current=await select({source,client,command,native,actor:plan.actor});
+    const current=await select({source,client,command,native,actor:plan.actor,
+      frozen:{base:plan.source.commit,horos:{releaseId:plan.decision.horosReleaseId,recordSha256:plan.decision.horosRecordSha256}}});
     assert.equal(current.status,'prepare');assert.equal(current.decisionSha256,plan.decisionSha256,'approved native inputs changed');
     assert.deepEqual(decisionBytes,encodeRecord(current.decision));return current.decisionSha256;
   };

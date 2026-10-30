@@ -9,22 +9,29 @@ import {kosmosBoundaryOperations} from './kosmos-release-observation.mjs';
 import {sourceManifest} from './kosmos-native-manifest.mjs';
 import {encodeRecord,sha256} from './encoding.mjs';
 import {prepareVersion,parseVersion} from './version.mjs';
-import {selectPublishedSource} from './kosmos-upstream-selection.mjs';
+import {selectPublishedSource,admitFrozenSource} from './kosmos-upstream-selection.mjs';
 
 export async function discoverHorosRelease(selected,{versionPreparation=false,releaseId,command=githubCommand,
   reader=new GitHubReader('tkersey/horos',command),admit=admitPublishedRelease}={}) {
   await reader.verifyRepository();const accepted=[];
-  for(const release of await reader.releases()){
-    assert.ok(Array.isArray(release.assets));if(!release.assets.some(asset=>asset.name==='release.json'))continue;
+  const admitOne=async id=>{
     const directory=mkdtempSync(join(tmpdir(),'kosmos-upstream-'));
     try{
-      const value=await admit({repository:'tkersey/horos',releaseId:release.id,outputDirectory:join(directory,'release')},command);
-      assert.equal(value.id,release.id);assert.equal(value.record.repository.name,'tkersey/horos');
+      const value=await admit({repository:'tkersey/horos',releaseId:id,outputDirectory:join(directory,'release')},command);
+      assert.equal(value.id,id);assert.equal(value.record.repository.name,'tkersey/horos');
       assert.equal(value.recordSha256,sha256(value.payloads.get('release.json')??encodeRecord(value.record)));
-      accepted.push({id:value.id,record:value.record,recordSha256:value.recordSha256,source:value.record.source});
+      return {id:value.id,record:value.record,recordSha256:value.recordSha256,source:value.record.source};
     }finally{rmSync(directory,{recursive:true,force:true});}
+  };
+  let successor;
+  if(releaseId!==undefined)successor=await admitFrozenSource(reader,selected,releaseId,admitOne);
+  else{
+    for(const release of await reader.releases()){
+      assert.ok(Array.isArray(release.assets));if(!release.assets.some(asset=>asset.name==='release.json'))continue;
+      accepted.push(await admitOne(release.id));
+    }
+    successor=await selectPublishedSource(reader,selected,accepted,{publicationRequired:versionPreparation});
   }
-  const successor=await selectPublishedSource(reader,selected,accepted,{publicationRequired:versionPreparation,frozenReleaseId:releaseId});
   if(successor?.source.commit===selected.commit)assert.equal(successor.source.packageIdentity,selected.packageIdentity);
   if(successor===null)return null;
   if(successor.source.commit!==selected.commit){
