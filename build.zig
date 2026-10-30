@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
         if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0"))
             @compileError("Zig 0.17.0 is required");
     }
+    configureReleaseTools(b);
     const options = configureOptions(b);
     const dependencies = configureDependencies(b, options) orelse return;
     const storage_checks = configureStorageChecks(b, options, dependencies);
@@ -1010,6 +1011,14 @@ fn configureForeignChecks(
         .{ .make_absolute = true },
     );
     current_package_check.addFileArg2(fixtures.fixture.getEmittedBin(), .{ .make_absolute = true });
+    current_package_check.addFileArg2(
+        b.graph.path(.install_prefix, "kernel-profile.json"),
+        .{ .make_absolute = true },
+    );
+    current_package_check.addDirectoryArg2(
+        b.graph.path(.install_prefix, "qualified-runtime"),
+        .{ .make_absolute = true },
+    );
     current_package_check.step.dependOn(packages.runtime_package);
     current_package_check.step.dependOn(&fixtures.current_fixtures.step);
     current_package_check.has_side_effects = true;
@@ -1207,4 +1216,49 @@ fn configureQualification(
     check.dependOn(&portable_checks.current_browser.step);
     check.dependOn(&portable_checks.current_codecs.step);
     check.dependOn(&foreign_checks.current_package_check.step);
+}
+
+fn configureReleaseTools(b: *std.Build) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/release_refresh.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+    });
+    const executable = b.addExecutable(.{ .name = "kosmos-refresh", .root_module = module });
+    b.step("build-release-tools", "Build native frozen-source dependency preparation")
+        .dependOn(&b.addInstallArtifact(executable, .{}).step);
+    const tests = b.addTest(.{ .root_module = module });
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true;
+    b.step("check-release-tools", "Check native source admission and semantic preparation")
+        .dependOn(&run_tests.step);
+    const coherence = b.addRunArtifact(executable);
+    coherence.addArg("check");
+    coherence.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    coherence.addDirectoryArg2(b.path(""), .{ .make_absolute = true });
+    coherence.has_side_effects = true;
+    b.step("check-release-coherence", "Check local version and generated-source coherence")
+        .dependOn(&coherence.step);
+    configureReleaseSource(b, executable);
+}
+
+fn configureReleaseSource(b: *std.Build, executable: *std.Build.Step.Compile) void {
+    const revision = b.addSystemCommand(&.{ "git", "--no-replace-objects", "rev-parse", "HEAD" });
+    revision.setCwd(b.path(""));
+    revision.has_side_effects = true;
+    const prepare = b.addRunArtifact(executable);
+    prepare.addArg("source-build");
+    prepare.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    prepare.addDirectoryArg2(b.path(""), .{ .make_absolute = true });
+    const output = prepare.addOutputDirectoryArg2("release-source", .{ .make_absolute = true });
+    prepare.addFileContentArg2(revision.captureStdOut(.{}), .{});
+    prepare.has_side_effects = true;
+    b.step("check-source-package", "Consume the independently authenticated native source archive")
+        .dependOn(&prepare.step);
+    b.step("release-source", "Retain the verified full-source archive and package inventory")
+        .dependOn(&b.addInstallDirectory(.{
+        .source_dir = output,
+        .install_dir = .prefix,
+        .install_subdir = "release-source",
+    }).step);
 }

@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
-const [runtime, fixtures] = process.argv.slice(2).map(value => resolve(value));
+const [runtime, fixtures, profilePath, retained] = process.argv.slice(2).map(value => resolve(value));
 const scratch = await mkdtemp(join(tmpdir(), "kosmos-current-package-"));
 try {
   const [packed] = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", scratch], { cwd: runtime, encoding: "utf8" }));
-  const declared = JSON.parse(await readFile(join(runtime, "package.json"), "utf8")).files;
+  const declaredManifest = JSON.parse(await readFile(join(runtime, "package.json"), "utf8"));
+  const declared = declaredManifest.files;
   assert.deepEqual(packed.files.map(file => file.path).sort(), [...declared].sort());
   assert.ok(packed.files.some(file => file.path === "docs/verification.md"));
   for (const path of ["docs/executable-semantics.md", "docs/semantic-economy.md"])
@@ -22,7 +23,7 @@ try {
   execFileSync("tar", ["-xf", join(scratch, packed.filename), "-C", directory]);
   const root = join(directory, "package");
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.version, "9.1.0");
+  assert.equal(manifest.version, declaredManifest.version);
   assert.deepEqual(Object.keys(manifest.exports), ["."]);
   const kosmos = await import(pathToFileURL(join(root, manifest.exports["."])));
   assert.equal(kosmos.packageVersion, manifest.version);
@@ -60,5 +61,29 @@ try {
   const nonfile = spawnSync(process.execPath, [...args.slice(0, -1), scratch]);
   assert.notEqual(nonfile.status, 0); assert.equal(nonfile.stdout.length, 0);
   assert.match(nonfile.stderr.toString(), /WORLD_FILE_NOT_REGULAR/);
+  const archive = await readFile(join(scratch, packed.filename));
+  const profile = await readFile(profilePath);
+  const profileValue = JSON.parse(profile);
+  const declaredProfile = JSON.parse(await readFile(join(root, "src/node/runtime-profile.json"), "utf8"));
+  assert.deepEqual(profileValue, {
+    target: declaredProfile.target, mode: declaredProfile.kernelMode,
+    backend: declaredProfile.wasmBackend, linker: declaredProfile.wasmLinker,
+    cpu: declaredProfile.cpu, features: declaredProfile.features,
+    stackBytes: declaredProfile.stackBytes, maximumMemoryBytes: declaredProfile.maximumMemoryBytes,
+  });
+  const artifacts = new Map([
+    ["kosmos-runtime-package.tar.gz", archive], ["kosmos-kernel.wasm", Buffer.from(bytes)],
+    ["kernel-profile.json", profile],
+  ]);
+  const receipt = {
+    schema: "kosmos-runtime/v1", version: manifest.version, compiler: declaredProfile.zig,
+    profile: profileValue,
+    artifacts: [...artifacts].map(([name, content]) => ({
+      name, bytes: content.length, sha256: createHash("sha256").update(content).digest("hex"),
+    })),
+  };
+  artifacts.set("runtime.json", Buffer.from(`${JSON.stringify(receipt)}\n`));
+  await mkdir(retained, {recursive: true});
+  for (const [name, content] of artifacts) await writeFile(join(retained, name), content);
   console.log(JSON.stringify({ check: "extracted current runtime and CLI", version: manifest.version, kernelSha256: expectedSha256, files: packed.files.length, packageBytes: packed.size }));
 } finally { await rm(scratch, { recursive: true, force: true }); }

@@ -197,23 +197,35 @@ jobs:
           else
             grep -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
           fi
-      - name: Consume the actual native source package without a JS producer
+      - name: Check native release tooling and source coherence
         if: matrix.lane == 'consumer'
-        run: |
-          zig build emit-native-input -Doptimize=safe -Dpackaged-runtime=true --summary all
-          scratch=$(mktemp -d)
-          trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
-          git --no-replace-objects archive --format=tar HEAD > "$scratch/source.tar"
-          tar -xf "$scratch/source.tar" -C "$scratch/source"
-          package_hash=$(ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig fetch "$scratch/source")
-          tar -xzf "$scratch/cache/p/$package_hash.tar.gz" --strip-components=1 -C "$scratch/kosmos"
-          cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
-          zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
+        run: zig build check-release-tools check-release-coherence -Doptimize=safe --summary all
+      - name: Consume and retain the exact native source package
+        if: matrix.lane == 'consumer'
+        run: zig build check-source-package release-source -Doptimize=safe --summary all
+      - name: Retain consumer-tested source archive
+        if: matrix.lane == 'consumer'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: zig-out/release-source/source.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain native source and package identities
+        if: matrix.lane == 'consumer'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: zig-out/release-source/source.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'portable' || matrix.lane == 'source' || matrix.lane == 'source-second'
+        if: matrix.lane == 'portable' || matrix.lane == 'source' || matrix.lane == 'source-second' || matrix.lane == 'consumer'
         with:
           node-version: '26.9.0'
+      - name: Test repository-local release boundaries
+        if: matrix.lane == 'consumer'
+        run: node tools/release/test.mjs
       - name: Install only the browser boundary's tools
         if: matrix.lane == 'portable'
         run: |
@@ -236,21 +248,38 @@ jobs:
           if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
           zig build check-source -Dsource-group="$group" -Dfixture-profile=prepared_only \
             -Doptimize=safe -Dpackaged-runtime=true --summary all
-      - name: Package the tested ordinary JS consumer
-        if: matrix.lane == 'portable'
-        working-directory: zig-out/runtime
-        run: |
-          archive=$(npm pack --offline --ignore-scripts --silent --pack-destination "$RUNNER_TEMP")
-          mv "$RUNNER_TEMP/$archive" "$RUNNER_TEMP/kosmos-runtime-package.tar.gz"
-      - name: Retain the tested package
+      - name: Retain tested kosmos-runtime-package.tar.gz
         if: matrix.lane == 'portable'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: kosmos-runtime-package-${{ github.sha }}
-          path: ${{ runner.temp }}/kosmos-runtime-package.tar.gz
+          path: zig-out/qualified-runtime/kosmos-runtime-package.tar.gz
+          archive: false
           if-no-files-found: error
           retention-days: 14
-          compression-level: 0
+      - name: Retain tested kosmos-kernel.wasm
+        if: matrix.lane == 'portable'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: zig-out/qualified-runtime/kosmos-kernel.wasm
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain tested kernel-profile.json
+        if: matrix.lane == 'portable'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: zig-out/qualified-runtime/kernel-profile.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain tested runtime.json
+        if: matrix.lane == 'portable'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: zig-out/qualified-runtime/runtime.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Admit complete bounded compiler cache
         id: cache_size
         if: ${{ !cancelled() && matrix.lane != 'native' }}
