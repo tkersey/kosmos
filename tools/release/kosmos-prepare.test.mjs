@@ -220,7 +220,7 @@ test('preparation transport and compact retention preserve original native bytes
     else if(path==='/git/ref/heads/main')value={ref:'refs/heads/main',object:{type:'commit',sha:candidate.base}};
     else if(path.startsWith('/pulls?'))value=[pull];
     else if(path==='/pulls/9')value=pull;
-    else if(path==='/git/commits/'+candidate.head)value={sha:candidate.head,tree:{sha:candidate.tree}};
+    else if(path==='/git/commits/'+candidate.head)value={sha:candidate.head,tree:{sha:candidate.tree},parents:[{sha:candidate.base}]};
     else if(path.startsWith('/actions/workflows/runtime-bundle.yml/runs?'))value={workflow_runs:[{id:80,status:'completed'}]};
     else if(path.startsWith('/contents/docs/repository-local-releases.md?'))value={type:'file',encoding:'base64',content:Buffer.from('Fixture requirements').toString('base64')};
     else throw Error('unexpected original review observation '+path);
