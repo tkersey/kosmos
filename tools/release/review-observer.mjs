@@ -6,6 +6,8 @@ import {admitKosmosQualification} from './kosmos-qualification.mjs';
 import {readReviewResult} from './review-result.mjs';
 import {impactInput, requireCurrentImpact} from './impact.mjs';
 import {sha256} from './encoding.mjs';
+import {proposalBranch} from './kosmos-proposal.mjs';
+import {readKosmosPreparation, compactKosmosPreparation} from './kosmos-preparation-artifact.mjs';
 
 export async function automationMode(client = new KosmosProposalClient()) {
   const response = await client.request({path: '/actions/variables/REPOSITORY_AUTOMATION'});
@@ -57,7 +59,8 @@ async function previousForHead(reader, head, tree, command, controlCommit) {
 }
 
 export async function observeKosmosReview({controlCommit, requestedPull = null}, command = githubCommand,
-  client = new KosmosProposalClient(), previousReader = previousForHead, qualify = admitKosmosQualification) {
+  client = new KosmosProposalClient(), previousReader = previousForHead, qualify = admitKosmosQualification,
+  {readPreparation = readKosmosPreparation, compactPreparation = compactKosmosPreparation} = {}) {
   assert.match(controlCommit, /^[0-9a-f]{40}$/);
   const reader = new GitHubReader('tkersey/kosmos', command);
   await reader.verifyRepository();
@@ -113,6 +116,15 @@ export async function observeKosmosReview({controlCommit, requestedPull = null},
           head, run: qualification.run.html_url, jobId: job.id, platform: 'linux-x86_64', status: job.conclusion,
           observation: 'Actual successful original run and job, exact qualified archive source, all required lanes and deadlines admitted.'})),
       };
+      if (prior?.value.status !== 'pending' && pull.head.ref === proposalBranch) {
+        const prepared = await readPreparation({base, head}, command);
+        assert.ok(prepared, 'original native preparation is unavailable; recover it before owner review');
+        assert.equal(prepared.candidate.base, base); assert.equal(prepared.candidate.head, head);
+        assert.equal(prepared.candidate.tree, tree);
+        context.preparation = compactPreparation(prepared);
+      }
+      assert.ok(Buffer.byteLength(JSON.stringify(context)) <= 4 * 1024 * 1024,
+        'original preparation and qualification exceed owner context capacity; preserve original evidence before review');
       assert.equal(context.qualification.runId, qualification.run.id);
       assert.equal(context.qualification.workflow.sha256, qualification.workflow.sha256, 'qualification definition changed');
       assert.equal(context.qualification.evidenceSha256, sha256(qualification.evidence), 'original qualification evidence changed');

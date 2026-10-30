@@ -3,6 +3,7 @@ import test from 'node:test';
 import {observeKosmosReview} from './review-observer.mjs';
 import {impactBlock, versionPreparationImpact} from './impact.mjs';
 import {sha256} from './encoding.mjs';
+import {proposalBranch, proposalDescription, mechanicalPaths} from './kosmos-proposal.mjs';
 import {kosmosJobs} from './kosmos-qualification.mjs';
 
 const base = 'a'.repeat(40), head = 'b'.repeat(40), tree = 'c'.repeat(40);
@@ -12,7 +13,7 @@ function fixture() {
   const main = {ref: 'refs/heads/main', object: {type: 'commit', sha: base}};
   const pull = {number: 4, state: 'open', draft: false, labels: [], title: 'Prepare version',
     body: impactBlock(versionPreparationImpact), base: {sha: base, ref: 'main', repo: {id: 1251308461}},
-    head: {sha: head, ref: 'automation/dependency-release', repo: {id: 1251308461}}};
+    head: {sha: head, ref: 'feature/source-change', repo: {id: 1251308461}}};
   const run = {id: 10, status: 'completed', conclusion: 'success'};
   const evidence = Buffer.from('original verified qualification fixture');
   const qualification = {run: {...run, html_url: 'https://github.com/tkersey/kosmos/actions/runs/10'}, evidence,
@@ -43,8 +44,9 @@ function fixture() {
     return qualification;
   };
   let prior = null;
-  const observe = () => observeKosmosReview({controlCommit: base}, command, client, async () => prior, qualify);
-  return {mode, main, pull, run, responses, qualification, observe, qualified: () => qualified, setPrior: value => {prior = value;}};
+  const preparation = {};
+  const observe = () => observeKosmosReview({controlCommit: base}, command, client, async () => prior, qualify, preparation);
+  return {mode, main, pull, run, responses, qualification, preparation, observe, qualified: () => qualified, setPrior: value => {prior = value;}};
 }
 
 test('qualification inventory remains independently fixed by the repository contract', () => {
@@ -119,4 +121,51 @@ test('draft, explicit hold and foreign candidates are not automatic review subje
 test('changed accepted main blocks the stale control checkout', async () => {
   const value = fixture(); value.main.object.sha = tree;
   await assert.rejects(value.observe(), /control checkout is stale/);
+});
+
+function preparedCandidate() {
+  const horos={releaseId:7,recordSha256:'d'.repeat(64),commit:'e'.repeat(40),tree:'f'.repeat(40),packageIdentity:'horos-0.1.0-AAAA'};
+  const files=new Map(mechanicalPaths.map(path=>[path,Buffer.from('native fixture '+path)]));
+  const nativeResultBytes=Buffer.from(JSON.stringify({schema:'kosmos-refresh-result/v1',baseCommit:base,baseTree:tree,version:'1.0.1',
+    horosCommit:horos.commit,horosTree:horos.tree,horosPackageIdentity:horos.packageIdentity,changed:[...mechanicalPaths]}));
+  return {base,baseTree:tree,head,tree,version:'1.0.1',files,nativeResultBytes,horos,
+    impact:{impact:'patch',disposition:'compatible',rationale:'Explicit synthetic native review input.',contracts:['native generation']}};
+}
+test('automation review retains authenticated compact preparation before original owner dispatch',async()=>{
+  const f=fixture(),candidate=preparedCandidate();f.pull.head.ref=proposalBranch;f.pull.body=proposalDescription(candidate).body;
+  let calls=0;const compact={schema:'test-only compact authenticated preparation',head};
+  f.preparation.readPreparation=async subject=>{calls++;assert.deepEqual(subject,{base,head});return {candidate};};
+  f.preparation.compactPreparation=value=>{assert.equal(value.candidate,candidate);return compact;};
+  const result=await f.observe();assert.equal(result.status,'ready');assert.equal(calls,1);
+  assert.deepEqual(result.context.preparation,compact);
+  f.setPrior({base,value:{status:'pending',envelope:{context:result.context},run:{id:40},artifact:{id:41},
+    bytes:Buffer.from('original owner result'),workflow:{commit:base,sha256:'d'.repeat(64)}}});
+  f.preparation.readPreparation=async()=>{throw Error('original frozen context must be reused');};
+  const resumed=await f.observe();assert.equal(resumed.status,'ready');assert.deepEqual(resumed.context,result.context);
+});
+
+test('automation review cannot launch without original native preparation',async()=>{
+  const f=fixture();f.pull.head.ref=proposalBranch;f.preparation.readPreparation=async()=>null;
+  const result=await f.observe();assert.equal(result.status,'waiting');
+  assert.match(result.observations[0].reason,/original native preparation is unavailable/);
+});
+
+test('native preparation subject mismatch blocks before owner dispatch',async()=>{
+  const f=fixture(),candidate=preparedCandidate();f.pull.head.ref=proposalBranch;f.pull.body=proposalDescription(candidate).body;
+  f.preparation.readPreparation=async()=>({candidate:{...candidate,tree:base}});
+  const result=await f.observe();assert.equal(result.status,'waiting');assert.equal(result.observations[0].status,'blocked');
+});
+
+test('complete original context capacity is checked before owner invocation admission',async()=>{
+  const f=fixture();f.responses.get(`/contents/docs/repository-local-releases.md?ref=${base}`).content=Buffer.alloc(4*1024*1024,97).toString('base64');
+  const result=await f.observe();assert.equal(result.status,'waiting');assert.match(result.observations[0].reason,/exceed owner context capacity/);
+});
+
+test('native preparation retention preserves a compatible rationale revised before review',async()=>{
+  const f=fixture(),candidate=preparedCandidate();f.pull.head.ref=proposalBranch;
+  f.pull.body=impactBlock({...candidate.impact,rationale:'Owner revised rationale before the review epoch.'});
+  f.preparation.readPreparation=async()=>({candidate});f.preparation.compactPreparation=()=>({schema:'test-only compact preparation'});
+  const result=await f.observe();assert.equal(result.status,'ready');
+  assert.equal(result.context.impact.declaration.rationale,'Owner revised rationale before the review epoch.');
+  assert.equal(result.context.preparation.schema,'test-only compact preparation');
 });

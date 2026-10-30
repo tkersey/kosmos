@@ -1,3 +1,7 @@
+import {observeKosmosReview} from './review-observer.mjs';
+import {retainedFixture} from './promotion-test-support.mjs';
+import {expectedReviewSettings} from './review-check.mjs';
+import {validateRetainedReview} from './review-owner.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {execFileSync} from 'node:child_process';
@@ -5,7 +9,7 @@ import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, copyFileSyn
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {prepareKosmos, preparationEnvironment, nativeInvocation} from './kosmos-prepare.mjs';
-import {mechanicalPaths, nativeCandidateBinding} from './kosmos-proposal.mjs';
+import {mechanicalPaths, nativeCandidateBinding, proposalDescription} from './kosmos-proposal.mjs';
 import {metadata} from './test-support.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
 
@@ -207,6 +211,30 @@ test('preparation transport and compact retention preserve original native bytes
   const workflow={path:run.path,commit:f.base,sha256:'d'.repeat(64)};
   const compact=compactKosmosPreparation({bytes,run,job,artifact,workflow});
   assert.deepEqual(hydrateKosmosPreparation(compact,result.candidate.files).bytes,bytes);
+  const candidate=result.candidate,pull={number:9,state:'open',draft:false,labels:[],title:'Prepare Kosmos '+candidate.version,
+    body:proposalDescription(candidate).body,base:{sha:candidate.base,repo:{id:1251308461}},
+    head:{sha:candidate.head,ref:'automation/dependency-release',repo:{id:1251308461}}};
+  const observerCommand=async args=>{
+    const path=args[1].slice('repos/tkersey/kosmos'.length);let value;
+    if(path==='')value={full_name:'tkersey/kosmos',id:1251308461,default_branch:'main'};
+    else if(path==='/git/ref/heads/main')value={ref:'refs/heads/main',object:{type:'commit',sha:candidate.base}};
+    else if(path.startsWith('/pulls?'))value=[pull];
+    else if(path==='/pulls/9')value=pull;
+    else if(path==='/git/commits/'+candidate.head)value={sha:candidate.head,tree:{sha:candidate.tree}};
+    else if(path.startsWith('/actions/workflows/runtime-bundle.yml/runs?'))value={workflow_runs:[{id:80,status:'completed'}]};
+    else if(path.startsWith('/contents/docs/repository-local-releases.md?'))value={type:'file',encoding:'base64',content:Buffer.from('Fixture requirements').toString('base64')};
+    else throw Error('unexpected original review observation '+path);
+    return Buffer.from(JSON.stringify(value));
+  };
+  const observed=await observeKosmosReview({controlCommit:candidate.base},observerCommand,
+    {request:async()=>({status:200,body:{name:'REPOSITORY_AUTOMATION',value:'propose'}})},async()=>null,
+    async()=>({run:{id:80},workflow:{sha256:'a'.repeat(64)},evidence:Buffer.from('fixture qualification'),jobs:[]}),
+    {readPreparation:async()=>({bytes,run,job,artifact,workflow,...decoded})});
+  assert.equal(observed.status,'ready');
+  const retained=retainedFixture(observed.context,expectedReviewSettings);
+  const recovered=validateRetainedReview(Buffer.from(JSON.stringify(retained)),{base:candidate.base,head:candidate.head});
+  assert.deepEqual(hydrateKosmosPreparation(recovered.context.preparation,candidate.files).bytes,bytes);
+
   const changed=new Map(result.candidate.files);changed.set(mechanicalPaths[0],Buffer.from('forged'));
   assert.throws(()=>hydrateKosmosPreparation(compact,changed));
   const forged=structuredClone(compact);forged.run.run_attempt=2;

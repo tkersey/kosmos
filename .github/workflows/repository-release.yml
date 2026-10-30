@@ -37,6 +37,13 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
+      - name: Install native publication sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor
+          sudo install -o root -g root -m 0644 tools/release/bwrap.apparmor /etc/apparmor.d/repository-review-bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/repository-review-bwrap
+          bwrap --version
       - name: Compile accepted native manifest parser
         env:
           ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/publication-zig-global

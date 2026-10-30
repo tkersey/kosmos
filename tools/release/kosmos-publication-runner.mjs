@@ -40,6 +40,15 @@ export async function publicationEnabled(client) {
   return mode?.value !== undefined && mode.value !== 'off' && publish?.value === 'true';
 }
 
+export async function admitPublicationUpstream(dependency, command = githubCommand, admit = admitPublishedRelease) {
+  assert.equal(dependency.repository.name, 'tkersey/horos');
+  const directory = mkdtempSync(join(tmpdir(), 'kosmos-upstream-publication-'));
+  try {
+    return await admit({repository: dependency.repository.name, releaseId: dependency.release.id,
+      outputDirectory: join(directory, 'release')}, command);
+  } finally {rmSync(directory, {recursive: true, force: true});}
+}
+
 export function publicationServices({controlDirectory, nativePath, compilerPath, identity, command = githubCommand}) {
   const root = realpathSync(controlDirectory), client = new KosmosProposalClient();
   const git = args => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {cwd: root, encoding: 'utf8'}).trim();
@@ -70,7 +79,7 @@ export function publicationServices({controlDirectory, nativePath, compilerPath,
     const node = {name: 'node', version: process.versions.node, platform: `${process.platform}-${process.arch === 'x64' ? 'x86_64' : process.arch}`,
       sha256: sha256(readRegular(process.execPath, 256 * 1024 * 1024))};
     return {status: 'ready', ...sealKosmosPublication({boundary, qualification, manifestBytes, admission, node, admitted, profileBytes})};
-  }, verifyAttestation: async (path, record) => {
+  }, admitUpstream: ({dependency}) => admitPublicationUpstream(dependency, command), verifyAttestation: async (path, record) => {
     const verified = parseEvidenceJson(await command(attestationArguments(path, record)));
     assert.ok(Array.isArray(verified) && verified.length > 0, 'publication admission attestation missing');
   }, verifyPublished: async ({release, recordBytes}) => {
@@ -124,7 +133,7 @@ export async function publishPrepared(directory, services, publish = publishKosm
     assert.deepEqual(current.recordBytes, recordBytes, 'original publication evidence or source changed');
     assert.deepEqual(current.payloads, payloads, 'qualified publication payload changed');
   };
-  return publish({recordBytes, payloads, admit, verifyPublished: services.verifyPublished});
+  return publish({recordBytes, payloads, admit, admitUpstream: services.admitUpstream, verifyPublished: services.verifyPublished});
 }
 
 if (import.meta.main) {

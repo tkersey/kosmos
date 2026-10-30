@@ -14,7 +14,7 @@ import {sha256} from './encoding.mjs';
 import {sourceManifest, classifyNativeVersion} from './kosmos-native-manifest.mjs';
 import {readKosmosPreparation} from './kosmos-preparation-artifact.mjs';
 import {expectedReviewSettings} from './review-check.mjs';
-import {proposalBranch} from './kosmos-proposal.mjs';
+import {proposalBranch, describedProposalSubject} from './kosmos-proposal.mjs';
 
 export async function observation(client, path, missing = false) {
   const response = await client.request({path});
@@ -169,14 +169,17 @@ export async function originalKosmosQualification(head, command = githubCommand)
 }
 
 export function retireKosmosProposal({client, native, actor, command = githubCommand, readResult = readReviewResult, readCandidate = storedKosmosCandidate}) {
-  return async ({pull, knownHead}) => {
+  return async ({pull, knownHead, candidate, previousSubject = describedProposalSubject(pull.body)}) => {
     assert.equal(pull.head.sha, knownHead);
-    const previousCandidate = await readCandidate(knownHead, {client, command});
-    const subject = {repository: 'tkersey/kosmos', base: previousCandidate.base, head: knownHead,
+    assert.ok(knownHead === previousSubject.head || knownHead === candidate?.head,
+      'live branch differs from the described predecessor and admitted successor');
+    const previousCandidate = await readCandidate(previousSubject.head, {client, command});
+    assert.equal(previousCandidate.head, previousSubject.head); assert.equal(previousCandidate.base, previousSubject.base);
+    const subject = {repository: 'tkersey/kosmos', base: previousCandidate.base, head: previousCandidate.head,
       tree: previousCandidate.tree, purpose: 'pull'};
     const result = await readResult(subject, command);
     if (result.status === 'absent') {
-      const run = await originalKosmosQualification(knownHead, command);
+      const run = await originalKosmosQualification(previousCandidate.head, command);
       assert.ok(run !== null && run.status === 'completed' &&
         ['failure', 'timed_out', 'cancelled', 'startup_failure'].includes(run.conclusion),
       'unreviewed subject can retire only after its unique original qualification failed');
@@ -200,7 +203,8 @@ export async function frozenKosmosCandidate(pull,source,{client,command=githubCo
   const candidate=await readCandidate(pull.head.sha,{client,command});
   const result=await readResult({repository:'tkersey/kosmos',base:candidate.base,head:candidate.head,tree:candidate.tree,purpose:'pull'},command);
   let frozen=true;
-  if(result.status==='blocked'&&result.envelope?.epochClosed===true)frozen=false;
+  if(result.envelope?.epochClosed===true && (result.status==='blocked' ||
+    (result.status==='complete' && candidate.base!==source.commit)))frozen=false;
   if(result.status==='absent'){
     const run=await qualification(candidate.head,command);
     if(run?.status==='completed'&&['failure','timed_out','cancelled','startup_failure'].includes(run.conclusion))frozen=false;

@@ -14,11 +14,11 @@ import {kosmosPreparationPlan} from './kosmos-preparation-plan.mjs';
 import {readKosmosPreparation} from './kosmos-preparation-artifact.mjs';
 import {nativeCandidateBinding} from './kosmos-proposal.mjs';
 import {manifestOperations, sourceManifest} from './kosmos-native-manifest.mjs';
-import {proposeKosmos, promoteKosmos, pauseKosmosProposals} from './kosmos-proposal.mjs';
+import {proposeKosmos, promoteKosmos, pauseKosmosProposals, recoverProposalMetadata} from './kosmos-proposal.mjs';
 import {createKosmosPromotionAdmission} from './kosmos-promotion-admission.mjs';
 import {admitOwnerResume, reportAutomationStatus} from './kosmos-proposal-authority.mjs';
 import {appActor, currentKosmosSource, kosmosBoundaryOperations, originalKosmosQualification,
-  observationPages, preparationPulls, promotionRequirements, retireKosmosProposal, frozenKosmosCandidate} from './kosmos-release-observation.mjs';
+  observationPages, preparationPulls, promotionRequirements, storedKosmosCandidate, retireKosmosProposal, frozenKosmosCandidate} from './kosmos-release-observation.mjs';
 
 function writerIdentity(identity) {
   assert.equal(identity.repository, 'tkersey/kosmos'); assert.equal(identity.repositoryId, 1251308461);
@@ -32,6 +32,10 @@ function reason(error) {
 
 export function automationOperations({client, command, native, actor}) {
   return {
+    recover: pull => recoverProposalMetadata({pull, actor, client,
+      readCandidate: head => storedKosmosCandidate(head, {client, command, native, actor}),
+      admitRetirement: retireKosmosProposal({client, command, native, actor}),
+      admitResume: value => admitOwnerResume(value, client)}),
     plan: (source,frozen=null) => kosmosPreparationPlan({source,client,command,native,actor,frozen}),
     freeze: (pull,source) => frozenKosmosCandidate(pull,source,{client,command}),
     preparation: selection => readKosmosPreparation(selection,command),
@@ -94,6 +98,8 @@ export async function runKosmosAutomation({controlCommit, identity = null, nativ
   try {
     const pulls = await preparationPulls(client);
     currentPull = pulls.find(pull => pull.state === 'open') ?? null;
+    const recovery = await actions.recover(currentPull);
+    if (recovery !== null) {candidate = recovery.candidate; return finish(recovery.result);}
     const frozen=await actions.freeze(currentPull,source);
     const plan=await actions.plan(source,frozen);
     if(plan.status!=='prepare')return finish(plan);

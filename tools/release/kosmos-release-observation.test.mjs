@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
-import {proposalBranch} from './kosmos-proposal.mjs';
+import {proposalBranch, proposalDescription, proposalMessage, proposalCommitOid, mechanicalPaths} from './kosmos-proposal.mjs';
 import {currentKosmosSource, appActor, storedKosmosCandidate, preparationPulls, promotionRequirements,
   originalKosmosQualification, retireKosmosProposal} from './kosmos-release-observation.mjs';
 import {sha256} from './encoding.mjs';
@@ -24,11 +24,19 @@ async function fixture() {
   const client = {async request({path, method = 'GET'}) {
     assert.equal(method, 'GET'); assert.ok(values.has(path), path); return {status: 200, body: structuredClone(values.get(path))};
   }};
-  const candidate={base,baseTree:tree,tree:'c'.repeat(40),head:'d'.repeat(40),message:'original native candidate',files:new Map([['build.zig.zon',prepared]])};
+  const files = new Map(mechanicalPaths.map(path => [path, Buffer.from('native ' + path)]));
+  files.set('build.zig.zon', prepared);
+  const horos = {releaseId: 1, recordSha256: 'e'.repeat(64), commit: 'f'.repeat(40), tree: 'e'.repeat(40), packageIdentity: `horos-1.0.0-${'a'.repeat(44)}`};
+  const person = {name: actor.login, email: 'fixture@example.invalid', date: '2026-10-30T00:00:00Z'};
+  const nativeResultBytes = Buffer.from(JSON.stringify({schema: 'kosmos-refresh-result/v1', baseCommit: base, baseTree: tree,
+    version: '1.0.1', horosCommit: horos.commit, horosTree: horos.tree, horosPackageIdentity: horos.packageIdentity, changed: [...mechanicalPaths]}));
+  const candidate = {base, baseTree: tree, tree: 'c'.repeat(40), files, version: '1.0.1', horos, nativeResultBytes,
+    author: person, committer: {...person}, impact: {impact: 'patch', disposition: 'compatible', rationale: 'Synthetic native fixture.', contracts: ['native projection']}};
+  candidate.message = proposalMessage(candidate); candidate.head = proposalCommitOid(candidate);
   const readPreparation=async()=>({candidate});
   values.set(`/git/commits/${candidate.head}`, {sha: candidate.head, tree: {sha: candidate.tree},
     parents: [{sha: base}], message: candidate.message});
-  values.set(`/contents/build.zig.zon?ref=${candidate.head}`, file(prepared));
+  for (const [path, bytes] of files) values.set(`/contents/${path}?ref=${candidate.head}`, file(bytes));
   const run = {id: 17, head_sha: candidate.head, event: 'pull_request', repository: {id: 1251308461},
     head_repository: {id: 1251308461}, path: '.github/workflows/runtime-bundle.yml', run_attempt: 1,
     status: 'completed', conclusion: 'failure'};
@@ -41,6 +49,7 @@ async function fixture() {
   };
   const pull = {id: 52, number: 52, state: 'open', head: {ref: proposalBranch, sha: candidate.head, repo: {id: 1251308461}},
     base: {ref: 'main', repo: {id: 1251308461}}};
+  pull.body = proposalDescription(candidate).body; pull.title = `Prepare Kosmos ${candidate.version}`;
   let result = {status: 'absent'};
   const retire = retireKosmosProposal({client, native, actor, command, readResult: async () => result,readCandidate:async()=>candidate});
   return {candidate, client, native, actor, values, tree, run, runs, command, pull,readPreparation,
@@ -140,4 +149,21 @@ test('original prepared candidate stays frozen before its first PR is created',a
   const f=await fixture(),readPreparation=async value=>{assert.deepEqual(value,{base});return {candidate:f.candidate};};
   assert.deepEqual(await frozenKosmosCandidate(null,{commit:base},{readPreparation}),f.candidate);
   assert.equal(await frozenKosmosCandidate(null,{commit:base},{readPreparation:async()=>null}),null);
+});
+
+
+test('retirement binds original source and closure independently of edited explanatory prose', async () => {
+  const f = await fixture();
+  const envelope = {schema: 'repository-review-result/v1', context: {repository: 'tkersey/kosmos', base,
+    head: f.candidate.head, tree: f.candidate.tree, pullNumber: 52}, status: 'blocked', reason: 'Original closed owner epoch.',
+    epochClosed: true, turn: 1, previousSha256: null, stateSha256: null, retainedEvidence: null};
+  f.setReview({status: 'blocked', bytes: Buffer.from(JSON.stringify(envelope)), run: {id: 20}, artifact: {id: 21}});
+  f.pull.body += 'Reviewed explanatory rationale.\n'; f.pull.title = 'Human explanatory title';
+  assert.equal((await f.retire()).review.runId, 20);
+});
+
+test('retirement cannot substitute an unrelated described subject for the observed branch', async () => {
+  const f = await fixture();
+  f.pull.body = f.pull.body.replace(`Head: \`${f.candidate.head}\``, `Head: \`${'f'.repeat(40)}\``);
+  await assert.rejects(f.retire(), /live branch differs/);
 });

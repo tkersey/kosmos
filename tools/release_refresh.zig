@@ -373,6 +373,18 @@ fn validateDiff(r: Runner, base: source.Snapshot) ![]const []const u8 {
     return changes.toOwnedSlice(r.a);
 }
 
+fn stageCandidate(r: Runner, output: []const u8) ![]const u8 {
+    const parent = std.fs.path.dirname(output) orelse return error.InvalidOutputPath;
+    var random: [16]u8 = undefined;
+    r.io.random(&random);
+    const candidate = try r.path(&.{
+        parent,
+        try std.fmt.allocPrint(r.a, ".kosmos-refresh-{s}", .{std.fmt.bytesToHex(random, .lower)}),
+    });
+    try Dir.cwd().createDir(r.io, candidate, .fromMode(0o700));
+    return candidate;
+}
+
 fn prepare(r: Runner, repository: []const u8, input_path: []const u8, output: []const u8) !void {
     if (Dir.cwd().statFile(r.io, output, .{ .follow_symlinks = false })) |_| {
         return error.OutputAlreadyExists;
@@ -380,8 +392,9 @@ fn prepare(r: Runner, repository: []const u8, input_path: []const u8, output: []
         if (err != error.FileNotFound) return err;
     }
     const input = try parseInput(r, input_path);
-    const candidate = try r.path(&.{ r.scratch, "candidate" });
-    try Dir.cwd().createDir(r.io, candidate, .fromMode(0o700));
+    const candidate = try stageCandidate(r, output);
+    defer Dir.cwd().deleteTree(r.io, candidate) catch |err|
+        std.log.err("candidate cleanup failed: {s}", .{@errorName(err)});
     const base = try source.prepare(r, repository, candidate);
     if (!std.mem.eql(u8, base.commit, input.baseCommit) or
         !std.mem.eql(u8, base.tree, input.baseTree)) return error.BaseChanged;
@@ -531,6 +544,93 @@ const input_fixture: Input = .{
         .sourceRepository = "/repository",
     },
 };
+
+test "candidate staging belongs to the output parent independently of scratch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    var destination = std.testing.tmpDir(.{});
+    defer destination.cleanup();
+    var env = std.process.Environ.Map.init(a);
+    const r = try testRunner(a, scratch, &env);
+    const parent = try destination.dir.realPathFileAlloc(r.io, ".", a);
+    const output = try r.path(&.{ parent, "prepared" });
+    const candidate = try stageCandidate(r, output);
+    defer Dir.cwd().deleteTree(r.io, candidate) catch |err|
+        std.log.err("candidate cleanup failed: {s}", .{@errorName(err)});
+    try std.testing.expectEqualStrings(parent, std.fs.path.dirname(candidate).?);
+    try std.testing.expect(!std.mem.eql(u8, parent, r.scratch));
+    const retained = try r.path(&.{ parent, "retained" });
+    try r.write(retained, "untouched");
+    try r.write(try r.path(&.{ candidate, "result.json" }), "complete");
+    try std.testing.expectError(
+        error.FileNotFound,
+        Dir.cwd().statFile(r.io, output, .{ .follow_symlinks = false }),
+    );
+    try Dir.cwd().renamePreserve(candidate, Dir.cwd(), output, r.io);
+    try std.testing.expectEqualStrings("complete", try r.read(try r.path(&.{
+        output, "result.json",
+    })));
+    try std.testing.expectEqualStrings("untouched", try r.read(retained));
+}
+
+test "candidate publication preserves an output created after staging" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var env = std.process.Environ.Map.init(a);
+    const r = try testRunner(a, temp, &env);
+    const output = try r.path(&.{ r.scratch, "prepared" });
+    const candidate = try stageCandidate(r, output);
+    defer Dir.cwd().deleteTree(r.io, candidate) catch |err|
+        std.log.err("candidate cleanup failed: {s}", .{@errorName(err)});
+    try r.write(try r.path(&.{ candidate, "result.json" }), "candidate");
+    try Dir.cwd().createDir(r.io, output, .fromMode(0o700));
+    const record = try r.path(&.{ output, "result.json" });
+    try r.write(record, "retained");
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        Dir.cwd().renamePreserve(candidate, Dir.cwd(), output, r.io),
+    );
+    try std.testing.expectEqualStrings("retained", try r.read(record));
+    try std.testing.expectEqualStrings("candidate", try r.read(try r.path(&.{
+        candidate, "result.json",
+    })));
+}
+
+test "failed preparation cleans only its destination staging directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    var destination = std.testing.tmpDir(.{ .iterate = true });
+    defer destination.cleanup();
+    var env = std.process.Environ.Map.init(a);
+    var r = try testRunner(a, scratch, &env);
+    const parent = try destination.dir.realPathFileAlloc(r.io, ".", a);
+    const output = try r.path(&.{ parent, "prepared" });
+    const input = try r.path(&.{ r.scratch, "input.json" });
+    try r.write(input, try std.json.Stringify.valueAlloc(a, input_fixture, .{}));
+    try r.write(try r.path(&.{ parent, "retained" }), "untouched");
+    r.deadline = .fromNow(r.io, .{ .raw = .fromSeconds(-1), .clock = .awake });
+    try std.testing.expectError(error.QualificationDeadline, prepare(r, "/unused", input, output));
+    var entries = destination.dir.iterate();
+    const retained = (try entries.next(r.io)) orelse return error.MissingRetainedFile;
+    try std.testing.expectEqualStrings("retained", retained.name);
+    try std.testing.expectEqual(@as(?Dir.Entry, null), try entries.next(r.io));
+    try std.testing.expectEqualStrings("untouched", try r.read(try r.path(&.{
+        parent, "retained",
+    })));
+    try std.testing.expectEqualStrings(
+        try std.json.Stringify.valueAlloc(a, input_fixture, .{}),
+        try r.read(input),
+    );
+}
 
 test "frozen input rejects mismatched commit duplicate keys and future schema" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
