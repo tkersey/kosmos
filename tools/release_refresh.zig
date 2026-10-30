@@ -439,8 +439,12 @@ fn execute(r: Runner, args: *std.process.Args.Iterator) !void {
     _ = args.next() orelse return error.MissingCompiler;
     const repository = args.next() orelse return error.MissingRepository;
     if (!std.fs.path.isAbsolute(repository)) return error.AbsolutePathRequired;
-    const compiler = try r.run(&.{ r.zig, "version" }, r.scratch, true);
-    if (!std.mem.eql(u8, compiler.stdout, "0.17.0\n")) return error.CompilerMismatch;
+    const packaging = std.mem.eql(u8, command, "source") or
+        std.mem.eql(u8, command, "source-build");
+    if (!packaging) {
+        const compiler = try r.run(&.{ r.zig, "version" }, r.scratch, true);
+        if (!std.mem.eql(u8, compiler.stdout, "0.17.0\n")) return error.CompilerMismatch;
+    }
     if (std.mem.eql(u8, command, "manifest")) {
         if (args.next() != null) return error.UnexpectedArgument;
         const facts = try package.manifestFacts(r, repository);

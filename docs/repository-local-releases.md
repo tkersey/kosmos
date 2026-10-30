@@ -149,6 +149,26 @@ qualify a mixed archive/receipt pair because receivers recheck their byte bindin
 and workflows upload only on success. The ordinary `source` operation retains
 immutable collision rejection.
 
+Native source admission opens regular files without blocking on FIFOs and checks
+raw and PAX sizes before iterator arithmetic. Output exclusion belongs to the
+opened directory, so alternate path spellings share the same lock. Replacement
+removes the old receipt before publishing new archive bytes. Compiler execution
+and its recorded digest use the same captured executable; native Zig library
+discovery retains the original installation and explicit compiler environment.
+
+Observer, start marker, and check reporter use the same original review subject.
+Missing evidence preserves the durable invocation identity across repeated polls.
+Recovering a failed or stale check display requires the authenticated original
+pending result; a terminal owner result cannot reopen. The owner process deadline
+includes elapsed setup and leaves one minute within both the eight-minute step
+and ten-minute job limits for termination, diagnostics, and retention.
+
+Without an App credential, automation reads the workflow's configured mode and
+reports read-only source and release observations without querying the Variables
+API. Cancellation remains unverified, and publication reports the missing
+credential before credentialed control reads. Enabled writers reobserve live
+controls and the currently observed auto-merge owner before cancellation.
+
 
 ### Publication of qualified Kosmos artifacts
 

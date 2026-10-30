@@ -1081,13 +1081,17 @@ fn configureSourceChecks(
     source_agreement.step.dependOn(&source_examples.step);
     source_agreement.step.dependOn(&fixtures.current_fixtures.step);
     source_agreement.has_side_effects = true;
+    source_agreement.expectExitCode(0);
+    const source_report = b.addSystemCommand(&.{"cat"});
+    source_report.addFileArg2(source_agreement.captureStdOut(.{}), .{});
+    source_report.has_side_effects = true;
     b.step(
         "check-source",
         "Compare current native/WASM execution with independent source semantics",
     )
-        .dependOn(&source_agreement.step);
+        .dependOn(&source_report.step);
 
-    return .{ .source_agreement = source_agreement };
+    return .{ .source_agreement = source_report };
 }
 
 const PortableChecks = struct {

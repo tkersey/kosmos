@@ -95,8 +95,8 @@ pub fn prepare(
     expected: ?[]const u8,
     build_owned: bool,
 ) !void {
-    const owner = if (build_owned) try source.BuildOutput.acquire(r, output) else null;
-    defer if (owner) |value| value.close(r.io);
+    const owner = try source.BuildOutput.acquire(r, output);
+    defer owner.close(r.io);
     const staging = try r.path(&.{ r.scratch, "publishing" });
     try Dir.cwd().createDir(r.io, staging, .fromMode(0o700));
     const snapshot = try source.prepare(r, repository, staging);
@@ -105,9 +105,16 @@ pub fn prepare(
         try edit.hex(commit, 40);
         if (!std.mem.eql(u8, snapshot.commit, commit)) return error.SourceChanged;
     }
-    try r.checkCoherence(snapshot.source);
-    const hash = try identity(r, snapshot);
-    try consume(r, snapshot, hash);
+    var compiler = try source.CapturedCompiler.acquire(r, r.zig, staging, r.env);
+    defer compiler.close(r.io);
+    var selected = r;
+    selected.zig = compiler.path;
+    selected.env = &compiler.env;
+    const version = try selected.run(&.{ selected.zig, "version" }, selected.scratch, true);
+    if (!std.mem.eql(u8, version.stdout, "0.17.0\n")) return error.CompilerMismatch;
+    try selected.checkCoherence(snapshot.source);
+    const hash = try identity(selected, snapshot);
+    try consume(selected, snapshot, hash);
     const record = try std.json.Stringify.valueAlloc(r.a, .{
         .commit = snapshot.commit,
         .tree = snapshot.tree,
@@ -117,13 +124,13 @@ pub fn prepare(
         .packageIdentity = hash,
         .files = snapshot.files,
         .compiler = "0.17.0",
-        .compilerSha256 = try source.compilerSha256(r, r.zig),
+        .compilerSha256 = compiler.sha256,
         .compilerPlatform = source.compilerPlatform(),
         .manifest = try manifestFacts(r, snapshot.source),
     }, .{});
-    const archive = try source.readArchive(r, snapshot.archive);
+    const archive = try source.testedArchive(r, snapshot);
     try r.checkBudget();
-    if (owner) |value| return value.retain(r.io, archive, record);
+    if (build_owned) return owner.retain(r.io, archive, record);
     try Dir.cwd().createDirPath(r.io, output);
     const archive_path = try r.path(&.{ output, "source.tar" });
     const record_path = try r.path(&.{ output, "source.json" });
