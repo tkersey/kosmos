@@ -157,7 +157,8 @@ legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
 The native lane compiles its existing test artifacts and independently rebuilt
 core before retaining the bounded compiler cache. It then executes the original
-check roots, so a later test timeout does not discard completed compilation.
+owner and driver check roots concurrently with separate local caches, requiring
+both to succeed, so a later test timeout does not discard completed compilation.
 The Zig installation uses a stable tool-cache path because dependency extraction
 includes `PATH` in its input identity. Neither cache restoration nor successful
 compilation substitutes for completed tests.

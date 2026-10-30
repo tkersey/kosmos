@@ -169,9 +169,15 @@ jobs:
         if: matrix.lane == 'native'
         run: |
           zig build check-storage check-semantics check-zig17 \
-            --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
+            --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all &
+          owners_pid=$!
           zig build check-semantic-driver \
-            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
+            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all &
+          driver_pid=$!
+          check_status=0
+          wait "$owners_pid" || check_status=1
+          wait "$driver_pid" || check_status=1
+          exit "$check_status"
       - name: Check specialization and public receipt owners
         if: matrix.lane == 'specialization'
         run: >-
