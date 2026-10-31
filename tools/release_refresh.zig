@@ -206,7 +206,6 @@ fn identitySource(r: Runner, root: []const u8) ![]const u8 {
     defer source_dir.close(r.io);
     var walker = try source_dir.walk(r.a);
     defer walker.deinit();
-    var files: usize = 0;
     var bytes: usize = 0;
     while (try walker.next(r.io)) |entry| {
         const output = try r.path(&.{ destination, entry.path });
@@ -215,8 +214,6 @@ fn identitySource(r: Runner, root: []const u8) ![]const u8 {
             continue;
         }
         if (entry.kind != .file) return error.UnsupportedSourceKind;
-        files += 1;
-        if (files > 10000) return error.SourceTooLarge;
         const content = try r.read(try r.path(&.{ root, "src", entry.path }));
         bytes = try std.math.add(usize, bytes, content.len);
         if (bytes > maximum_bytes) return error.SourceTooLarge;
@@ -927,7 +924,7 @@ test "public CLI preserves configured compiler inputs and isolates credentials a
     var env = try std.testing.environ.createMap(a);
     defer env.deinit();
     var r = try testRunner(a, tmp, &env);
-    r.zig = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, r.scratch, true)).stdout, "\r\n");
+    r.zig = try source.testCompiler(a);
     const cli = try buildTestCli(r);
     try rejectAliasedCliSource(r, cli);
     const wrapper = try configuredCliWrapper(r, &env);
@@ -986,4 +983,36 @@ fn rejectAliasedCliSource(r: Runner, cli: []const u8) !void {
         error.FileNotFound,
         Dir.cwd().statFile(r.io, try r.path(&.{ output, name }), .{}),
     );
+}
+
+test "source identity copying preserves more than ten thousand bounded tiny files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    const r = try testRunner(a, temporary, &env);
+    const root = try r.path(&.{ r.scratch, "source" });
+    const source_path = try r.path(&.{ root, "src" });
+    try Dir.cwd().createDirPath(r.io, source_path);
+    var directory = try Dir.cwd().openDir(r.io, source_path, .{});
+    defer directory.close(r.io);
+    for (0..10001) |number| {
+        var name: [16]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name, "{d:0>5}", .{number});
+        try directory.writeFile(r.io, .{ .sub_path = path, .data = "x" });
+    }
+    const copied = try identitySource(r, root);
+    var result = try Dir.cwd().openDir(r.io, copied, .{ .iterate = true });
+    defer result.close(r.io);
+    var iterator = result.iterate();
+    var count: usize = 0;
+    while (try iterator.next(r.io)) |entry| {
+        try std.testing.expectEqual(std.Io.File.Kind.file, entry.kind);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10001), count);
+    try std.testing.expectEqualStrings("x", try r.read(try r.path(&.{ copied, "10000" })));
 }

@@ -21,7 +21,7 @@ function fixture() {
     body: impactBlock(versionPreparationImpact), base: {sha: base, ref: 'main', repo: {id: 1251308461}},
     head: {sha: head, ref: 'feature/source-change', repo: {id: 1251308461}}};
   const run = {id: 10, status: 'completed', conclusion: 'success'};
-  const evidence = Buffer.from('original verified qualification fixture');
+  const evidence = Buffer.from(JSON.stringify({run: {repository: {}, head_repository: {}}, jobs: [], artifacts: []}));
   const qualification = {run: {...run, html_url: 'https://github.com/tkersey/kosmos/actions/runs/10'}, evidence,
     workflow: {path: '.github/workflows/runtime-bundle.yml', commit: head, sha256: sha256(Buffer.from('qualification definition'))},
     jobs: Object.keys(kosmosJobs).map((name, index) => ({id: index + 20, name, conclusion: 'success'}))};
@@ -105,6 +105,9 @@ test('pending owner state resumes unchanged original context and cannot rewrite 
   const prior = {base, value: {status: 'pending', envelope: {context: first.context}, run: {id: 40}, artifact: {id: 41},
     bytes: Buffer.from('original pending owner result'), workflow: {commit: base, sha256: 'd'.repeat(64)}}};
   value.setPrior(prior);
+  const refreshed = JSON.parse(value.qualification.evidence);
+  refreshed.run.repository.description = 'Changed after the original review started';
+  value.qualification.evidence = Buffer.from(JSON.stringify(refreshed));
   const resumed = await value.observe();
   assert.equal(resumed.status, 'ready'); assert.deepEqual(resumed.context, first.context);
   assert.equal(resumed.previous.runId, 40);

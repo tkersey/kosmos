@@ -1225,6 +1225,14 @@ fn configureQualification(
     check.dependOn(&foreign_checks.current_package_check.step);
 }
 
+fn releaseTestCompiler(run: *std.Build.Step.Run) void {
+    const b = run.step.owner;
+    const command = run.argv.toOwnedSlice(b.allocator) catch @panic("out of memory");
+    run.addArg("env");
+    run.addFileArg2(.zig_exe, .{ .prefix = "RELEASE_TEST_ZIG=", .make_absolute = true });
+    run.argv.appendSlice(b.allocator, command) catch @panic("out of memory");
+}
+
 fn configureReleaseTools(b: *std.Build) void {
     const module = b.createModule(.{
         .root_source_file = b.path("tools/release_refresh.zig"),
@@ -1236,6 +1244,7 @@ fn configureReleaseTools(b: *std.Build) void {
         .dependOn(&b.addInstallArtifact(executable, .{}).step);
     const tests = b.addTest(.{ .root_module = module });
     const run_tests = b.addRunArtifact(tests);
+    releaseTestCompiler(run_tests);
     run_tests.has_side_effects = true;
     b.step("check-release-tools", "Check native source admission and semantic preparation")
         .dependOn(&run_tests.step);
