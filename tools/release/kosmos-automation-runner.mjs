@@ -18,7 +18,7 @@ import {proposeKosmos, promoteKosmos, pauseKosmosProposals, recoverProposalMetad
 import {createKosmosPromotionAdmission} from './kosmos-promotion-admission.mjs';
 import {admitOwnerResume, reportAutomationStatus} from './kosmos-proposal-authority.mjs';
 import {appActor, currentKosmosSource, kosmosBoundaryOperations, originalKosmosQualification,
-  observationPages, preparationPulls, promotionRequirements, storedKosmosCandidate, retireKosmosProposal, frozenKosmosCandidate} from './kosmos-release-observation.mjs';
+  observationPages, preparationPulls, promotionRequirements, storedKosmosCandidate, admitUnproposedKosmos, retireKosmosProposal, frozenKosmosCandidate} from './kosmos-release-observation.mjs';
 
 function writerIdentity(identity) {
   assert.equal(identity.repository, 'tkersey/kosmos'); assert.equal(identity.repositoryId, 1251308461);
@@ -40,6 +40,7 @@ export function automationOperations({client, command, native, actor}) {
     freeze: (pull,source) => frozenKosmosCandidate(pull,source,{client,command}),
     preparation: selection => readKosmosPreparation(selection,command),
     retire: retireKosmosProposal({client, command, native, actor}),
+    orphan: admitUnproposedKosmos({client, command, native, actor}),
     resume: value => admitOwnerResume(value, client),
     propose: value => proposeKosmos({...value, actor, client}),
     promote: value => promoteKosmos({...value, actor, client}),
@@ -120,7 +121,7 @@ export async function runKosmosAutomation({controlCommit, identity = null, nativ
       assert.deepEqual(nativeCandidateBinding(proposed),retained.binding,'proposal differs from original native generation');
       return retained.binding;
     };
-    const proposed = await actions.propose({candidate, admitCandidate, admitRetirement: actions.retire, admitResume: actions.resume});
+    const proposed = await actions.propose({candidate, admitCandidate, admitRetirement: actions.retire, admitResume: actions.resume, admitOrphan: actions.orphan});
     if (proposed.number !== undefined) currentPull = {number: proposed.number};
     if (proposed.status !== 'proposal open') return finish(proposed);
     const review = await reportReview({number: proposed.number, appId: identity.appId},

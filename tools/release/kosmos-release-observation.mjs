@@ -213,3 +213,23 @@ export async function frozenKosmosCandidate(pull,source,{client,command=githubCo
   assert.equal(candidate.base,source.commit,'active original candidate has a stale base; close its owner epoch before successor preparation');
   return candidate;
 }
+
+export function admitUnproposedKosmos({client, native, actor, command = githubCommand, readResult = readReviewResult,
+  readCandidate = head => storedKosmosCandidate(head, {client, native, actor, command})}) {
+  return async ({head}) => {
+    const previousCandidate = await readCandidate(head);
+    assert.equal(previousCandidate.head, head, 'unknown branch source differs from original preparation');
+    const observe = async () => {
+      const values = await preparationPulls(client);
+      assert.ok(!values.some(pull => pull.state === 'open' || pull.head.sha === head),
+        'candidate has proposal history; preserve its original owner epoch');
+      assert.equal((await observationPages(client, `/commits/${head}/pulls`)).length, 0,
+        'candidate has proposal history; preserve its original owner epoch');
+      const result = await readResult({repository: 'tkersey/kosmos', base: previousCandidate.base, head,
+        tree: previousCandidate.tree, purpose: 'pull'}, command);
+      assert.equal(result.status, 'absent', 'original owner invocation must be recovered and closed before branch replacement');
+    };
+    await observe();
+    return {unproposed: true, previousCandidate};
+  };
+}

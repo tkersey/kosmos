@@ -177,10 +177,6 @@ async function discover(reader, admit, root, selected, versionDecision) {
   }
   if(successor?.source.commit===selected.commit)assert.equal(successor.record.source.packageIdentity,selected.packageIdentity,'selected publication package differs');
   if (successor === null) return null;
-  if (successor.record.source.commit !== selected.commit) {
-    assert.equal(successor.record.compatibility.disposition, 'compatible', 'upstream breaking migration requires ordinary implementation');
-    assert.notEqual(successor.record.compatibility.impact, 'major', 'upstream major change requires ordinary implementation');
-  }
   const match = /^horos-([0-9]+\.[0-9]+\.[0-9]+)-[A-Za-z0-9_-]{44}$/.exec(selected.packageIdentity);
   assert.ok(match, 'invalid selected development package identity');
   assert.ok(compareVersion(successor.record.source.version, match[1]) >= 0, 'upstream version downgrade');

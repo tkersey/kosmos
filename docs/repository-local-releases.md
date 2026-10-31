@@ -84,6 +84,9 @@ accepts a frozen `kosmos-refresh/v1` input containing `baseCommit`, `baseTree`,
 The caller must authenticate the upstream publication before this operation;
 the helper independently verifies its archive against the selected Git objects.
 It runs with isolated Git/compiler state and one 600-second operation deadline.
+The CLI preserves explicit compiler/library/include/link settings, including
+`ZIG_LIB_DIR` and `CC`, while replacing HOME and compiler caches and excluding
+credentials and ambient Git configuration overrides.
 
 Preparation writes a new output directory only after native generation and
 coherence succeed. The output contains `source/` and `result.json`. The only
@@ -155,6 +158,11 @@ opened directory, so alternate path spellings share the same lock. Replacement
 removes the old receipt before publishing new archive bytes. Compiler execution
 and its recorded digest use the same captured executable; native Zig library
 discovery retains the original installation and explicit compiler environment.
+Discovered library paths remain absolute when the package consumer changes
+directories. Before extraction succeeds, filesystem-returned names and kinds
+must exactly match authenticated files and directory prefixes. A filesystem that
+aliases or rewrites those names rejects the source and cleans up the new
+extraction; representable case and Unicode names remain supported.
 
 Observer, start marker, and check reporter use the same original review subject.
 Missing evidence preserves the durable invocation identity across repeated polls.
@@ -212,6 +220,12 @@ Live App-created PRs, protected merging, authenticated Actions model review,
 immutable publication and interrupted-write recovery require an owner-approved
 commissioning environment; local adapter tests do not establish those effects.
 
+
+Explanatory PR prose may change while the exact generated binding marker remains
+intact. Version-only classification authenticates the original native preparation,
+source bytes, commit message and unchanged dependency selection. The reviewed
+impact declaration remains separately bound; changing it invalidates admission.
+
 ### Native preparation and ordinary proposal operation
 
 `Repository preparation` observes its own hourly schedule and local qualification
@@ -219,9 +233,20 @@ and owner-review completions. It runs only when `REPOSITORY_AUTOMATION` is
 `propose` or `promote`. Its accepted-main tool reads the committed ZON manifest,
 admits published Horos records, selects a forward compatible successor, and
 combines that patch impact with the original reviewed Kosmos publication boundary.
-A pending higher approved version is preserved. A selected development pin ahead
+A pending higher approved version is preserved. During initial bootstrap, a
+changed upstream selection contributes its patch impact relative to the admitted
+initial version, so the prepared source needs no second version-preparation PR. A selected development pin ahead
 of published Horos releases is never downgraded. A new major or breaking upstream
 migration requires ordinary implementation and review.
+Compatibility covers the complete selected-source-to-successor interval using
+authenticated publication boundaries and their exact predecessor record digests.
+A later patch release cannot hide a skipped breaking interval. A development pin
+already at the endpoint of that break needs only the compatible suffix; an
+interior commit in an indivisible reviewed range lacks that proof and blocks.
+Exact source trees can establish equivalent endpoints without transferring
+package identities, transport hashes or review credit. Frozen retries read only
+the chosen release and required predecessor evidence, so later releases do not
+change the candidate.
 
 The preparation job compiles its exact accepted native tool before obtaining an
 App observer token. Native code runs inside the required network-isolated
@@ -283,10 +308,17 @@ update, the writer authenticates the described predecessor and actual successor
 independently, then finishes only the missing metadata update. Further base
 movement does not authorize another source transition during that recovery.
 Unknown source edits, altered metadata, or unavailable original evidence hold
-recovery. Branch updates use atomic expected-head checks; PR metadata uses
+recovery. A branch written before its first PR can be recovered from its
+original native preparation, exact Git objects, complete absence of PR history,
+and absence of an original review invocation. Main may advance before that first
+PR exists: a fresh admitted candidate can conditionally replace the known orphan.
+Missing evidence, prior manual closure and started review epochs remain held. Branch updates use atomic expected-head checks; PR metadata uses
 before/after observations and has no claimed atomic conditional-edit guarantee.
 Historical closure/reopen and hold-label removal still require explicit owner
-resume; removing the hold alone does not grant authority.
+resume; removing the hold alone does not grant authority. An automation-owned
+pending merge is still cancelled after hold removal until the original owner
+resume is positively admitted. Unavailable resume evidence keeps that hold in
+force; cancellation still checks the current numeric merge-request owner.
 
 The owner input retains compact original preparation provenance, including every
 non-file byte and the original run, job, workflow, and artifact identities.

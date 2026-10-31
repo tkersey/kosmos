@@ -52,7 +52,7 @@ export function classifyNativeVersion({client, native, actor, command}) {
     assert.ok(original,'original native preparation required for version-only classification');
     const candidate=original.candidate;
     assert.equal(candidate.baseTree,baseTree);assert.equal(candidate.tree,subject.tree);
-    assert.equal(pull.body,proposalDescription(candidate).body,'native proposal body changed');
+    assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`),'native proposal binding changed');
     assert.equal(originalCommits[0].message,candidate.message);
     assert.deepEqual(candidate.files.get('build.zig.zon'),manifestBytes);
     const base=native.facts(baseManifestBytes),after=native.facts(manifestBytes);

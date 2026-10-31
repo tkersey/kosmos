@@ -4,11 +4,13 @@ import {expectedReviewSettings} from './review-check.mjs';
 import {validateRetainedReview} from './review-owner.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {attachCompatibility} from './compatibility-test-support.mjs';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, copyFileSync, chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {prepareKosmos, preparationEnvironment, nativeInvocation} from './kosmos-prepare.mjs';
+import {classifyNativeVersion} from './kosmos-native-manifest.mjs';
 import {mechanicalPaths, nativeCandidateBinding, proposalDescription} from './kosmos-proposal.mjs';
 import {metadata} from './test-support.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
@@ -38,6 +40,7 @@ function fixture(t) {
   record.review.landing.commit = head; record.review.landing.tree = tree;
   const archive = Buffer.from('explicit synthetic native transport fixture');
   record.artifacts[0].sha256 = sha256(archive); record.artifacts[0].bytes = archive.length;
+  const compatibilityPayloads=attachCompatibility(record,selected);
   let recordBytes = encodeRecord(record);
   const state = {calls: [], selected, mutate: null, sourceChange: false, badManifest: false, wrongResult: false,
     extraSource: false, missingOutput: false, wrongMode: false, badArchive: false};
@@ -49,7 +52,7 @@ function fixture(t) {
       writeFileSync(join(outputDirectory, 'release.json'), recordBytes);
       writeFileSync(join(outputDirectory, 'source.tar'), state.badArchive ? 'corruption' : archive);
       return {id:7, record: structuredClone(record), recordSha256: sha256(recordBytes),
-        payloads: new Map([['source.tar',archive]]), paths: new Map([['release.json',join(outputDirectory,'release.json')],['source.tar',join(outputDirectory,'source.tar')]]),
+        payloads: new Map([['source.tar',archive],...compatibilityPayloads]), paths: new Map([['release.json',join(outputDirectory,'release.json')],['source.tar',join(outputDirectory,'source.tar')]]),
         admissionVerification: Buffer.from('test-only authentication')};
     },
     async cloneRepository({repository,commit,destination}) {
@@ -82,7 +85,7 @@ function fixture(t) {
     compiler:{path:executable,sha256:executableSha256,sourceCommit:base},outputDirectory:join(root,`output-${counter++}`),
     versionDecision:decision(),admitVersionDecision:async({decisionBytes})=>sha256(decisionBytes),
     author:{name:'Kosmos Automation',email:'fixture@example.invalid'}});
-  return {root,state,record,head,selected,base,baseTree,options,input,decision,git,upstream,
+  return {root,state,record,head,selected,base,baseTree,options,input,decision,git,upstream,compatibilityPayloads,
     prepare:(changes={},overrides={})=>prepareKosmos({...input(),...changes},{...options,...overrides})};
 }
 
@@ -111,7 +114,7 @@ test('own approved version preparation reuses exact selected publication without
 });
 
 test('development pin ahead of all publications does not downgrade',async t=>{
-  const f=fixture(t);f.options.reader.forward=async()=>false;
+  const f=fixture(t);f.options.reader.forward=async(a,b)=>a===f.head&&b===f.selected;
   assert.equal((await f.prepare({versionDecision:undefined})).status,'unchanged');assert.deepEqual(f.state.calls,['manifest']);
 });
 
@@ -123,6 +126,7 @@ test('legacy releases without canonical record cannot be successor authority',as
 test('admitted upstream record still must match independently cloned Git tree',async t=>{
   const f=fixture(t),tree='f'.repeat(40);
   f.record.source.tree=tree;f.record.qualification.run.tree=tree;f.record.review.landing.tree=tree;
+  for(const [name,bytes] of attachCompatibility(f.record,f.selected))f.compatibilityPayloads.set(name,bytes);
   await assert.rejects(f.prepare(),/source tree changed/);assert.deepEqual(f.state.calls,['manifest']);
 });
 
@@ -235,6 +239,36 @@ test('preparation transport and compact retention preserve original native bytes
   const recovered=validateRetainedReview(Buffer.from(JSON.stringify(retained)),{base:candidate.base,head:candidate.head});
   assert.deepEqual(hydrateKosmosPreparation(recovered.context.preparation,candidate.files).bytes,bytes);
 
+  const definition=Buffer.from('accepted native preparation workflow');
+  const originalRun={...run,workflow_id:50};
+  const originalArtifact={...artifact,expired:false,workflow_run:{...artifact.workflow_run,head_branch:'main'}};
+  const responses=new Map([
+    ['',{full_name:'tkersey/kosmos',id:1251308461,default_branch:'main'}],
+    ['/actions/artifacts?per_page=100&page=1',{artifacts:[originalArtifact]}],
+    [`/contents/${run.path}?ref=${candidate.base}`,{type:'file',encoding:'base64',content:definition.toString('base64')}],
+    ['/actions/runs/31',originalRun],['/actions/workflows/50',{path:run.path}],
+    ['/git/ref/heads/main',{ref:'refs/heads/main',object:{type:'commit',sha:candidate.base}}],
+    [`/compare/${candidate.base}...${candidate.base}`,{status:'identical',base_commit:{sha:candidate.base},merge_base_commit:{sha:candidate.base}}],
+    ['/actions/runs/31/attempts/1/jobs?per_page=100&page=1',{jobs:[job]}],
+    ['/actions/runs/31/artifacts?per_page=100&page=1',{artifacts:[originalArtifact]}],
+    ['/actions/artifacts/33/zip',bytes],
+  ]);
+  const command=async args=>{
+    const path=args[1].slice('repos/tkersey/kosmos'.length);assert.ok(responses.has(path),path);
+    const value=responses.get(path);return Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value));
+  };
+  const actor={id:123,login:'fixture[bot]'},baseManifestBytes=Buffer.from('original manifest');
+  const native={facts:value=>({version:value.equals(baseManifestBytes)?'1.0.0':candidate.version,horos:candidate.horos})};
+  const classify=classifyNativeVersion({native,actor,command});
+  const classification={subject:{base:candidate.base,head:candidate.head,tree:candidate.tree},
+    pull:{...pull,user:actor,body:pull.body+'\nOperator explanation retained.'},baseTree:candidate.baseTree,
+    baseManifestBytes,manifestBytes:candidate.files.get('build.zig.zon'),originalCommits:[{message:candidate.message}]};
+  assert.deepEqual(await classify(classification),{versionOnly:true});
+  await assert.rejects(classify({...classification,pull:{...classification.pull,body:classification.pull.body.replace(proposalDescription(candidate).marker,'<!-- repository-proposal/v1 '+ 'f'.repeat(64)+' -->')}}),/binding changed/);
+  const dependencyChange=classifyNativeVersion({actor,command,native:{facts:value=>({
+    ...native.facts(value),horos:value.equals(baseManifestBytes)?{...candidate.horos,commit:'f'.repeat(40)}:candidate.horos})}});
+  assert.deepEqual(await dependencyChange(classification),{versionOnly:false});
+
   const changed=new Map(result.candidate.files);changed.set(mechanicalPaths[0],Buffer.from('forged'));
   assert.throws(()=>hydrateKosmosPreparation(compact,changed));
   const forged=structuredClone(compact);forged.run.run_attempt=2;
@@ -283,5 +317,29 @@ test('native generation consumes the exact admitted decision without rediscoveri
 test('native generation rejects a different record under the frozen release identity',async t=>{
   const f=fixture(t),decision=f.decision();decision.horosRecordSha256='f'.repeat(64);
   await assert.rejects(f.prepare({versionDecision:decision}),/frozen upstream record changed/);
+  assert.deepEqual(f.state.calls,['manifest']);
+});
+
+test('native preparation blocks a frozen patch whose predecessor crossed a breaking boundary',async t=>{
+  const f=fixture(t),previous=structuredClone(f.record),name=previous.repository.name.split('/')[1];
+  previous.source.version='9.0.0';previous.source.packageIdentity=`${name}-9.0.0-${'a'.repeat(44)}`;previous.tag='v9.0.0';
+  previous.compatibility.impact='major';previous.compatibility.disposition='breaking';
+  const previousPayloads=attachCompatibility(previous,f.selected),previousBytes=encodeRecord(previous);
+  writeFileSync(join(f.upstream,'README.md'),'compatible patch after breaking publication\n');
+  f.git(f.upstream,['add','.']);f.git(f.upstream,['commit','--quiet','-m','Compatible patch']);
+  Object.assign(f.record.source,{commit:f.git(f.upstream,['rev-parse','HEAD']),tree:f.git(f.upstream,['rev-parse','HEAD^{tree}']),
+    version:'9.0.1',packageIdentity:`${name}-9.0.1-${'a'.repeat(44)}`});f.record.tag='v9.0.1';
+  Object.assign(f.record.qualification.run,{commit:f.record.source.commit,tree:f.record.source.tree});
+  Object.assign(f.record.review.landing,{commit:f.record.source.commit,tree:f.record.source.tree});
+  const payloads=attachCompatibility(f.record,previous.source.commit,{baseline:{releaseId:6,recordSha256:sha256(previousBytes),source:previous.source}});
+  for(const [name,bytes] of payloads)f.compatibilityPayloads.set(name,bytes);
+  const admit=f.options.admitPublishedRelease;
+  f.options.admitPublishedRelease=async request=>{
+    const value=await admit(request);
+    if(request.releaseId!==6)return value;
+    writeFileSync(value.paths.get('release.json'),previousBytes);
+    return {...value,id:6,record:previous,recordSha256:sha256(previousBytes),payloads:new Map([...value.payloads,...previousPayloads])};
+  };
+  await assert.rejects(f.prepare(),/breaking migration/);
   assert.deepEqual(f.state.calls,['manifest']);
 });

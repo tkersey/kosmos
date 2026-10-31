@@ -469,6 +469,48 @@ fn execute(r: Runner, args: *std.process.Args.Iterator) !void {
     } else return error.UnknownCommand;
 }
 
+fn compilerEnvironment(
+    a: std.mem.Allocator,
+    configured: *const std.process.Environ.Map,
+    scratch: []const u8,
+) !std.process.Environ.Map {
+    var env = std.process.Environ.Map.init(a);
+    errdefer env.deinit();
+    const names = [_][]const u8{
+        "PATH",
+        "ZIG_LIB_DIR",
+        "ZIG_LIBC",
+        "ZIG_BUILD_ERROR_STYLE",
+        "ZIG_BUILD_MULTILINE_ERRORS",
+        "ZIG_BUILD_SUMMARY",
+        "ZIG_VERBOSE_LINK",
+        "ZIG_VERBOSE_CC",
+        "ZIG_VERBOSE_CMD",
+        "ZIG_DEBUG_CMD",
+        "NIX_CFLAGS_COMPILE",
+        "NIX_CFLAGS_LINK",
+        "NIX_LDFLAGS",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "CC",
+        "PKG_CONFIG",
+        "NO_COLOR",
+        "CLICOLOR_FORCE",
+        "HOMEBREW_PREFIX",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "MACOSX_DEPLOYMENT_TARGET",
+    };
+    for (names) |name| if (configured.get(name)) |value| try env.put(name, value);
+    try env.put("HOME", scratch);
+    try env.put("GIT_CONFIG_NOSYSTEM", "1");
+    try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ scratch, "global" }));
+    try env.put("ZIG_LOCAL_CACHE_DIR", try std.fs.path.join(a, &.{ scratch, "local" }));
+    try env.put("ZIG_LOCAL_PKG_DIR", try std.fs.path.join(a, &.{ scratch, "packages" }));
+    return env;
+}
+
 pub fn main(init: std.process.Init) !void {
     const deadline = std.Io.Clock.Timestamp.fromNow(init.io, .{
         .raw = .fromSeconds(600),
@@ -491,13 +533,8 @@ pub fn main(init: std.process.Init) !void {
     const scratch = std.mem.trim(u8, temp.stdout, "\r\n");
     defer Dir.cwd().deleteTree(init.io, scratch) catch |err|
         std.log.err("temporary cleanup failed: {s}", .{@errorName(err)});
-    var env = std.process.Environ.Map.init(a);
-    if (init.environ_map.get("PATH")) |path| try env.put("PATH", path);
-    try env.put("HOME", scratch);
-    try env.put("GIT_CONFIG_NOSYSTEM", "1");
-    try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ scratch, "global" }));
-    try env.put("ZIG_LOCAL_CACHE_DIR", try std.fs.path.join(a, &.{ scratch, "local" }));
-    try env.put("ZIG_LOCAL_PKG_DIR", try std.fs.path.join(a, &.{ scratch, "packages" }));
+    var env = try compilerEnvironment(a, init.environ_map, scratch);
+    defer env.deinit();
     const runner: Runner = .{
         .a = a,
         .io = init.io,
@@ -818,4 +855,135 @@ test "candidate writers reject substituted symlinks and truncate only regular fi
     try r.write(projected, "long initial value");
     try r.write(projected, "short");
     try std.testing.expectEqualStrings("short", try r.read(projected));
+}
+
+fn buildTestCli(r: Runner) ![]const u8 {
+    const files = .{
+        .{ "release_refresh.zig", @embedFile("release_refresh.zig") },
+        .{ "release_source.zig", @embedFile("release_source.zig") },
+        .{ "release_edit.zig", @embedFile("release_edit.zig") },
+        .{ "release_package.zig", @embedFile("release_package.zig") },
+        .{ "release_identity.zig", @embedFile("release_identity.zig") },
+    };
+    inline for (files) |file| try r.write(try r.path(&.{ r.scratch, file[0] }), file[1]);
+    const executable = try r.path(&.{ r.scratch, "release-cli" });
+    _ = try r.run(&.{
+        r.zig,
+        "build-exe",
+        try r.path(&.{ r.scratch, "release_refresh.zig" }),
+        try std.fmt.allocPrint(r.a, "-femit-bin={s}", .{executable}),
+    }, r.scratch, true);
+    return executable;
+}
+
+fn configuredCliWrapper(r: Runner, env: *std.process.Environ.Map) ![]const u8 {
+    const cwd = try Dir.cwd().realPathFileAlloc(r.io, ".", r.a);
+    const original = try Dir.cwd().realPathFileAlloc(r.io, r.zig, r.a);
+    const library = try std.zig.findZigLibDirFromSelfExe(r.a, r.io, cwd, original);
+    defer library.handle.close(r.io);
+    const separate = try r.path(&.{ r.scratch, "configured-library" });
+    try Dir.cwd().symLink(r.io, try library.handle.realPathFileAlloc(r.io, ".", r.a), separate, .{
+        .is_directory = true,
+    });
+    try env.put("ZIG_LIB_DIR", separate);
+    try env.put("CC", original);
+    try env.put("HOME", "/not-the-scratch-home");
+    inline for (.{ "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "GIT_CONFIG_GLOBAL" }) |name| {
+        try env.put(name, "must-not-escape");
+    }
+    try env.put("GIT_CONFIG_COUNT", "1");
+    try env.put("GIT_CONFIG_KEY_0", "credential.helper");
+    try env.put("GIT_CONFIG_VALUE_0", "must-not-escape");
+    const probe = try r.path(&.{ r.scratch, "probe.zig" });
+    try r.write(probe, "test { try @import(\"std\").testing.expect(true); }\n");
+    const wrapper = try r.path(&.{ r.scratch, "configured-zig" });
+    try r.write(wrapper,
+        \\#!/bin/sh
+        \\set -eu
+        \\test -n "$CC"
+        \\test -f "$ZIG_LIB_DIR/std/std.zig"
+        \\test "$HOME" != /not-the-scratch-home
+        \\test "$ZIG_GLOBAL_CACHE_DIR" = "$HOME/global"
+        \\test "$ZIG_LOCAL_CACHE_DIR" = "$HOME/local"
+        \\test "$ZIG_LOCAL_PKG_DIR" = "$HOME/packages"
+        \\test "$GIT_CONFIG_NOSYSTEM" = 1
+        \\test -z "${GH_TOKEN-}${GITHUB_TOKEN-}${SSH_AUTH_SOCK-}${GIT_CONFIG_GLOBAL-}"
+        \\test -z "${GIT_CONFIG_COUNT-}${GIT_CONFIG_KEY_0-}${GIT_CONFIG_VALUE_0-}"
+        \\"$CC" test "${ZIG_LIB_DIR%/*}/probe.zig" >&2
+        \\exec "$CC" "$@"
+    );
+    var file = try Dir.cwd().openFile(r.io, wrapper, .{});
+    defer file.close(r.io);
+    try file.setPermissions(r.io, .fromMode(0o700));
+    return wrapper;
+}
+
+test "public CLI preserves configured compiler inputs and isolates credentials and caches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env = try std.testing.environ.createMap(a);
+    defer env.deinit();
+    var r = try testRunner(a, tmp, &env);
+    r.zig = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, r.scratch, true)).stdout, "\r\n");
+    const cli = try buildTestCli(r);
+    try rejectAliasedCliSource(r, cli);
+    const wrapper = try configuredCliWrapper(r, &env);
+    try r.write(try r.path(&.{ r.scratch, "build.zig.zon" }),
+        \\.{.version="9.1.0",.minimum_zig_version="0.17.0",.dependencies=.{.horos=.{
+        \\.url="git+https://github.com/tkersey/horos#2222222222222222222222222222222222222222",
+        \\.hash="horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU"}}}
+    );
+    const result = try r.run(&.{ cli, "manifest", wrapper, r.scratch }, r.scratch, true);
+    const facts = try std.json.parseFromSliceLeaky(std.json.Value, a, result.stdout, .{});
+    try std.testing.expectEqualStrings("9.1.0", facts.object.get("version").?.string);
+}
+
+fn rejectAliasedCliSource(r: Runner, cli: []const u8) !void {
+    const probe = try r.path(&.{ r.scratch, "A" });
+    try Dir.cwd().createDir(r.io, probe, .default_dir);
+    const alias = try r.path(&.{ r.scratch, "a" });
+    const aliases = if (Dir.cwd().createDir(r.io, alias, .default_dir)) false else |err| blk: {
+        if (err != error.PathAlreadyExists) return err;
+        break :blk true;
+    };
+    if (!aliases) return;
+    const repository = try r.path(&.{ r.scratch, "repository" });
+    _ = try r.run(&.{ "git", "init", "--quiet", repository }, r.scratch, true);
+    const ordinary = try r.path(&.{ repository, "ordinary" });
+    try r.write(ordinary, "source\n");
+    const blob = std.mem.trim(u8, (try r.run(&.{
+        "git", "hash-object", "-w", ordinary,
+    }, repository, true)).stdout, "\r\n");
+    for ([_][]const u8{ "test/A/one.txt", "test/a/two.txt" }) |path| {
+        _ = try r.run(&.{
+            "git",   "-c",          "core.ignorecase=false", "update-index",
+            "--add", "--cacheinfo", "100644",                blob,
+            path,
+        }, repository, true);
+    }
+    _ = try r.run(&.{
+        "git",
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+    }, repository, true);
+    const output = try r.path(&.{ r.scratch, "rejected-output" });
+    const result = try r.run(&.{
+        cli, "source", "/compiler-must-not-be-called", repository, output,
+    }, r.scratch, false);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "SourceNamespaceMismatch") != null);
+    inline for (.{ "source.tar", "source.json" }) |name| try std.testing.expectError(
+        error.FileNotFound,
+        Dir.cwd().statFile(r.io, try r.path(&.{ output, name }), .{}),
+    );
 }
