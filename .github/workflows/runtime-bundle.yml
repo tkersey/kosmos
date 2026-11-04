@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, specialization, source, source-second, portable, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, source, source-second, portable, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -64,6 +64,7 @@ jobs:
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-driver' && 'native' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
@@ -78,7 +79,7 @@ jobs:
           fi
           mkdir -p .zig-cache/tmp
       - name: Record native compiler and restored target identities
-        if: matrix.lane == 'native' || matrix.lane == 'source'
+        if: matrix.lane == 'native' || matrix.lane == 'native-driver' || matrix.lane == 'source'
         run: |
           builtin_target() {
             awk '
@@ -110,34 +111,34 @@ jobs:
             builtin_target < "$builtin_file"
           done
       - name: Compile native qualification and independently rebuild the core
-        if: matrix.lane == 'native'
+        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
         run: |
           nproc
           free -m
           vmstat -w 30 &
           observer=$!
           trap 'kill "$observer" 2>/dev/null || true' EXIT
-          /usr/bin/time -v zig build build-storage-check build-semantics-check \
-            build-zig17-check --cache-dir .zig-cache/native-owners \
-            -Doptimize=safe --summary all --verbose &
-          owners_pid=$!
-          /usr/bin/time -v zig build build-semantic-driver-check \
-            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all --verbose &
-          driver_pid=$!
-          compile_status=0
-          wait "$owners_pid" || compile_status=1
-          wait "$driver_pid" || compile_status=1
-          exit "$compile_status"
+          if [ "${{ matrix.lane }}" = native ]; then
+            /usr/bin/time -v zig build build-storage-check build-semantics-check \
+              build-zig17-check --cache-dir .zig-cache/native-owners \
+              -Doptimize=safe --summary all --verbose
+          else
+            /usr/bin/time -v zig build build-semantic-driver-check \
+              --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all --verbose
+          fi
       - name: Admit completed native compilation before execution
         id: native_cache_size
-        if: matrix.lane == 'native'
+        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
-          test -d .zig-cache/native-owners/o || exit 0
-          test -d .zig-cache/native-driver/o || exit 0
+          native_objects=.zig-cache-upload/native-owners/o
+          if [ "${{ matrix.lane }}" = native-driver ]; then
+            native_objects=.zig-cache-upload/native-driver/o
+          fi
+          test -d "${native_objects/.zig-cache-upload/.zig-cache}" || exit 0
           test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
-          test -n "$(find .zig-cache/native-owners/o .zig-cache/native-driver/o -type f -size +0c -print -quit)" || exit 0
+          test -n "$(find "${native_objects/.zig-cache-upload/.zig-cache}" -type f -size +0c -print -quit)" || exit 0
           bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
           test ! -e .zig-cache-upload
@@ -156,7 +157,7 @@ jobs:
           bytes=$(find .zig-cache-upload -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Upload snapshot: $bytes bytes"
           test "$bytes" -le 4294967296 || exit 0
-          test -n "$(find .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o -type f -size +0c -print -quit)" || exit 0
+          test -n "$(find "$native_objects" -type f -size +0c -print -quit)" || exit 0
           echo 'save=true' >> "$GITHUB_OUTPUT"
       - name: Retain completed native compilation before execution
         if: steps.native_cache_size.outputs.save == 'true'
@@ -166,12 +167,15 @@ jobs:
           path: .zig-cache-upload
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Check native owners and independently rebuild the core
-        if: matrix.lane == 'native'
+        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
         run: |
-          zig build check-storage check-semantics check-zig17 \
-            --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
-          zig build check-semantic-driver \
-            --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
+          if [ "${{ matrix.lane }}" = native ]; then
+            zig build check-storage check-semantics check-zig17 \
+              --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
+          else
+            zig build check-semantic-driver \
+              --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
+          fi
       - name: Check specialization and public receipt owners
         if: matrix.lane == 'specialization'
         run: >-
@@ -253,7 +257,7 @@ jobs:
           compression-level: 0
       - name: Admit complete bounded compiler cache
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane != 'native' }}
+        if: ${{ !cancelled() && matrix.lane != 'native' && matrix.lane != 'native-driver' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
