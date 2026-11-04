@@ -15,8 +15,8 @@ const Profile = struct {
 
 pub fn build(b: *std.Build) void {
     comptime {
-        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0"))
-            @compileError("Zig 0.17.0 is required");
+        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.1"))
+            @compileError("Zig 0.17.1 is required");
     }
     const options = configureOptions(b);
     const dependencies = configureDependencies(b, options) orelse return;

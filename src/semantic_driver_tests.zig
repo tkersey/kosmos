@@ -464,7 +464,7 @@ fn admissionOwnerBundle(
             .source = artifact.digest(image),
             .compiler = .{
                 .horos_package = "allocation-owner-fixture",
-                .zig = "0.17.0",
+                .zig = "0.17.1",
                 .policy = artifact.build_policy,
             },
             .requirements = .{

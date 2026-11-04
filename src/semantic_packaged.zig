@@ -3,16 +3,16 @@
 //! These fingerprints select that checked content; they are not derivation proof.
 const std = @import("std");
 pub const bytes = @embedFile("semantic-core.kar");
-pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU";
+pub const horos_package = "horos-8.0.0-flclaIItVgDcvEsGli63_QQ_OykDT6dVbRvtdijaJiyZ";
 pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
-pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
+pub const artifact_sha256 = "c5beb14f0f28a3fb4bf8a7f2839829fc99e7e4e3fee3ef06478f5697d56e665a";
 
 pub fn check(selected_horos: []const u8) !void {
     if (!std.mem.eql(u8, selected_horos, horos_package) or
         !std.mem.eql(
             u8,
             @import("builtin").zig_version_string,
-            "0.17.0",
+            "0.17.1",
         )) return error.PackagedCompilerMismatch;
     if (!std.mem.eql(u8, &std.fmt.bytesToHex(
         @import("semantic/source_identity.zig").digest(),

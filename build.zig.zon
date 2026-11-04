@@ -1,12 +1,12 @@
 .{
     .name = .kosmos,
     .version = "9.1.0",
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .fingerprint = 0xda7fbe49074dc2bd,
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#a541cbe0ebd142f35b4cecc0774aea983541f972",
-            .hash = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
+            .url = "git+https://github.com/tkersey/horos#fbbc83e6e5ad4c4f92081c811148ba9ee6b1e014",
+            .hash = "horos-8.0.0-flclaIItVgDcvEsGli63_QQ_OykDT6dVbRvtdijaJiyZ",
             .lazy = true,
         },
     },
