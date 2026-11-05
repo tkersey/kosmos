@@ -1,5 +1,5 @@
 {
-  "zig": "0.17.0",
+  "zig": "0.17.1",
   "target": "wasm32-freestanding",
   "hostMode": "safe",
   "kernelMode": "small",

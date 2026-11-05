@@ -111,7 +111,7 @@ and remains required, with an independent 10-minute job timeout.
 
 ## Run the full-source gate
 
-From a clean source checkout with Git 2.43+, Bash and Zig 0.17.0 available, commit the
+From a clean source checkout with Git 2.43+, Bash and Zig 0.17.1 available, commit the
 candidate and run:
 
 ```sh

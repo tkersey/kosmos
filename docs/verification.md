@@ -138,7 +138,8 @@ for each identical immutable command. It awaits both before the next observation
 retaining every restore, transfer checkpoint, byte comparison and source assertion.
 
 CI runs session behavior, session ownership/failure, source regression, native
-semantic, specialization/publication, two source-agreement and portable groups independently; their union is
+owners, native semantic driver, specialization/publication, two source-agreement
+and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
 86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and
 the anonymous import sentinel. Standalone test executables show each case and
@@ -155,9 +156,11 @@ ABI fixture peer. Compiler caches may reuse content across dependency-lock chang
 Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
-The native lane compiles its existing test artifacts and independently rebuilt
-core before retaining the bounded compiler cache. It then executes the original
-check roots, so a later test timeout does not discard completed compilation.
+The native owners and semantic-driver lanes compile on separate native runners
+before retaining their bounded compiler caches. The driver lane independently
+rebuilds the core. Each then executes its original check roots, so neither lane
+waits for the other's compilation or tests, and a later test timeout does not
+discard completed compilation.
 The Zig installation uses a stable tool-cache path because dependency extraction
 includes `PATH` in its input identity. Neither cache restoration nor successful
 compilation substitutes for completed tests.
