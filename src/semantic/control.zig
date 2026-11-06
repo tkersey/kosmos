@@ -14,6 +14,7 @@ const field = edges.field;
 
 pub const Definition = struct {
     execute: Id,
+    execute_at: Id,
     jump: Id,
     capture: Id,
     enter: Id,
@@ -90,7 +91,8 @@ pub fn define(b: *source.Builder, m: machines.Definition) Error!Definition {
     try emitEnter(m, e, edge, ref_type, control_type, node_type, d);
     try emitResumeContinuation(m, e, edge, maybe_value, control_type, edge_type, d);
     try emitReturnTo(m, e, graph, ref_type, node_type, d);
-    try emitExecute(m, e, edge, aggregate, graph, value, maybe_value, d, handlers);
+    inline for (.{ false, true }) |selected|
+        try emitExecute(m, e, edge, aggregate, graph, value, maybe_value, d, handlers, selected);
     try @import("unwind.zig").emit(b, m, d.unwind, d);
     return cache.finish(b, d);
 }
@@ -356,6 +358,9 @@ fn defineD(
     return .{
         .unwind = try @import("unwind.zig").declare(e.b, m),
         .execute = try e.b.declare(&.{m.schema}, m.schema, &.{}, &.{}),
+        .execute_at = try e.b.declare(&.{
+            m.schema, try projection.schema(ir.Terminator, e.b),
+        }, m.schema, &.{}, &.{}),
         .jump = try e.b.declare(&.{
             m.schema, ref_type, control_type, m.frames.schema, edge_type, maybe_value,
         }, m.schema, &.{}, &.{}),
@@ -794,16 +799,22 @@ fn emitExecute(
     maybe_value: Id,
     d: Definition,
     handlers: anytype,
+    comptime descriptor: bool,
 ) Error!void {
-    const input = try e.param(d.execute, 0);
+    const function = if (descriptor) d.execute_at else d.execute;
+    const input = try e.param(function, 0);
     const current = try e.payload(try field(e, try roots(e, m, input), g.Roots, "current"), 1);
     const found = try e.b.variable(m.nodes.optional);
     const selected = try e.payload(try e.b.reference(found), 1);
     const control = try e.payload(try e.field(selected, 0), 0);
     const frame = try e.payload(try e.field(selected, 1), 1);
     const program = try m.field(e, input, .program);
-    const target = try edges.block(e, program, try e.field(control, 0));
-    const term = try field(e, target, ir.Block, "terminator");
+    const term = if (descriptor) try e.param(function, 1) else try field(
+        e,
+        try edges.block(e, program, try e.field(control, 0)),
+        ir.Block,
+        "terminator",
+    );
     const term_type = try projection.schema(ir.Terminator, e.b);
     const variants = e.b.schemas.items[@intCast(term_type)].sum;
     const info = @typeInfo(ir.Terminator).@"union";
@@ -833,7 +844,7 @@ fn emitExecute(
         }, operation, T, tag);
         cases[i] = .{ .variable = variable, .body = body };
     }
-    try e.b.define(d.execute, try e.b.bind(found, try e.call(m.nodes.get, &.{
+    try e.b.define(function, try e.b.bind(found, try e.call(m.nodes.get, &.{
         try m.field(e, input, .nodes), try e.field(current, 0),
     }), try e.b.term(.{
         .match_sum = .{ .value = term, .cases = &cases },

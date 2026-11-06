@@ -578,6 +578,521 @@ fn measureScalarPacking(
     return error.UnfinishedTest;
 }
 
+const ControlWork = struct {
+    base_steps: usize = 0,
+    entries: usize = 0,
+    lookups: usize = 0,
+    selections: usize = 0,
+};
+
+const ControlWitness = enum { loop, reader, limited_loop };
+
+const ControlRoute = struct {
+    functions: []const bool,
+    blocks: data.program.Id,
+    terminator: data.program.Id,
+};
+
+fn controlRoute(
+    compiled: *const source.Compiled,
+    functions: []const bool,
+    machine: data.program.Id,
+) !ControlRoute {
+    const schemas = compiled.program.schemas;
+    for (compiled.parameters) |binding| {
+        if (binding.source_schema != machine) continue;
+        const fields = schemas[@intCast(binding.schema)].product;
+        const projected = schemas[@intCast(fields[@backingInt(machines.Field.program)])].product;
+        const code_id = projected[machines.index(projection.Program, "code")];
+        const code = schemas[@intCast(code_id)].product;
+        const blocks = code[machines.index(data.activation.Program, "blocks")];
+        const block = schemas[@intCast(schemas[@intCast(blocks)].seq)].product;
+        return .{
+            .functions = functions,
+            .blocks = blocks,
+            .terminator = block[machines.index(data.activation.Block, "terminator")],
+        };
+    }
+    return error.MissingControlSchema;
+}
+
+test "terminator descriptor work follows the executed specialized control route" {
+    const image = try loopImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const program = try projection.programBytes(a, guest);
+    defer a.free(program);
+    for ([_]bool{ false, true }) |staged| {
+        try checkControlWork(image, guest, program, staged, .loop);
+    }
+    try checkControlWork(image, guest, program, true, .limited_loop);
+}
+
+fn expectRootSpecializationLimit(module: source.Module, request: source.specialize.Request) !void {
+    var limited = request;
+    limited.policy.work = 1;
+    try std.testing.expectError(error.SpecializationLimit, source.specialize.specialize(
+        a,
+        module,
+        limited,
+    ));
+}
+
+fn checkControlWork(
+    image: []const u8,
+    guest: *const data.program_image.Admitted,
+    program: []const u8,
+    staged: bool,
+    witness: ControlWitness,
+) !void {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const d = if (staged) try service.defineStaged(&b) else try service.define(&b);
+    const m = try machines.define(&b);
+    const controls = try @import("semantic/control.zig").define(&b, m);
+    const module = b.module(d.entry, try b.scalar(void));
+    const keys: usize = if (witness == .limited_loop) 1 else 128;
+    const request: source.specialize.Request = .{
+        .function = d.entry,
+        .arguments = &.{ .{ .known = .{ .schema = m.program, .bytes = program } }, .dynamic },
+        .context = context(guest.identity()),
+        .policy = .{ .work = 8_000_000, .keys_per_function = keys, .depth = 1024 },
+    };
+    if (staged) try expectRootSpecializationLimit(module, request);
+    var specialized: ?source.specialize.Output = if (staged)
+        try source.specialize.specialize(a, module, request)
+    else
+        null;
+    defer if (specialized) |*output| output.deinit();
+    if (specialized) |*output| try source.specialize.validate(a, module, request, output);
+    var compiled = try source.lowerObserved(
+        a,
+        if (specialized) |*output| output.module() else module,
+        .{ .recovery = true },
+    );
+    defer compiled.deinit();
+    var prepared = try prepareCompiled(&compiled);
+    defer prepared.deinit();
+    const functions = try scalarEncoders(
+        &compiled,
+        if (specialized) |*output| output else null,
+        controls.execute,
+    );
+    defer a.free(functions);
+    if (specialized) |*output| {
+        const selected = try scalarEncoders(&compiled, output, controls.execute_at);
+        defer a.free(selected);
+        for (functions, selected) |*include, known| include.* = include.* or known;
+        if (witness != .limited_loop)
+            try expectKnownTerminators(output, controls.execute_at, guest);
+        if (witness == .loop) try expectWrongTerminatorRejected(output, controls.execute_at);
+    }
+    const route = try controlRoute(&compiled, functions, m.schema);
+    const inputs: []const [2]u64 = switch (witness) {
+        .loop, .limited_loop => &.{ .{ 0, 91 }, .{ 1, 12 }, .{ 4, 91 }, .{ 4, 12 } },
+        .reader => &.{ .{ 10, 100 }, .{ 7, 900 }, .{ 100, 10 } },
+    };
+    for (inputs) |input| {
+        const work = switch (witness) {
+            .loop, .limited_loop => try runControlWork(
+                &prepared,
+                image,
+                program,
+                staged,
+                route,
+                input,
+            ),
+            .reader => try runReaderWork(&prepared, image, program, staged, route, input),
+        };
+        try expectControlWork(work, staged, input, witness == .limited_loop);
+    }
+}
+
+fn expectControlWork(work: ControlWork, staged: bool, input: [2]u64, limited: bool) !void {
+    std.debug.print(
+        "control work: staged={any}, input={any}, limited={any}, base={d}, entries={d}, " ++
+            "lookups={d}, selections={d}\n",
+        .{ staged, input, limited, work.base_steps, work.entries, work.lookups, work.selections },
+    );
+    try std.testing.expect(work.entries > 0);
+    if (limited) {
+        try std.testing.expect(work.selections > 0);
+    } else if (staged) {
+        try std.testing.expectEqual(@as(usize, 0), work.lookups);
+        try std.testing.expectEqual(@as(usize, 0), work.selections);
+    } else {
+        try std.testing.expect(work.lookups > 0 and work.selections > 0);
+    }
+}
+
+fn nestedReaderImage() ![]u8 {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const e = try Author.init(&b);
+    const effect = try b.effect(.{
+        .identity = "terminator/reader",
+        .payload = e.unit,
+        .result = e.integer,
+        .external = false,
+    });
+    const capability = try b.schema(.{ .internal = .{ .capability = effect } });
+    const handler = try defineReaderHandler(e, effect, capability);
+    const entry = try b.declare(&.{ e.integer, e.integer }, e.integer, &.{effect}, &.{});
+    const outer = try b.declare(&.{capability}, e.integer, &.{effect}, &.{});
+    const inner = try b.declare(&.{capability}, e.integer, &.{effect}, &.{});
+    const read_outer = try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try e.param(outer, 0),
+        .payload = try e.literal(void, {}),
+    } });
+    try b.define(inner, try b.term(.{ .yield_then = read_outer }));
+    const inner_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{capability},
+        .result = e.integer,
+        .effects = &.{effect},
+        .capture_bound = &.{capability},
+    } } });
+    try b.define(outer, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = try b.lambda(inner, inner_type),
+        .state = &.{try e.param(entry, 1)},
+    } }));
+    const outer_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{capability},
+        .result = e.integer,
+        .effects = &.{effect},
+        .capture_bound = &.{e.integer},
+    } } });
+    try b.define(entry, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = try b.lambda(outer, outer_type),
+        .state = &.{try e.param(entry, 0)},
+    } }));
+    return support.encode(b.module(entry, e.unit));
+}
+
+fn defineReaderHandler(
+    e: Author,
+    effect: data.program.Id,
+    capability: data.program.Id,
+) !data.program.Id {
+    const token = try e.b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = e.integer,
+        .answer = e.integer,
+        .handled = &.{effect},
+        .effects = &.{effect},
+        .capture_bound = &.{ e.unit, e.integer, capability },
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const returns = try e.b.declare(&.{ e.integer, e.integer }, e.integer, &.{}, &.{});
+    try e.b.define(returns, try e.b.pure(try e.param(returns, 1)));
+    const clause = try e.b.declare(&.{ e.integer, e.unit, token }, e.integer, &.{effect}, &.{});
+    try e.b.define(clause, try e.b.term(.{ .resume_value = .{
+        .resumption = try e.param(clause, 2),
+        .argument = try e.param(clause, 0),
+    } }));
+    return e.b.handler(.{
+        .mode = .deep,
+        .input = e.integer,
+        .answer = e.integer,
+        .state = &.{e.integer},
+        .effects = &.{effect},
+        .return_function = returns,
+        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
+    });
+}
+
+test "nested installations read the retained outer capability after yield and restore" {
+    const image = try nestedReaderImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    try std.testing.expectEqual(@as(usize, 1), guest.program().handlers.len);
+    const program = try projection.programBytes(a, guest);
+    defer a.free(program);
+    for ([_]bool{ false, true }) |staged|
+        try checkControlWork(image, guest, program, staged, .reader);
+}
+
+fn restoreReaderYield(
+    session: *base.Session,
+    live: *bool,
+    prepared: *const base.Prepared,
+) !void {
+    const bytes = try session.checkpoint(a);
+    defer a.free(bytes);
+    const expected = try a.dupe(u8, bytes);
+    defer a.free(expected);
+    const owner = try prepared.acquire();
+    defer owner.release();
+    session.deinit();
+    live.* = false;
+    session.* = try base.Session.restore(a, prepared, bytes, .{
+        .effects = owner.admitted().program().effects,
+    });
+    live.* = true;
+    @memset(bytes, 0xa5);
+    const actual = try session.checkpoint(a);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+fn expectReaderProjection(session: *base.Session, reference: *native.Session) !void {
+    const expected = try reference.checkpoint(a);
+    defer a.free(expected);
+    try support.send(session, .project);
+    var projected = try support.event(session);
+    defer projected.deinit();
+    try std.testing.expect(projected.value == .projection);
+    var canonical = try data.state_image.canonicalize(a, projected.value.projection);
+    defer canonical.deinit();
+    if (canonical.state.status == .yielded) {
+        var installations: usize = 0;
+        for (canonical.state.nodes) |node| {
+            if (node.record != .handler) continue;
+            try std.testing.expectEqual(@as(u64, 0), node.record.handler.definition);
+            installations += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), installations);
+    }
+    const actual = try data.state_image.emit(a, canonical.state);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+fn advanceReaderReference(reference: *native.Session, status: data.process_state.Status) !u64 {
+    for (0..100) |index| {
+        const outcome = try reference.run(1);
+        if (outcome == .progressed) continue;
+        try std.testing.expect(if (status == .completed)
+            outcome == .completed
+        else
+            outcome == .yielded);
+        return @intCast(index + 1);
+    }
+    return error.UnfinishedTest;
+}
+
+fn runReaderWork(
+    prepared: *const base.Prepared,
+    image: []const u8,
+    program: []const u8,
+    staged: bool,
+    route: ControlRoute,
+    input: [2]u64,
+) !ControlWork {
+    const owner = try prepared.acquire();
+    defer owner.release();
+    const initial = try projection.encode(service.Initial, a, .{
+        .arguments = &std.mem.toBytes(input),
+    });
+    defer a.free(initial);
+    const arguments = if (staged) try a.dupe(u8, initial) else try std.mem.concat(a, u8, &.{
+        program, initial,
+    });
+    defer a.free(arguments);
+    var session = try base.Session.start(a, prepared, arguments, .{
+        .effects = owner.admitted().program().effects,
+    });
+    var live = true;
+    defer if (live) session.deinit();
+    var initialized = try support.event(&session);
+    initialized.deinit();
+    var reference = try native.Session.initImage(a, image, &std.mem.toBytes(input));
+    defer reference.deinit();
+    var total: ControlWork = .{};
+    for ([_]bool{ false, true }) |resumed| {
+        try support.send(&session, .{ .advance = .{
+            .control = if (resumed) .resume_yield else .none,
+            .quantum = 100,
+        } });
+        const work = try measureControlWork(&session, route);
+        total.base_steps += work.base_steps;
+        total.entries += work.entries;
+        total.lookups += work.lookups;
+        total.selections += work.selections;
+        var cut = try support.event(&session);
+        defer cut.deinit();
+        const status: data.process_state.Status = if (resumed) .completed else .yielded;
+        try std.testing.expectEqual(status, cut.value.cut.status);
+        if (resumed) try reference.resumeYield();
+        const guest_work = try advanceReaderReference(&reference, status);
+        try std.testing.expectEqual(guest_work, cut.value.cut.guest_work);
+        try expectReaderProjection(&session, &reference);
+        if (!resumed) try restoreReaderYield(&session, &live, prepared);
+    }
+    try support.send(&session, .observe);
+    var observed = try support.event(&session);
+    defer observed.deinit();
+    try std.testing.expect(observed.value == .observation);
+    try std.testing.expect(observed.value.observation == .completed);
+    try std.testing.expectEqualSlices(
+        u8,
+        &std.mem.toBytes(input[0]),
+        observed.value.observation.completed,
+    );
+    return total;
+}
+
+fn expectKnownTerminators(
+    output: *source.specialize.Output,
+    execute_at: data.program.Id,
+    guest: *const data.program_image.Admitted,
+) !void {
+    var known: usize = 0;
+    for (output.functions.items) |function| {
+        if (function.before != execute_at or function.arguments[1] != .known) continue;
+        try std.testing.expect(function.arguments[0] != .known);
+        const descriptor = function.arguments[1].known;
+        var matched = false;
+        for (guest.program().blocks) |block| {
+            const bytes = try projection.encode(data.activation.Terminator, a, block.terminator);
+            defer a.free(bytes);
+            matched = matched or std.mem.eql(u8, bytes, descriptor.bytes);
+        }
+        try std.testing.expect(matched);
+        known += 1;
+    }
+    try std.testing.expect(known >= 3);
+}
+
+fn expectWrongTerminatorRejected(
+    output: *source.specialize.Output,
+    execute_at: data.program.Id,
+) !void {
+    for (output.functions.items) |*function| {
+        if (function.before != execute_at or function.arguments[1] != .known) continue;
+        var descriptor = try projection.decode(
+            data.activation.Terminator,
+            a,
+            function.arguments[1].known.bytes,
+        );
+        defer descriptor.deinit();
+        if (descriptor.value != .branch) continue;
+        const branch = &descriptor.value.branch;
+        try std.testing.expect(branch.when_true.block != branch.when_false.block);
+        std.mem.swap(data.activation.Edge, &branch.when_true, &branch.when_false);
+        const bytes = try projection.encode(data.activation.Terminator, a, descriptor.value);
+        defer a.free(bytes);
+        const original = function.arguments;
+        const changed = try a.dupe(source.specialize.Knowledge, original);
+        defer a.free(changed);
+        changed[1].known.bytes = bytes;
+        function.arguments = changed;
+        defer function.arguments = original;
+        try std.testing.expectError(error.InvalidSpecialization, source.specialize.validate(
+            a,
+            output.original,
+            output.request,
+            output,
+        ));
+        return;
+    }
+    return error.MissingBranchDescriptor;
+}
+
+fn runControlWork(
+    prepared: *const base.Prepared,
+    image: []const u8,
+    program: []const u8,
+    staged: bool,
+    route: ControlRoute,
+    input: [2]u64,
+) !ControlWork {
+    const owner = try prepared.acquire();
+    defer owner.release();
+    const initial = try projection.encode(service.Initial, a, .{
+        .arguments = &std.mem.toBytes(input),
+    });
+    defer a.free(initial);
+    const arguments = if (staged) try a.dupe(u8, initial) else try std.mem.concat(a, u8, &.{
+        program, initial,
+    });
+    defer a.free(arguments);
+    var session = try base.Session.start(a, prepared, arguments, .{
+        .effects = owner.admitted().program().effects,
+    });
+    defer session.deinit();
+    var first = try support.event(&session);
+    defer first.deinit();
+    try support.send(&session, .{ .advance = .{ .control = .none, .quantum = 100 } });
+    const work = try measureControlWork(&session, route);
+    var cut = try support.event(&session);
+    defer cut.deinit();
+    try std.testing.expect(cut.value == .cut and cut.value.cut.status == .completed);
+    var reference = try native.Session.initImage(a, image, &std.mem.toBytes(input));
+    defer reference.deinit();
+    var guest_work: u64 = 0;
+    for (0..100) |_| {
+        guest_work += 1;
+        const outcome = try reference.run(1);
+        if (outcome == .completed) break;
+        try std.testing.expect(outcome == .progressed);
+    } else return error.UnfinishedTest;
+    try std.testing.expectEqual(guest_work, cut.value.cut.guest_work);
+    const expected = try reference.checkpoint(a);
+    defer a.free(expected);
+    try support.send(&session, .project);
+    var projected = try support.event(&session);
+    defer projected.deinit();
+    try std.testing.expect(projected.value == .projection);
+    var canonical = try data.state_image.canonicalize(a, projected.value.projection);
+    defer canonical.deinit();
+    const actual = try data.state_image.emit(a, canonical.state);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+    try expectLoopObservation(&session, input);
+    return work;
+}
+
+fn expectLoopObservation(session: *base.Session, input: [2]u64) !void {
+    var expected = input[1];
+    for (1..input[0] + 1) |count| expected ^= count;
+    try support.send(session, .observe);
+    var observed = try support.event(session);
+    defer observed.deinit();
+    try std.testing.expect(observed.value == .observation and
+        observed.value.observation == .completed);
+    try std.testing.expectEqualSlices(
+        u8,
+        &std.mem.toBytes(expected),
+        observed.value.observation.completed,
+    );
+}
+
+fn measureControlWork(session: *base.Session, route: ControlRoute) !ControlWork {
+    var work: ControlWork = .{};
+    for (0..8_000_000) |_| {
+        if (session.status != .active or session.terminal != null) return work;
+        const current = session.roots.current.?;
+        const control = (try session.store.get(current)).control;
+        const frame = try session.frames.get(current.id);
+        const block = session.program.blocks[@intCast(control.block)];
+        if (route.functions[@intCast(block.function)]) {
+            const function = session.program.functions[@intCast(block.function)];
+            if (control.block == session.program.functions[@intCast(block.function)].entry and
+                frame.position == 0) work.entries += 1;
+            if (frame.position < block.instructions.len) {
+                const instruction = block.instructions[@intCast(frame.position)];
+                if (instruction.opcode == .sequence_get) {
+                    const operand = instruction.operands[0];
+                    if (function.layout.slots[@intCast(operand)] == route.blocks) work.lookups += 1;
+                }
+            } else if (block.terminator == .switch_variant) {
+                const value = block.terminator.switch_variant.value;
+                if (function.layout.slots[@intCast(value)] == route.terminator)
+                    work.selections += 1;
+            }
+        }
+        try session.step();
+        work.base_steps += 1;
+    }
+    return error.UnfinishedTest;
+}
+
 fn expectScalarCheckpoint(
     session: *base.Session,
     admitted: *const data.program_image.Admitted,

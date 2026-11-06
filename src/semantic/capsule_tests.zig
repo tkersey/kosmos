@@ -680,6 +680,173 @@ test "advance and finish retain recovery at every bounded cut" {
     }
 }
 
+fn terminatorOnlyGuest() ![]u8 {
+    const program: data.activation.Program = .{
+        .roots = .{ .entry = 0, .result = 1, .failure = 0 },
+        .schemas = &.{ .unit, .u64 },
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{1} },
+            .result = 1,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }},
+    };
+    const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+    errdefer a.free(image);
+    _ = try data.program_image.encode(a, program, image);
+    return image;
+}
+
+fn restoreTerminatorCut(
+    owner: *driver.Driver,
+    live: *bool,
+    prepared: *base.Prepared,
+    selected: *artifact.Admitted,
+) !void {
+    try std.testing.expectError(error.GuestCutUnavailable, owner.checkpoint(a));
+    const inspected = try @import("realization.zig").inspect(
+        a,
+        &owner.outer,
+        owner.selected,
+        owner.guest.admitted(),
+    );
+    try std.testing.expect(inspected.committed > 0);
+    const provenance: capsule.Provenance = .{
+        .execution = @splat(71),
+        .custody = @splat(81),
+        .publication = null,
+    };
+    const bytes = try capsule.publish(a, owner, .outer_execution, provenance);
+    defer a.free(bytes);
+    const before = try owner.outer.checkpoint(a);
+    defer a.free(before);
+    const cut = owner.last_cut.?;
+    const revision = owner.revision;
+    const guest_revision = owner.guest_revision;
+    var custody: Custody = .{
+        .expected = capsule.reference(bytes),
+        .execution = provenance.execution,
+    };
+    owner.deinit();
+    live.* = false;
+    owner.* = try capsule.restore(a, prepared, selected, bytes, custody.verifier());
+    live.* = true;
+    @memset(bytes, 0xa5);
+    try std.testing.expect(custody.consumed);
+    const after = try owner.outer.checkpoint(a);
+    defer a.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqual(driver.Operation.advance, owner.operation.?);
+    try std.testing.expectEqual(revision, owner.revision);
+    try std.testing.expectEqual(guest_revision, owner.guest_revision);
+    try std.testing.expectEqualDeep(cut, owner.last_cut.?);
+}
+
+fn completeTerminatorCuts(
+    owner: *driver.Driver,
+    live: *bool,
+    prepared: *base.Prepared,
+    selected: *artifact.Admitted,
+) !void {
+    var cuts: usize = 0;
+    for (0..10_000) |_| {
+        var result = try owner.pump(1);
+        defer result.deinit();
+        if (result == .event) {
+            try std.testing.expect(result.event.value == .cut);
+            try std.testing.expectEqual(.completed, result.event.value.cut.status);
+            try std.testing.expectEqual(@as(u64, 1), result.event.value.cut.guest_work);
+            try std.testing.expect(cuts > 0);
+            std.debug.print("terminator capsule staged={any} cuts={d}\n", .{
+                selected.content.value.guest != null, cuts,
+            });
+            return;
+        }
+        try std.testing.expect(result == .suspended);
+        try restoreTerminatorCut(owner, live, prepared, selected);
+        cuts += 1;
+    }
+    return error.PumpBoundExhausted;
+}
+
+fn checkTerminatorCapsules(
+    selected: *artifact.Admitted,
+    prepared: *base.Prepared,
+    image: []const u8,
+) !void {
+    const input = std.mem.toBytes(@as(u64, 0xfedcba9876543210));
+    var reference = try driver.Driver.start(a, prepared, selected, .{ .arguments = &input });
+    defer reference.deinit();
+    var initialized = try reference.pump(null);
+    initialized.deinit();
+    var advanced = try reference.exchange(.{ .advance = .{ .control = .none, .quantum = 1 } });
+    defer advanced.deinit();
+    try std.testing.expectEqual(.completed, advanced.value.cut.status);
+    try std.testing.expectEqual(@as(u64, 1), advanced.value.cut.guest_work);
+    const expected_outer = try reference.outer.checkpoint(a);
+    defer a.free(expected_outer);
+    const expected = try reference.checkpoint(a);
+    defer a.free(expected);
+    var oracle = try @import("native_baseline").Session.initImage(a, image, &input);
+    defer oracle.deinit();
+    const outcome = try oracle.run(1);
+    try std.testing.expect(outcome == .completed);
+    try std.testing.expectEqualSlices(u8, &input, try oracle.bytes(&outcome.completed));
+    const canonical = try oracle.checkpoint(a);
+    defer a.free(canonical);
+    try std.testing.expectEqualSlices(u8, canonical, expected);
+    var owner = try driver.Driver.start(a, prepared, selected, .{ .arguments = &input });
+    var live = true;
+    defer if (live) owner.deinit();
+    var initial = try owner.pump(null);
+    initial.deinit();
+    try owner.submit(.{ .advance = .{ .control = .none, .quantum = 1 } });
+    try completeTerminatorCuts(&owner, &live, prepared, selected);
+    const actual_outer = try owner.outer.checkpoint(a);
+    defer a.free(actual_outer);
+    try std.testing.expectEqualSlices(u8, expected_outer, actual_outer);
+    const actual = try owner.checkpoint(a);
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
+    try std.testing.expectEqual(@as(u64, 1), owner.guest_revision);
+    var expected_event = try reference.exchange(.observe);
+    defer expected_event.deinit();
+    var actual_event = try owner.exchange(.observe);
+    defer actual_event.deinit();
+    try std.testing.expectEqualDeep(expected_event.value, actual_event.value);
+    try std.testing.expect(actual_event.value == .observation);
+    try std.testing.expect(actual_event.value.observation == .completed);
+    try std.testing.expectEqualSlices(u8, &input, actual_event.value.observation.completed);
+}
+
+test "terminator execution restores every base cut through complete generic and staged guests" {
+    const retained = @import("packaged_runtime").bytes;
+    var generic = try artifact.Admitted.init(a, retained, artifact.digest(retained));
+    defer generic.deinit();
+    const image = try terminatorOnlyGuest();
+    defer a.free(image);
+    var prepared = try base.Prepared.init(a, image);
+    defer prepared.deinit();
+    const guest = try prepared.acquire();
+    defer guest.release();
+    const bytes = try @import("compiler.zig").compile(a, .{
+        .horos_package = generic.content.value.manifest.compiler.horos_package,
+        .guest = guest.admitted(),
+    });
+    defer a.free(bytes);
+    var specialized = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer specialized.deinit();
+    for ([_]*artifact.Admitted{ &generic, &specialized }) |selected|
+        try checkTerminatorCapsules(selected, &prepared, image);
+}
+
 test "outer capsule retains clone microprogress and requires exact consumed custody" {
     var generic = try artifact.Admitted.init(
         a,

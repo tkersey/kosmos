@@ -429,3 +429,134 @@ an existing captured view, without an additional production optimization claim.
 
 Raw output: `kosmos-replay-diagnostics-gpa.jsonl`, 460 records, SHA-256
 `e1ea86917cbeb71485fd6bd73c2c0952cd486dcaa26ade6c1869d708dbfc8074`.
+
+## Known terminator dispatch (November 6, 2026)
+
+The staged block leaf now passes the selected block's complete terminator to
+`step.control_at`. Both control entrances use the same source emitter and
+operation rules. The generic entrance retains its original discovery sequence;
+the selected entrance reads dynamic frame values and capabilities normally.
+No extra runtime worker, handler-instance cache or changed specialization policy
+is involved. The original generic base-transition counts below are unchanged.
+
+The comparison retains Kosmos `afde6a77eab528d2adf4b6692f766c38e745e158` as the
+old production source. Both checkouts use Horos
+`fbbc83e6e5ad4c4f92081c811148ba9ee6b1e014`, package
+`horos-8.0.0-flclaIItVgDcvEsGli63_QQ_OykDT6dVbRvtdijaJiyZ`, Zig 0.17.1,
+`safe`, native aarch64 macOS on Apple M2 Pro, Darwin 27.3.0. The revised source
+digest is `5b6b77d09e2085b664710f1316855b13b7e89e5f05894995d80cba0a7c2a2f49`;
+its regenerated generic artifact is 276,698 bytes, digest
+`1760759ab06ccc7ce8a1ef9d4a7c47dd19829ed91680289151a9bc438fee255f`.
+The preceding generic artifact was 276,094 bytes. The PR identifies the final
+qualified commit; test and documentation edits do not change this source digest.
+
+### Executed descriptor work
+
+The focused observer follows source-function derivation and lowering into the
+actual executing control function. It counts only block-table accesses and
+terminator-union selections using their lowered schemas. Dynamic condition-byte
+reads and handler-instance resolution remain necessary and are excluded.
+For loop inputs `(0,91)`, `(1,12)`, `(4,91)` and `(4,12)`, revised generic
+execution and the previous specialized execution perform respectively 3, 5, 11
+and 11 descriptor lookups and selections; the revised specialized route performs
+zero of each. Its base transitions are
+5,781 / 11,400 / 28,257 / 28,257, compared with the previous specialized
+5,890 / 11,611 / 28,774 / 28,774. The tests preserve complete canonical native
+observations, guest work and directly specified XOR results.
+
+A nested Reader witness installs the same descriptor twice with dynamic values
+`(10,100)`, `(7,900)` and `(100,10)`. After yielding under the inner installation,
+it reads the retained outer capability and returns 10, 7 and 100. Both entrances
+match the independent native evaluator before and after restoration. Generic
+execution performs 10 descriptor lookups and selections; specialized execution
+performs zero, compared with 10 of each in the previous specialized execution.
+Specialized base work falls from 21,812 to 21,683. This witness establishes
+receiver identity and descriptor removal,
+not a speedup over generic execution: its base work is 19,090 generic versus
+21,683 specialized. A one-key-per-function policy retains executed tag selections
+while preserving observations; a root work budget of one rejects specialization.
+A well-formed carried branch-descriptor mutation fails independent validation.
+
+### Matched execution samples
+
+The existing benchmark ran three repetitions for each of three input samples,
+with identical guest bytes, inputs and observation schedules in both checkouts.
+Execution medians below exclude construction, validation, preparation and restore.
+The loop has 16/32/48 iterations and accumulators 41/60/79. Its 134-byte guest
+has identity `e4a797218ba4aeafbc5600d7251eeb73b60b4b3eb8c6d4ead5d4197658466365`.
+The 536-byte handler guest uses `source.examples.installations(b, 12)`, identity
+`62a5a7fa7f52ba276ea523b4a89a29cc249bd25f34003a13b0879f147882d2ef`; its three
+samples have identical inputs, so its timing is the median of all nine runs.
+
+| Workload | Guest work, all subjects | Generic base work, old = new | Specialized base work, old → new | Generic execution ms, old → new | Specialized execution ms, old → new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| loop 16 | 117 | 114885 | 99454 → 97713 | 25.958 → 25.662 | 23.075 → 21.660 |
+| loop 32 | 229 | 226491 | 195550 → 192177 | 50.912 → 50.229 | 45.110 → 42.944 |
+| loop 48 | 341 | 338367 | 291933 → 286928 | 75.573 → 75.379 | 67.141 → 64.285 |
+| 12 installations | 110 | 168357 | 163079 → 162438 | 37.023 → 37.015 | 37.943 → 37.644 |
+
+The incremental work reduction is about 1.7% for the loop and 0.4% for the
+handler workload. The handler specialization remains slower than generic in
+these samples. Neither compilation nor these measurements authorize adoption
+of a runtime or replacement of saved tasks.
+
+### Construction, space and recovery
+
+Construction and independent validation each have one timed observation per
+workload and revision. Sizes and key counts describe actual validated artifacts.
+
+| Specialized measure | Loop, old → new | Handlers, old → new |
+| --- | ---: | ---: |
+| Construction ms | 6071.939 → 6000.544 | 6382.899 → 6786.657 |
+| Independent validation ms | 3595.019 → 3567.409 | 3720.185 → 3785.221 |
+| Executable bytes | 3418082 → 3431550 | 3587281 → 3618762 |
+| Complete artifact bytes | 18921366 → 19043028 | 25372475 → 26128805 |
+| Derivation proof bytes | 15376030 → 15484224 | 21657924 → 22382773 |
+| Specialization keys | 5066 → 5137 | 5898 → 6095 |
+| Maximum keys per function | 128 → 128 | 128 → 128 |
+| Residual generic call terms | 101 → 101 | 102 → 102 |
+| Construction peak requested bytes | 10254997718 → 10175394400 | 10793985211 → 9992722415 |
+| Maximum execution retained bytes | 81034 → 77988 | 219487 → 275192 |
+| Maximum execution peak bytes | 273981 → 274070 | 1053883 → 1131008 |
+| Maximum guest checkpoint bytes | 93 → 93 | 79 → 79 |
+| Maximum outer checkpoint bytes | 1910 → 1910 | 6986 → 6986 |
+| Artifact admission ms | 258.938 → 257.349 | 270.894 → 272.508 |
+| Specialized preparation ms | 0.010875 → 0.010041 | 0.115375 → 0.114875 |
+| Generic preparation ms | 0.011584 → 0.012208 | 0.120417 → 0.119209 |
+| Median specialized guest restore ms | 0.566 → 0.569 | 0.665 → 0.671 |
+| Median specialized outer restore ms | 3.613 → 3.743 | 4.132 → 4.303 |
+
+The unchanged policy is 8,000,000 work, 128 keys per function and depth 1,024.
+Only leaf call proof records with no specialized callee are counted; folded
+branch aliases are excluded. These are structural conservative calls, not an
+executed fallback count or proof that every such call exhausted a key budget.
+The shape row is computed outside construction timing. The observer runs are
+separate from these execution timings. Existing generic-base memory maxima
+remain 109,463 retained / 343,605 peak bytes for the loop and 389,648 / 1,448,378
+for handlers. Generic outer checkpoint maxima remain 2,865 and 13,097 bytes.
+Generic construction / validation in the loop invocation measured
+301.871 / 203.982 ms before and 304.404 / 201.457 ms after.
+Generic construction / validation in the handler invocation measured
+288.548 / 199.950 ms before and 289.179 / 200.624 ms after.
+Each memory domain has its own lifetime; construction and execution peaks
+must not be summed.
+
+The conditional amortization criterion is
+`N * (old specialized execution - new specialized execution) > added construction + validation`.
+The loop's construction plus validation sample decreased by 99.004 ms,
+so this pair has no positive additional construction cost to amortize. For
+handlers, added construction plus validation was 468.794 ms and the
+nine-run execution-median saving was 0.298667 ms: the condition requires
+more than 1569.6 executions. These estimates exclude admission and recovery
+and assume the measured savings recur. Single construction samples do not
+establish a stable break-even point. Small native samples establish neither
+tail latency nor universal speedup. Increased handler retained memory (about
+25%) and larger proofs remain material costs; the change preserves optional
+specialization and does not make it a default for that workload.
+
+Raw JSONL outputs each contain 62 records; filenames and SHA-256:
+
+- `kosmos-terminator-old-loop-v2.jsonl`: `062d55529fb3cc35161c08a60dab588552078bbb580e86ed804bab3b1b254305`
+- `kosmos-terminator-new-loop-v2.jsonl`: `bc47cb9cb5a828c62e20b110045b108bef0d4ffbf82fd2fe06828e83c92a511b`
+- `kosmos-terminator-old-handlers-v2.jsonl`: `69385df26213a5a54ac377399d5754d12261566fb4000dc43638b398e418859f`
+- `kosmos-terminator-new-handlers-v2.jsonl`: `cb9fb5d77123b49ff3f6fd6fc653ad99b29368114381628c840b4f6ad1fe96dc`

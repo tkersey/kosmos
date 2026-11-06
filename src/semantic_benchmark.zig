@@ -510,7 +510,47 @@ fn buildSpecialized(
         .proof_bytes = specialized.content.value.evidence.len,
         .recovery_anchors = specialized.content.value.recovery.anchors.len,
     });
+    try emitSpecializationShape(a, output, &specialized, kind);
     return .{ .bytes = specialized_bytes, .artifact = specialized, .admission_ns = admission_ns };
+}
+
+fn emitSpecializationShape(
+    a: std.mem.Allocator,
+    output: *std.Io.Writer,
+    specialized: *const kosmos.RuntimeArtifact,
+    kind: Workload,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var reader: data.wire.Reader = .{ .input = specialized.content.value.evidence };
+    const evidence = try data.record.read(
+        @import("semantic/compiler.zig").Evidence,
+        &reader,
+        scratch,
+    );
+    try reader.finish();
+    const derivation = evidence.derivation orelse return error.MissingSpecialization;
+    const keys = try scratch.alloc(usize, derivation.residual.functions.len);
+    @memset(keys, 0);
+    var maximum: usize = 0;
+    for (derivation.functions) |function| {
+        keys[@intCast(function.before)] += 1;
+        maximum = @max(maximum, keys[@intCast(function.before)]);
+    }
+    var generic_calls: usize = 0;
+    for (derivation.terms) |term| {
+        if (term.children.len != 0 or term.callee != null) continue;
+        if (derivation.residual.terms[@intCast(term.after)] == .call) generic_calls += 1;
+    }
+    try emit(output, .{
+        .phase = "specialization-shape",
+        .workload = @tagName(kind),
+        .keys = derivation.functions.len,
+        .maximum_keys_per_function = maximum,
+        .generic_call_terms = generic_calls,
+        .policy = derivation.request.policy,
+    });
 }
 
 fn measureWorkload(context: BenchmarkContext, kind: Workload) !void {
