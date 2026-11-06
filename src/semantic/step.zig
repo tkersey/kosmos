@@ -13,6 +13,7 @@ pub const Definition = struct {
     instruction: Id,
     instruction_at: Id,
     control: Id,
+    control_at: Id,
     active: Id,
     result: Id,
 };
@@ -34,6 +35,9 @@ pub fn define(b: *source.Builder, machine: machines.Definition) Error!Definition
             machine.schema, e.integer, instruction_schema, ids, e.integer, ids, flags, e.boolean,
         }, result, &.{}, &.{}),
         .control = try b.declare(&.{machine.schema}, result, &.{}, &.{}),
+        .control_at = try b.declare(&.{
+            machine.schema, try projection.schema(data.activation.Terminator, b),
+        }, result, &.{}, &.{}),
         .active = try b.declare(&.{machine.schema}, result, &.{}, &.{}),
         .result = result,
     };
@@ -230,17 +234,22 @@ fn emitControl(
     result: Id,
     d: Definition,
     controls: anytype,
+    comptime descriptor: bool,
 ) Error!void {
-    const state = try e.param(d.control, 0);
+    const function = if (descriptor) d.control_at else d.control;
+    const state = try e.param(function, 0);
     const changed = try e.b.variable(machine.schema);
     const counted = try e.replace(
         try e.b.reference(changed),
         @backingInt(machines.Field.work),
         try e.binary(.integer_add, try machine.field(e, state, .work), e.one),
     );
-    try e.b.define(d.control, try e.b.bind(
+    try e.b.define(function, try e.b.bind(
         changed,
-        try e.call(controls.execute, &.{state}),
+        if (descriptor)
+            try e.call(controls.execute_at, &.{ state, try e.param(function, 1) })
+        else
+            try e.call(controls.execute, &.{state}),
         try e.b.pure(try e.variant(result, 0, counted)),
     ));
 }
@@ -650,7 +659,8 @@ const TransitionBuilder = struct {
             }), dispatch),
         ));
         try emitInstruction(self.machine, e, self.d);
-        try emitControl(self.machine, e, self.result, self.d, self.controls);
+        inline for (.{ false, true }) |descriptor|
+            try emitControl(self.machine, e, self.result, self.d, self.controls, descriptor);
         try emitActive(self.machine, e, self.result, self.d, self.controls);
     }
 };

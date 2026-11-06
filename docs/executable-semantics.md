@@ -128,6 +128,24 @@ a valid single map. `scalar_tests.zig` compares arithmetic to Horos's independen
 oracle. `semantic_specialization_tests.zig` compares actual residual execution
 and canonical states and counts removed packing work on dynamic inputs.
 
+The staged block-search leaf also passes the selected block's complete terminator
+to `step.control_at`. Selection still uses the established interval coordinate,
+and the descriptor is demanded only in the existing control arm. Instruction
+positions, empty-search fallback and unwinding retain their existing rules.
+The ordinary `control` entrance discovers the descriptor from the current machine;
+the descriptor-aware entrance receives it from the immutable selected program.
+Both entrances use the same control-rule emitter and the same post-transition
+guest-work wrapper. There is no additional runtime worker or repeated current-node
+lookup in the generic entrance.
+
+Specialization can remove descriptor lookup and tag selection while frame slots,
+handler installations, capabilities and continuation graphs remain dynamic.
+The descriptor supplies coordinates and code, never a replacement runtime instance.
+Recovery continues to use the authoritative machine and retained command anchors.
+Exact outer checkpoints remain bound to their own realization; transfers between
+realizations still use canonical guest cuts and the existing approval and custody
+contracts.
+
 ## Two checkpoint levels
 
 `Resident.beginAdvance` selects one guest command; `Resident.pump` bounds base

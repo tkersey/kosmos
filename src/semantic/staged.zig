@@ -102,7 +102,9 @@ fn emitSearch(
     else
         try e.when(try e.binary(.less, position, count), try e.call(positions, &.{
             state, low, position, e.zero, count,
-        }), try e.call(step.control, &.{state}));
+        }), try e.call(step.control_at, &.{
+            state, try e.field(selected, machines.index(data.activation.Block, "terminator")),
+        }));
     try e.b.define(
         function,
         try e.when(
