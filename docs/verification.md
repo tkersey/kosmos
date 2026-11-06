@@ -262,8 +262,11 @@ remain in their original roots.
 
 `check-kernel` executes one exact compiled replay image and matching/mismatching
 inputs through native and WASM paths, comparing complete canonical results and
-captured guest state. Both restore interrupted analysis; the WASM continuation
-uses a fresh instance after caller-input mutation. `check-browser` executes and
+captured guest state. Its minimal one-request guest returns the supplied response
+directly; the richer two-request retained-blob scenario remains in the native
+integration example. This keeps portable qualification focused on real execution
+and transfer through the additional evaluator layer. Both restore interrupted
+analysis; the WASM continuation uses a fresh instance after caller-input mutation. `check-browser` executes and
 restores the compiled analysis through fresh Chromium and Firefox Workers using
 the unchanged byte API. No authoring compiler or live adapter is added to them.
 

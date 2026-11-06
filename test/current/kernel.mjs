@@ -38,11 +38,11 @@ for (const scenario of ["matching", "mismatch"]) {
   assert.equal(completed.kind, "completed");
   const report = JSON.parse(execFileSync(fixtureTool, ["replay-result"], { input: completed.value }));
   assert.equal(report.stop, scenario === "matching" ? "terminal_matched" : "payload_mismatch");
-  assert.equal(report.matched, scenario === "matching" ? 2 : 0);
+  assert.equal(report.matched, scenario === "matching" ? 1 : 0);
   assert.equal(report.boundary, scenario === "matching" ? "completed" : "parked");
   assert.equal(report.snapshot_status, report.boundary);
   assert.equal(report.observation, scenario === "matching" ? "completed" : "requested");
-  if (scenario === "matching") assert.equal(report.completed_hex, "2f00000000000000");
+  if (scenario === "matching") assert.equal(report.completed_hex, "0500000000000000");
   assert.ok(report.checkpoint_bytes > 0);
   let k = await kernel();
   assert.deepEqual(k.invoke(command), expected, `replay ${scenario} native/WASM result and captured state`);

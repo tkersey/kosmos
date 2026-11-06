@@ -7,7 +7,7 @@ const fixture = @import("diagnostic_fixture");
 fn guestImage(a: std.mem.Allocator) ![]u8 {
     var b = horos.source.Builder.init(a);
     defer b.deinit();
-    var compiled = try horos.source.lower(a, try fixture.guest(&b));
+    var compiled = try horos.source.lower(a, try portableGuest(&b));
     defer compiled.deinit();
     const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
     errdefer a.free(image);
@@ -15,14 +15,28 @@ fn guestImage(a: std.mem.Allocator) ![]u8 {
     return image;
 }
 
+fn portableGuest(b: *horos.source.Builder) !horos.source.Module {
+    const value = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const effect = try b.effect(.{
+        .identity = "diagnostic/portable-request",
+        .payload = value,
+        .result = value,
+    });
+    const entry = try b.declare(&.{}, value, &.{effect}, &.{});
+    try b.define(entry, try b.term(.{ .perform = .{
+        .effect = effect,
+        .payload = try b.constant(u64, 11),
+    } }));
+    return b.module(entry, unit);
+}
+
 pub fn program(b: *horos.source.Builder) !horos.source.Module {
     const image = try guestImage(b.allocator());
     defer b.allocator().free(image);
     const guest = try data.program_image.Admitted.decode(b.allocator(), image);
     defer guest.deinit();
-    const arguments = try fixture.arguments(b.allocator());
-    defer b.allocator().free(arguments);
-    const replay = try analysis.replay(b, guest, .{ .arguments = arguments }, .{
+    const replay = try analysis.replay(b, guest, .{ .arguments = &.{} }, .{
         .observation = true,
         .snapshot = true,
     });
@@ -34,23 +48,17 @@ pub fn input(a: std.mem.Allocator, mismatch: bool) ![]u8 {
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
-    const arguments = try fixture.arguments(a);
-    defer a.free(arguments);
     var origin: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(arguments, &origin, .{});
+    std.crypto.hash.sha2.Sha256.hash(&.{}, &origin, .{});
     const exchanges = [_]analysis.ReplayExchange{
         .{ .expected_request = .{ .effect = 0, .payload = &fixture.integer(
             if (mismatch) 12 else 11,
         ) }, .response = if (mismatch) &.{255} else &fixture.integer(5) },
-        .{
-            .expected_request = .{ .effect = 0, .payload = &fixture.integer(22) },
-            .response = &fixture.integer(7),
-        },
     };
     return analysis.encodeReplayInput(a, .{ .transcript = .{
         .binding = .{ .guest = guest.identity(), .origin = .{ .arguments = origin } },
         .exchanges = &exchanges,
-        .ending = .{ .terminal = .{ .completed = &fixture.integer(fixture.answer) } },
+        .ending = .{ .terminal = .{ .completed = &fixture.integer(5) } },
     }, .guest_quantum = 100 });
 }
 
