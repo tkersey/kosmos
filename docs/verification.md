@@ -276,6 +276,10 @@ the unchanged byte API. No authoring compiler or live adapter is added to them.
 Both build steps retain `has_side_effects` so each invocation executes the checks.
 They require exit zero and their completion marker through buffered stdout checks,
 allowing independent processes to run without Zig's inherited-terminal lock.
+CI runs the browser check in a separate required matrix lane, so browser engines
+and Node kernel checks do not compete on one runner. Both lanes build from the
+same commit and authenticated inputs; compilation may be duplicated. The existing
+aggregate 600-second gate requires both lanes, including their cache-save steps.
 
 The replay constructor and example are outside the explicit retained semantic
 source closure. They do not change `semantic-core.kar`; the existing driver root

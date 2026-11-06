@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, source, source-second, portable, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, source, source-second, portable, browser, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -67,6 +67,7 @@ jobs:
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-driver' && 'native' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -215,11 +216,11 @@ jobs:
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
           zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'portable' || matrix.lane == 'source' || matrix.lane == 'source-second'
+        if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second'
         with:
           node-version: '26.9.0'
       - name: Install only the browser boundary's tools
-        if: matrix.lane == 'portable'
+        if: matrix.lane == 'browser'
         run: |
           grep -Fq 'https://archive.ubuntu.com/ubuntu/' /etc/apt/apt-mirrors.txt
           sudo sed -i '\|^http://azure\.archive\.ubuntu\.com/ubuntu/|d' /etc/apt/apt-mirrors.txt
@@ -231,8 +232,12 @@ jobs:
         # Native qualification rebuilds and compares the exact packaged core.
         run: >-
           zig build check-activation-storage-wasm check-kernel
-          check-capacity check-browser check-codecs check-package build-runtime
+          check-capacity check-codecs check-package build-runtime
           -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Qualify both browser Worker environments
+        if: matrix.lane == 'browser'
+        run: >-
+          zig build check-browser -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Qualify every source example and instruction frontier
         if: matrix.lane == 'source' || matrix.lane == 'source-second'
         run: |
