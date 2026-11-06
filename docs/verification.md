@@ -269,6 +269,9 @@ and transfer through the additional evaluator layer. Both restore interrupted
 analysis; the WASM continuation uses a fresh instance after caller-input mutation. `check-browser` executes and
 restores the compiled analysis through fresh Chromium and Firefox Workers using
 the unchanged byte API. No authoring compiler or live adapter is added to them.
+Both build steps retain `has_side_effects` so each invocation executes the checks.
+They require exit zero and their completion marker through buffered stdout checks,
+allowing independent processes to run without Zig's inherited-terminal lock.
 
 The replay constructor and example are outside the explicit retained semantic
 source closure. They do not change `semantic-core.kar`; the existing driver root

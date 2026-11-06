@@ -1067,6 +1067,7 @@ fn configureForeignChecks(
     current_check.addFileArg2(fixtures.fixture.getEmittedBin(), .{ .make_absolute = true });
     current_check.step.dependOn(&fixtures.current_fixtures.step);
     current_check.has_side_effects = true;
+    current_check.expectStdOutMatch("ABI 3 native/Node canonical agreement");
     b.step(
         "check-kernel",
         "Check ABI 3 and current native/Node transfer",
@@ -1151,6 +1152,7 @@ fn configurePortableChecks(b: *std.Build, kernel: Kernel, fixtures: Fixtures) Po
     current_browser.addFileArg2(fixtures.fixture.getEmittedBin(), .{ .make_absolute = true });
     current_browser.step.dependOn(&fixtures.current_fixtures.step);
     current_browser.has_side_effects = true;
+    current_browser.expectStdOutMatch("real browser Worker/native/fresh Worker transfer");
     b.step(
         "check-browser",
         "Check real browser Worker/native transfer on Chromium and Firefox",
