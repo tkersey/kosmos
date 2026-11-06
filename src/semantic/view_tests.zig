@@ -256,7 +256,7 @@ test "guest view divergence query reports only aligned finite observation eviden
         .{ .revision = 6, .control = @splat(0), .bytes = "yielded" },
         .{ .revision = 7, .control = @splat(1), .bytes = "completed:42" },
     };
-    for (0..6) |scenario| {
+    for (0..9) |scenario| {
         var right = left;
         var input: queries.DivergenceInput = .{
             .left = .{ .binding = binding, .complete = true, .observations = &left },
@@ -269,6 +269,9 @@ test "guest view divergence query reports only aligned finite observation eviden
             3 => right[1].control[0] ^= 1,
             4 => right[1].revision = 6,
             5 => input.right.binding.guest[0] ^= 1,
+            6 => input.right.binding.checkpoint[0] ^= 1,
+            7 => input.right.observations = &.{},
+            8 => input.right.complete = false,
             else => unreachable,
         }
         const bytes = try projection.encode(queries.DivergenceInput, a, input);
@@ -287,10 +290,10 @@ test "guest view divergence query reports only aligned finite observation eviden
         try std.testing.expectEqualDeep(input.right.binding, result.value.right);
         try std.testing.expectEqual(input.right.complete, result.value.right_complete);
         switch (scenario) {
-            0, 2 => {
+            0, 2, 7, 8 => {
                 try std.testing.expectEqual(.observed_agreement, result.value.conclusion);
                 try std.testing.expectEqual(
-                    @as(u64, if (scenario == 0) 2 else 1),
+                    @as(u64, if (scenario == 7) 0 else if (scenario == 2) 1 else 2),
                     result.value.compared,
                 );
                 try std.testing.expect(result.value.revision == null);

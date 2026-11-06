@@ -306,3 +306,17 @@ fn appendRequest(e: Author, d: Definition, machine: Id, observed: Id) !Id {
         0,
     );
 }
+
+pub const replay = @import("analysis_replay.zig").replay;
+pub const ReplayStart = @import("analysis_replay.zig").ReplayStart;
+pub const ReplayBinding = @import("analysis_replay.zig").ReplayBinding;
+pub const ReplayCapture = @import("analysis_replay.zig").ReplayCapture;
+pub const ReplayExchange = @import("analysis_replay.zig").ReplayExchange;
+pub const ReplayEnding = @import("analysis_replay.zig").ReplayEnding;
+pub const ReplayTranscript = @import("analysis_replay.zig").ReplayTranscript;
+pub const ReplayInput = @import("analysis_replay.zig").ReplayInput;
+pub const ReplayStop = @import("analysis_replay.zig").ReplayStop;
+pub const ReplayOutput = @import("analysis_replay.zig").ReplayOutput;
+pub const ReplayProgram = @import("analysis_replay.zig").ReplayProgram;
+pub const encodeReplayInput = @import("analysis_replay.zig").encodeReplayInput;
+pub const decodeReplayOutput = @import("analysis_replay.zig").decodeReplayOutput;

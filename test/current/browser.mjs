@@ -96,7 +96,27 @@ try {
         assert.equal(finished.result.workingLive, "0");
         await terminate(finished.id);
       }
-      results.push({ engine, version: browser.version(), workersDestroyed: 7, retainedScopedComputations: 2 });
+      const replayProgram = new Uint8Array(execFileSync(fixtureTool, ["image", "diagnostic-replay"]));
+      const replayInput = new Uint8Array(execFileSync(fixtureTool, ["replay-input", "matching"]));
+      const expectedReplay = new Uint8Array(execFileSync(fixtureTool, ["invoke"], {
+        input: encodeInput({ image: replayProgram, initialArgs: replayInput }), maxBuffer: 8 << 20,
+      }));
+      assert.equal(decodeOutcome(expectedReplay).kind, "completed");
+      const interrupted = await start({ op: "start", sha256, image: Array.from(replayProgram),
+        initialArgs: Array.from(replayInput), quantum: 47, transfer: true });
+      assert.equal(interrupted.result.error, undefined);
+      assert.equal(decodeOutcome(new Uint8Array(interrupted.result.output)).kind, "progressed");
+      assert.equal(interrupted.result.workingLive, "0");
+      await terminate(interrupted.id);
+      replayInput.fill(255);
+      const continued = await start({ op: "restore", sha256, image: Array.from(replayProgram),
+        state: interrupted.result.state, close: true });
+      assert.equal(continued.result.error, undefined);
+      assert.deepEqual(new Uint8Array(continued.result.output), expectedReplay);
+      assert.equal(continued.result.workingLive, "0");
+      await terminate(continued.id);
+      results.push({ engine, version: browser.version(), workersDestroyed: 9,
+        retainedScopedComputations: 2, restoredDiagnosticReplays: 1 });
     } finally { await browser.close(); }
   }
 } finally { await new Promise(resolve => server.close(resolve)); }

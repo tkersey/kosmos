@@ -22,8 +22,8 @@ const Workload = enum {
     long_cleanup,
     retained_bytes,
 };
-const Step = struct { control: protocol.Control, checkpoint: []const u8, outcome: []const u8 };
-const Costs = struct {
+pub const Step = struct { control: protocol.Control, checkpoint: []const u8, outcome: []const u8 };
+pub const Costs = struct {
     start_ns: i96 = 0,
     execute_ns: i96 = 0,
     observe_ns: i96 = 0,
@@ -47,16 +47,16 @@ const Costs = struct {
     field_projection_scans: ?u64 = null,
     element_projection_hits: ?u64 = null,
 };
-fn now(io: std.Io) std.Io.Timestamp {
+pub fn now(io: std.Io) std.Io.Timestamp {
     return std.Io.Clock.awake.now(io);
 }
-fn elapsed(io: std.Io, start: std.Io.Timestamp) i96 {
+pub fn elapsed(io: std.Io, start: std.Io.Timestamp) i96 {
     return start.durationTo(now(io)).nanoseconds;
 }
-fn meter(a: std.mem.Allocator) kosmos.AllocationBudget {
+pub fn meter(a: std.mem.Allocator) kosmos.AllocationBudget {
     return .{ .parent = a, .limit = std.math.maxInt(usize) };
 }
-fn emit(writer: *std.Io.Writer, value: anytype) !void {
+pub fn emit(writer: *std.Io.Writer, value: anytype) !void {
     try std.json.Stringify.value(value, .{}, writer);
     try writer.writeByte('\n');
     try writer.flush();
@@ -131,7 +131,7 @@ const RunContext = struct {
     recording: bool,
 };
 
-fn run(
+pub fn run(
     comptime runtime: type,
     io: std.Io,
     a: std.mem.Allocator,
@@ -322,8 +322,6 @@ pub fn main(init: std.process.Init) !void {
     );
     defer generic.deinit();
     try measureGenericConstruction(a, init.io, &generic, &output.interface, start, &generic_meter);
-    var bootstrap_prepared = try native.Prepared.init(a, generic.content.value.image);
-    defer bootstrap_prepared.deinit();
     var instrumented_meter = meter(a);
     var instrumented = try buildInstrumented(
         a,
@@ -334,15 +332,38 @@ pub fn main(init: std.process.Init) !void {
     );
     defer instrumented_meter.allocator().free(instrumented.bytes);
     defer instrumented.artifact.deinit();
+    if (filter != null and std.mem.eql(u8, filter.?, "diagnostics")) {
+        try @import("semantic_benchmark_diagnostics.zig").measure(.{
+            .a = a,
+            .io = init.io,
+            .output = &output.interface,
+            .generic = &generic,
+            .instrumented = &instrumented.artifact,
+        });
+        return;
+    }
+    try measureSelected(a, init.io, &output.interface, &generic, &instrumented.artifact, filter);
+}
+
+fn measureSelected(
+    a: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    generic: *kosmos.RuntimeArtifact,
+    instrumented: *kosmos.RuntimeArtifact,
+    filter: ?[]const u8,
+) !void {
+    var bootstrap_prepared = try native.Prepared.init(a, generic.content.value.image);
+    defer bootstrap_prepared.deinit();
     var producer_meter = meter(a);
-    var proposed = try buildProposal(&producer_meter, init.io, &generic, &output.interface);
+    var proposed = try buildProposal(&producer_meter, io, generic, output);
     defer proposed.deinit();
     const context: BenchmarkContext = .{
         .a = a,
-        .io = init.io,
-        .output = &output.interface,
-        .generic = &generic,
-        .instrumented = &instrumented.artifact,
+        .io = io,
+        .output = output,
+        .generic = generic,
+        .instrumented = instrumented,
         .bootstrap = &bootstrap_prepared,
         .proposal = &proposed.value,
     };

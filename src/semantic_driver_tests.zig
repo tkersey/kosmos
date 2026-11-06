@@ -14,6 +14,13 @@ test {
     _ = @import("semantic/capsule_tests.zig");
 }
 
+test "offline diagnostics preserve live ownership and publication retry" {
+    const report = try @import("diagnostic_replay_example.zig").run(a);
+    try std.testing.expectEqual(@as(u64, 2), report.acquired);
+    try std.testing.expectEqual(@as(u64, 2), report.committed);
+    try std.testing.expect(report.live_owner_unchanged);
+}
+
 test "downstream packaged core equals independently rebuilt and validated source" {
     const retained = @import("semantic_packaged.zig");
 
@@ -290,6 +297,7 @@ fn switchRealizations(image: []const u8, specialized: *const artifact.Admitted) 
         provenance,
         publisher.owner(),
     ));
+    try replayWhileFenced(prepared.guest.core.?.admitted(), cut.checkpoint.?.bytes());
     try std.testing.expectError(error.PublicationUncertain, resident.drive(a, .none, .{}));
     try std.testing.expectError(
         error.PublicationUncertain,
@@ -318,6 +326,27 @@ fn switchRealizations(image: []const u8, specialized: *const artifact.Admitted) 
         bound,
         &cut,
     );
+}
+
+fn replayWhileFenced(guest: *const data.program_image.Admitted, checkpoint: []const u8) !void {
+    const analysis = @import("semantic/analysis.zig");
+    const example = @import("diagnostic_replay_example.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const replay = try analysis.replay(&b, guest, .{ .checkpoint = checkpoint }, .{});
+    const image = try example.encode(a, replay.module, true);
+    defer a.free(image);
+    const input = try analysis.encodeReplayInput(a, .{ .transcript = .{
+        .binding = replay.binding,
+        .exchanges = &.{},
+        .ending = .prefix,
+    }, .guest_quantum = 0 });
+    defer a.free(input);
+    var output = try example.execute(a, image, input);
+    defer output.deinit();
+    var result = try analysis.decodeReplayOutput(a, output.bytes);
+    defer result.deinit();
+    try std.testing.expectEqualDeep(replay.binding, result.value.binding);
 }
 
 fn expectGenericSwitch(
