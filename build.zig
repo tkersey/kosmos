@@ -289,6 +289,7 @@ const HostModules = struct {
     host_mode: std.lang.Optimize,
     source_data: *std.Build.Module,
     horos: *std.Build.Module,
+    diagnostic_fixture: *std.Build.Module,
 };
 
 fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependencies) HostModules {
@@ -330,7 +331,18 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         },
     ));
 
-    return .{ .host_mode = host_mode, .source_data = source_data, .horos = horos };
+    const diagnostic_fixture = b.createModule(.{
+        .root_source_file = b.path("src/diagnostic_replay_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = host_mode,
+        .imports = &.{.{ .name = "horos", .module = horos }},
+    });
+    return .{
+        .host_mode = host_mode,
+        .source_data = source_data,
+        .horos = horos,
+        .diagnostic_fixture = diagnostic_fixture,
+    };
 }
 
 const ArtifactImages = struct {
@@ -680,6 +692,7 @@ fn configureDriver(
         } },
     }) });
     const run_driver_tests = b.addRunArtifact(driver_tests);
+    driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
     const build_driver = b.step(
         "build-semantic-driver-check",
         "Build the native semantic driver test artifact and independently rebuilt core",
@@ -693,8 +706,40 @@ fn configureDriver(
         "Check packaged artifact admission and guest/outer bridge framing",
     ).dependOn(&run_driver_tests.step);
     native_checks.dependOn(&run_driver_tests.step);
+    configureDiagnosticExample(b, host_modules, retained_runtime);
 
     return .{ .native_checks = native_checks };
+}
+
+fn configureDiagnosticExample(
+    b: *std.Build,
+    host_modules: HostModules,
+    retained_runtime: *std.Build.Module,
+) void {
+    const example = b.createModule(.{
+        .root_source_file = b.path("src/diagnostic_replay_example.zig"),
+        .target = b.graph.host,
+        .optimize = host_modules.host_mode,
+        .imports = &.{
+            .{ .name = "horos", .module = host_modules.horos },
+            .{ .name = "horos_data", .module = host_modules.source_data },
+            .{ .name = "packaged_runtime", .module = retained_runtime },
+            .{ .name = "diagnostic_fixture", .module = host_modules.diagnostic_fixture },
+        },
+    });
+    const executable = b.addExecutable(.{
+        .name = "diagnostic-replay",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/diagnostic_replay.zig"),
+            .target = b.graph.host,
+            .optimize = host_modules.host_mode,
+            .imports = &.{.{ .name = "diagnostic_example", .module = example }},
+        }),
+    });
+    const run = b.addRunArtifact(executable);
+    run.has_side_effects = true;
+    b.step("diagnostic-replay", "Run offline request-checked diagnostics and publication retry")
+        .dependOn(&run.step);
 }
 
 fn configureSemantics(
@@ -963,6 +1008,7 @@ fn configureFixtures(
         } },
     }) });
     fixture.root_module.addOptions("fixture_options", fixture_options);
+    fixture.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{
         .override = .{ .custom = "current/bin" },
     } });

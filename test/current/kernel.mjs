@@ -29,6 +29,43 @@ const image = name => new Uint8Array(execFileSync(fixtureTool, ["image", name], 
 const native = command => new Uint8Array(execFileSync(fixtureTool, ["invoke"], { input: command, maxBuffer: 8 << 20 }));
 const integer = n => { const bytes = new Uint8Array(8); new DataView(bytes.buffer).setBigUint64(0, BigInt(n), true); return bytes; };
 
+const replayProgram = image("diagnostic-replay");
+for (const scenario of ["matching", "mismatch"]) {
+  const initialArgs = new Uint8Array(execFileSync(fixtureTool, ["replay-input", scenario]));
+  const command = encodeInput({ image: replayProgram, initialArgs });
+  const expected = native(command);
+  const completed = decodeOutcome(expected);
+  assert.equal(completed.kind, "completed");
+  const report = JSON.parse(execFileSync(fixtureTool, ["replay-result"], { input: completed.value }));
+  assert.equal(report.stop, scenario === "matching" ? "terminal_matched" : "payload_mismatch");
+  assert.equal(report.matched, scenario === "matching" ? 2 : 0);
+  assert.equal(report.boundary, scenario === "matching" ? "completed" : "parked");
+  assert.equal(report.snapshot_status, report.boundary);
+  assert.equal(report.observation, scenario === "matching" ? "completed" : "requested");
+  if (scenario === "matching") assert.equal(report.completed_hex, "2f00000000000000");
+  assert.ok(report.checkpoint_bytes > 0);
+  let k = await kernel();
+  assert.deepEqual(k.invoke(command), expected, `replay ${scenario} native/WASM result and captured state`);
+  const prepared = k.prepare(replayProgram);
+  const session = k.start(prepared, initialArgs);
+  k.releasePrepared(prepared);
+  const interrupted = decodeOutcome(k.drive(session, { quantum: 47, checkpoint: true }));
+  assert.equal(interrupted.kind, "progressed");
+  const checkpoint = k.checkpoint(session, { transfer: true });
+  assert.deepEqual(checkpoint, interrupted.state);
+  assert.equal(k.usage().workingLive, 0n);
+  const continuation = encodeInput({ image: replayProgram, state: checkpoint });
+  assert.deepEqual(native(continuation), expected, `replay ${scenario} native restore`);
+  initialArgs.fill(255);
+  k = await kernel();
+  const restoredPreparation = k.prepare(replayProgram);
+  const restored = k.restore(restoredPreparation, checkpoint);
+  k.releasePrepared(restoredPreparation);
+  assert.deepEqual(k.drive(restored), expected, `replay ${scenario} fresh WASM restore`);
+  k.close(restored);
+  assert.equal(k.usage().workingLive, 0n);
+}
+
 // A native specialization crosses only the existing canonical guest boundary.
 // The shipped generic WASM image is unchanged and receives no outer capsule.
 {

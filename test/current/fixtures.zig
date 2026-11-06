@@ -27,6 +27,22 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, mode, "image")) {
         const name = arguments.next() orelse return error.MissingName;
         try writeImage(init.gpa, name, &output.interface);
+    } else if (std.mem.eql(u8, mode, "replay-input")) {
+        const name = arguments.next() orelse return error.MissingName;
+        if (!std.mem.eql(u8, name, "matching") and !std.mem.eql(u8, name, "mismatch"))
+            return error.InvalidMode;
+        const bytes = try @import("diagnostic_replay.zig").input(
+            init.gpa,
+            std.mem.eql(u8, name, "mismatch"),
+        );
+        defer init.gpa.free(bytes);
+        try output.interface.writeAll(bytes);
+    } else if (std.mem.eql(u8, mode, "replay-result")) {
+        var buffer: [4096]u8 = undefined;
+        var input = std.Io.File.stdin().reader(init.io, &buffer);
+        const bytes = try input.interface.allocRemaining(init.gpa, .limited(2 << 20));
+        defer init.gpa.free(bytes);
+        try @import("diagnostic_replay.zig").inspect(init.gpa, bytes, &output.interface);
     } else return error.InvalidMode;
     try output.interface.flush();
 }
@@ -226,6 +242,8 @@ fn writeImage(a: std.mem.Allocator, name: []const u8, output: *std.Io.Writer) !v
     else
         try horos.program.compile(a, module);
     defer compiled.deinit();
+    if (std.mem.eql(u8, name, "diagnostic-replay") and compiled.program.effects.len != 0)
+        return error.EffectfulDiagnostic;
     if (std.mem.eql(u8, name, "retainedScopeGeneral")) {
         const ir = horos.data.activation;
         const scratch = builder.allocator();
@@ -251,6 +269,8 @@ fn writeImage(a: std.mem.Allocator, name: []const u8, output: *std.Io.Writer) !v
 
 fn sourceModule(builder: *horos.source.Builder, name: []const u8) !horos.source.Module {
     return blk: {
+        if (std.mem.eql(u8, name, "diagnostic-replay"))
+            break :blk try @import("diagnostic_replay.zig").program(builder);
         if (std.mem.eql(u8, name, "largeRequest")) break :blk try largeRequest(builder);
         if (std.mem.eql(u8, name, "retainedScopeGeneral"))
             break :blk try horos.source.examples.retainedScope(builder);

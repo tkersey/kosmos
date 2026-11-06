@@ -231,6 +231,52 @@ zig build check -Doptimize=safe
 CI installs both browsers' Linux system dependencies with Playwright's
 `--with-deps` option. Python/Wasmtime is not part of the current checks.
 
+## Request-checked diagnostic replay
+
+`check-semantics` imports focused strict replay cases alongside the unchanged
+hypothetical-analysis tests. Fixed request/value bytes distinguish matching,
+wrong payload/effect, out-of-range effect, reordered and repeated occurrences,
+prefix exhaustion, missing/unused exchanges and complete terminal mismatches.
+Canonical checkpoints and step counts are compared with the pinned independent
+native evaluator. Shared admission and codecs are not independent implementations.
+
+Cases cover malformed matched replies versus ignored malformed unmatched replies,
+binding/start rejection, noncanonical input, constructor buffer ownership,
+separate capture choices, zero-quantum parked replies, initial/reached yield,
+ordered cleanup failures, cancelled/unwinding starts and retained multishot control.
+Small pumps restore analysis checkpoints throughout execution after overwriting
+caller input. Subject and analysis checkpoints cannot be swapped. Focused
+allocation-failure sweeps cover construction and decoded result ownership.
+Equal pending observations with distinct retained state exercise the separate
+canonical-state comparison; terminal collection can erase that earlier difference.
+
+`check-semantic-driver` runs the same implementation as the
+[`diagnostic-replay` example](diagnostic-replay.md). It exercises real publication
+failure/retry without redispatch, failed-attempt trace scratch, scoped retention,
+default summary output, physical limits, inert action-shaped output and a separate
+live owner. Isolated reference/instrumented and unapproved unequal runtime
+experiments compare actual aligned observations and canonical states. An existing
+uncertain realization remains fenced after successful replay until its original
+owner resolution. Existing receipt, issuer/generation, custody and artifact checks
+remain in their original roots.
+
+`check-kernel` executes one exact compiled replay image and matching/mismatching
+inputs through native and WASM paths, comparing complete canonical results and
+captured guest state. Both restore interrupted analysis; the WASM continuation
+uses a fresh instance after caller-input mutation. `check-browser` executes and
+restores the compiled analysis through fresh Chromium and Firefox Workers using
+the unchanged byte API. No authoring compiler or live adapter is added to them.
+
+The replay constructor and example are outside the explicit retained semantic
+source closure. They do not change `semantic-core.kar`; the existing driver root
+still compares that artifact with independent fresh source generation. BPI3,
+PST3, invocation envelopes and ABI 3 remain unchanged.
+
+These are finite witnesses. They establish neither transcript authenticity,
+universal runtime equivalence nor external exactly-once execution. Diagnostic
+timings use the separate optional `diagnostics` benchmark selector and impose no
+CI timing gate. Runtime qualification retains its existing 600-second budget.
+
 ## Native publication measurements
 
 `zig build bench-publication -Doptimize=safe` writes

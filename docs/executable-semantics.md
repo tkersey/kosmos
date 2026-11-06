@@ -302,6 +302,12 @@ neither constant physical memory nor persistent sharing.
 
 ## Evidence and physical limits
 
+[`RuntimeAnalysis.replay`](diagnostic-replay.md) adds a distinct request-checked
+operation. It checks exact effect/payload bytes before response admission,
+preserves yielded starts, and selects observation/snapshot capture at construction.
+Its runnable example composes existing views, isolated experiments and publication
+retry without adding live dispatch or runtime approval authority.
+
 The pure hypothetical-reply example admits argument and reply bytes against the
 embedded guest schemas before using them. Malformed values fail the analysis;
 valid assumptions remain explicitly hypothetical and confer no live authority.

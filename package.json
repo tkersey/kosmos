@@ -23,6 +23,7 @@
     "docs/runtime-bundles.md",
     "docs/verification.md",
     "docs/executable-semantics.md",
+    "docs/diagnostic-replay.md",
     "docs/semantic-economy.md",
     "src/embedding/index.mjs",
     "src/embedding/kernel.mjs",

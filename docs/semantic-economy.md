@@ -271,3 +271,155 @@ guest execution and must not be added to its live/peak allocation figures.
 A nonempty reference map still scans every retained binding. This change makes no
 constant-time instantiation, changed-only scan, universal speedup or zero-allocation
 claim. The PR records qualification and review results for its delivered head.
+
+## Request-checked diagnostics, 2026-11-05
+
+Measured with the implementation accompanying this report on Apple M2 Pro,
+macOS 27.3 (26C5035r), exact Zig 0.17.1, native aarch64 `safe`. Zig reported CPU
+model `apple_a15`. No other session-owned qualification or benchmark ran
+concurrently. The command completed with exit 0 in 108.04 seconds including
+compilation and emitted 460 JSONL records:
+
+```sh
+/usr/bin/time -p zig build bench-semantics -Doptimize=safe -Deconomy-workload=diagnostics
+```
+
+The generic semantic source is
+`08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a`, with packaged
+artifact `c5beb14f0f28a3fb4bf8a7f2839829fc99e7e4e3fee3ef06478f5697d56e665a`.
+These identities bind the existing runtime; replay programs are constructed
+separately by the diagnostic fixtures. The independent native evaluator remains
+the immutable reference identified above. Process and OS cache state were not
+controlled. Times use the awake clock, recorded in nanoseconds. Allocation
+meters count requested bytes over the process GPA, excluding metadata and RSS.
+
+There are three samples per family, with 2, 4 and 8 repeated request occurrences.
+Scalar payloads contain one u64; structured payloads contain 4, 16 and 64 u64
+fields; blob payloads contain 64, 256 and 1,024 bytes. The aliased graph retains
+four references to one computation closure capturing the blob across requests;
+its native checkpoint must contain four references to the same node. All
+requests receive unit replies. Width and request count vary together outside
+the scalar family, so these samples do not isolate their individual scaling.
+
+Each sample runs matching, first-request payload mismatch and last-request
+payload mismatch cases in summary and snapshot modes, three times each: 216
+replay observations. Mismatches change the last payload byte. Construction and
+preparation happen once per fixture and capture mode; the immutable prepared
+program serves all cases and repetitions. Plain and instrumented guest runs
+have three repetitions each, with order alternated; the independent native
+reference runs once per sample. Retention comparisons have three repetitions
+of three queries each. Restore measurements have one sample per fixture and
+capture mode, after suspension at 128 base transitions.
+
+### Replay output and execution
+
+`Match / first / later` gives median summary execution milliseconds, including
+request and terminal comparison. Output and base-work columns compare matching
+summary / snapshot modes, which intentionally disclose different results.
+Guest input includes the blob length prefix; replay input also includes the
+bound transcript and expected terminal observation.
+
+| Family | Payload elements or bytes | Requests | Guest input bytes | Replay input bytes | Match / first / later ms | Output bytes, summary / snapshot | Base transitions, summary / snapshot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| scalar | 1 | 2 | 8 | 121 | 1.215 / 0.651 / 0.983 | 88 / 306 | 4773 / 4920 |
+| scalar | 1 | 4 | 8 | 157 | 1.932 / 0.661 / 1.688 | 88 / 392 | 7820 / 8003 |
+| scalar | 1 | 8 | 8 | 229 | 3.500 / 0.679 / 3.216 | 88 / 564 | 14231 / 14486 |
+| structured fields | 4 | 2 | 32 | 193 | 1.208 / 0.724 / 1.030 | 88 / 347 | 4727 / 4884 |
+| structured fields | 16 | 4 | 128 | 762 | 1.988 / 0.950 / 1.972 | 88 / 530 | 7906 / 8099 |
+| structured fields | 64 | 8 | 512 | 4774 | 3.676 / 1.815 / 4.372 | 88 / 1086 | 14941 / 15206 |
+| blob | 64 | 2 | 65 | 292 | 1.186 / 0.763 / 1.075 | 88 / 380 | 4688 / 4845 |
+| blob | 256 | 4 | 258 | 1412 | 1.907 / 1.102 / 2.147 | 88 / 660 | 7704 / 7897 |
+| blob | 1024 | 8 | 1026 | 9400 | 3.480 / 2.513 / 5.174 | 88 / 1600 | 14019 / 14284 |
+| aliased graph | 64 | 2 | 65 | 292 | 1.981 / 1.125 / 1.498 | 88 / 506 | 8083 / 8294 |
+| aliased graph | 256 | 4 | 258 | 1412 | 2.720 / 1.509 / 2.644 | 88 / 786 | 11344 / 11591 |
+| aliased graph | 1024 | 8 | 1026 | 9400 | 4.385 / 3.047 / 5.707 | 88 / 1726 | 18001 / 18320 |
+
+Matching summaries were exactly 88 bytes; payload-mismatch summaries were exactly
+120 bytes at every size. They contain neither an observation nor a snapshot,
+and the executable enforces a 128-byte bound. Snapshot outputs ranged from
+295 to 1,733 bytes across all cases. Every snapshot matches the complete
+canonical native checkpoint at its terminal or pending boundary. The checks
+also require exact mismatch lengths and first differing offset, matching
+request counts and native guest-work totals. Resuming each suspended analysis
+must produce the same result bytes as uninterrupted execution.
+
+The summary mode emits fewer bytes and performs fewer base transitions on these
+fixtures. It does not imply constant total memory: admitted transcripts, private
+guest state and evaluator storage remain. For the largest aliased graph,
+execution peak was 148,236 requested bytes in both modes; decoded-output
+peak was 0 / 3,816 bytes. The zero refers only to host decoding of the fixed-size
+summary; encoded output remains owned by the execution domain. Last-byte
+mismatch witnesses scan the differing payload and can cost more than a complete
+match, as the larger blob cases show. Early rejection is a separate workload.
+
+### Paired instrumentation and view reuse
+
+Both actual guest realizations match the independent native reference's complete
+canonical checkpoints and outcome bytes at every cut, with identical inputs
+and controls. For each family's largest sample, the medians are:
+
+| Family | Execution ms, plain / instrumented | Base transitions, plain / instrumented |
+| --- | ---: | ---: |
+| scalar | 8.039 / 8.347 | 21857 / 22463 |
+| structured fields | 8.781 / 8.827 | 24665 / 25271 |
+| blob | 8.756 / 8.816 | 24665 / 25271 |
+| aliased graph | 15.251 / 15.679 | 51402 / 52184 |
+
+These guest runs are separate from the pure replay program. Their runner also
+measures observation encoding, canonical guest projection, trace projection,
+guest restore, capsule encoding and outer restore. The samples show additional
+instrumentation work, without establishing a general overhead bound.
+
+Retention compares identical ordered result bytes for three targets under the
+same complete metadata disclosure, with no values, blob payloads or snapshot.
+On the largest aliased graph, one capture reused for three queries took a median
+11,125 ns for admission plus traversal, versus 31,083 ns for three captures.
+Both performed 3,000 query base transitions and had a 10,192-byte capture peak.
+Query encoding/execution/result-extraction medians were 635,500 / 628,707 ns.
+A separate required-admission probe took 9,750 ns on its single sample;
+`captureDetailed` still admitted every capture. Reuse avoids two captures within
+one explicit owning lifetime. No public session abstraction, view cache or
+production-path optimization was introduced.
+
+### Stage boundaries and limits
+
+The largest aliased-graph matching sample illustrates the separately measured
+stages below. Execution-stage values are three-run medians; construction,
+preparation, checkpoint and restore each have one observation per mode.
+
+| Stage | Milliseconds, summary / snapshot |
+| --- | ---: |
+| Start admission, construction and lowering | 83.519 / 83.368 |
+| Program preparation | 7.234 / 7.436 |
+| Session start admission | 0.032 / 0.033 |
+| Execution, comparison and optional projection | 4.385 / 4.509 |
+| Result encoding | 0.001 / 0.002 |
+| Suspended analysis checkpoint | 0.029 / 0.027 |
+| Suspended analysis restore | 0.063 / 0.063 |
+
+Replay start admission, source construction and lowering share an interval.
+Execution includes guest steps, request/terminal comparison and optional snapshot
+projection. `Session.bytes` result encoding is timed separately; subsequent host
+result decoding has its own allocation domain. View capture combines required
+admission and traversal; the separate admission probe is not subtracted from it.
+Query encoding, execution and result extraction share one interval. These
+boundaries avoid attributing precision the API does not expose.
+
+The largest aliased graph's matching canonical guest checkpoint was
+1,101 bytes; its suspended analysis checkpoint was 9,646 bytes. The latter
+contains the replay computation's own progress and transcript. Mismatch rows
+report the actual native pending-cut checkpoint size. Input, construction,
+preparation, execution, decoded output, view capture, query, checkpoint and
+restore domains retain separate live/peak requested-byte figures; their peaks
+must not be summed into a fictitious concurrent peak.
+
+Publication timing covers in-memory `RuntimeCapsule` encoding at a guest cut,
+excluding durable publication, network dispatch and retry. This executable
+provides no WASM timing; native/WASM correctness and publication failure behavior
+are separate qualification results. Three local repetitions do not establish
+tail latency, universal throughput, constant memory or work proportional only
+to disclosed data. The result supports the bounded-summary design and reuse of
+an existing captured view, without an additional production optimization claim.
+
+Raw output: `kosmos-replay-diagnostics-final.jsonl`, 460 records, SHA-256
+`be1165eed63857509cdbda151bc3b3e4232169b776b687cf4e6b63911d91e5d8`.
