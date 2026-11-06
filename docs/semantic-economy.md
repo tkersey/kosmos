@@ -277,7 +277,7 @@ claim. The PR records qualification and review results for its delivered head.
 Measured with the implementation accompanying this report on Apple M2 Pro,
 macOS 27.3 (26C5035r), exact Zig 0.17.1, native aarch64 `safe`. Zig reported CPU
 model `apple_a15`. No other session-owned qualification or benchmark ran
-concurrently. The command completed with exit 0 in 108.04 seconds including
+concurrently. The command completed with exit 0 in 104.97 seconds including
 compilation and emitted 460 JSONL records:
 
 ```sh
@@ -292,6 +292,12 @@ separately by the diagnostic fixtures. The independent native evaluator remains
 the immutable reference identified above. Process and OS cache state were not
 controlled. Times use the awake clock, recorded in nanoseconds. Allocation
 meters count requested bytes over the process GPA, excluding metadata and RSS.
+The native baseline and paired Kosmos execution use that same backing allocator;
+fixture preparation and retained trace storage use a separate arena. This run
+supersedes the initial measurements, whose native baseline incorrectly used the
+fixture arena for measured execution. All 460 records match the prior
+run after excluding timing fields; timing differences across runs are not
+attributed to a runtime speedup.
 
 There are three samples per family, with 2, 4 and 8 repeated request occurrences.
 Scalar payloads contain one u64; structured payloads contain 4, 16 and 64 u64
@@ -321,18 +327,18 @@ bound transcript and expected terminal observation.
 
 | Family | Payload elements or bytes | Requests | Guest input bytes | Replay input bytes | Match / first / later ms | Output bytes, summary / snapshot | Base transitions, summary / snapshot |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| scalar | 1 | 2 | 8 | 121 | 1.215 / 0.651 / 0.983 | 88 / 306 | 4773 / 4920 |
-| scalar | 1 | 4 | 8 | 157 | 1.932 / 0.661 / 1.688 | 88 / 392 | 7820 / 8003 |
-| scalar | 1 | 8 | 8 | 229 | 3.500 / 0.679 / 3.216 | 88 / 564 | 14231 / 14486 |
-| structured fields | 4 | 2 | 32 | 193 | 1.208 / 0.724 / 1.030 | 88 / 347 | 4727 / 4884 |
-| structured fields | 16 | 4 | 128 | 762 | 1.988 / 0.950 / 1.972 | 88 / 530 | 7906 / 8099 |
-| structured fields | 64 | 8 | 512 | 4774 | 3.676 / 1.815 / 4.372 | 88 / 1086 | 14941 / 15206 |
-| blob | 64 | 2 | 65 | 292 | 1.186 / 0.763 / 1.075 | 88 / 380 | 4688 / 4845 |
-| blob | 256 | 4 | 258 | 1412 | 1.907 / 1.102 / 2.147 | 88 / 660 | 7704 / 7897 |
-| blob | 1024 | 8 | 1026 | 9400 | 3.480 / 2.513 / 5.174 | 88 / 1600 | 14019 / 14284 |
-| aliased graph | 64 | 2 | 65 | 292 | 1.981 / 1.125 / 1.498 | 88 / 506 | 8083 / 8294 |
-| aliased graph | 256 | 4 | 258 | 1412 | 2.720 / 1.509 / 2.644 | 88 / 786 | 11344 / 11591 |
-| aliased graph | 1024 | 8 | 1026 | 9400 | 4.385 / 3.047 / 5.707 | 88 / 1726 | 18001 / 18320 |
+| scalar | 1 | 2 | 8 | 121 | 1.181 / 0.635 / 0.952 | 88 / 306 | 4773 / 4920 |
+| scalar | 1 | 4 | 8 | 157 | 1.911 / 0.650 / 1.659 | 88 / 392 | 7820 / 8003 |
+| scalar | 1 | 8 | 8 | 229 | 3.391 / 0.657 / 3.140 | 88 / 564 | 14231 / 14486 |
+| structured fields | 4 | 2 | 32 | 193 | 1.170 / 0.692 / 0.983 | 88 / 347 | 4727 / 4884 |
+| structured fields | 16 | 4 | 128 | 762 | 1.892 / 0.899 / 1.891 | 88 / 530 | 7906 / 8099 |
+| structured fields | 64 | 8 | 512 | 4774 | 3.535 / 1.755 / 4.239 | 88 / 1086 | 14941 / 15206 |
+| blob | 64 | 2 | 65 | 292 | 1.171 / 0.742 / 1.046 | 88 / 380 | 4688 / 4845 |
+| blob | 256 | 4 | 258 | 1412 | 1.851 / 1.073 / 2.090 | 88 / 660 | 7704 / 7897 |
+| blob | 1024 | 8 | 1026 | 9400 | 3.329 / 2.414 / 4.975 | 88 / 1600 | 14019 / 14284 |
+| aliased graph | 64 | 2 | 65 | 292 | 1.910 / 1.087 / 1.421 | 88 / 506 | 8083 / 8294 |
+| aliased graph | 256 | 4 | 258 | 1412 | 2.700 / 1.474 / 2.554 | 88 / 786 | 11344 / 11591 |
+| aliased graph | 1024 | 8 | 1026 | 9400 | 4.241 / 2.879 / 5.434 | 88 / 1726 | 18001 / 18320 |
 
 Matching summaries were exactly 88 bytes; payload-mismatch summaries were exactly
 120 bytes at every size. They contain neither an observation nor a snapshot,
@@ -360,10 +366,10 @@ and controls. For each family's largest sample, the medians are:
 
 | Family | Execution ms, plain / instrumented | Base transitions, plain / instrumented |
 | --- | ---: | ---: |
-| scalar | 8.039 / 8.347 | 21857 / 22463 |
-| structured fields | 8.781 / 8.827 | 24665 / 25271 |
-| blob | 8.756 / 8.816 | 24665 / 25271 |
-| aliased graph | 15.251 / 15.679 | 51402 / 52184 |
+| scalar | 7.806 / 7.998 | 21857 / 22463 |
+| structured fields | 8.428 / 8.686 | 24665 / 25271 |
+| blob | 8.387 / 8.591 | 24665 / 25271 |
+| aliased graph | 14.702 / 14.996 | 51402 / 52184 |
 
 These guest runs are separate from the pure replay program. Their runner also
 measures observation encoding, canonical guest projection, trace projection,
@@ -373,10 +379,10 @@ instrumentation work, without establishing a general overhead bound.
 Retention compares identical ordered result bytes for three targets under the
 same complete metadata disclosure, with no values, blob payloads or snapshot.
 On the largest aliased graph, one capture reused for three queries took a median
-11,125 ns for admission plus traversal, versus 31,083 ns for three captures.
+10,792 ns for admission plus traversal, versus 30,500 ns for three captures.
 Both performed 3,000 query base transitions and had a 10,192-byte capture peak.
-Query encoding/execution/result-extraction medians were 635,500 / 628,707 ns.
-A separate required-admission probe took 9,750 ns on its single sample;
+Query encoding/execution/result-extraction medians were 606,376 / 598,917 ns.
+A separate required-admission probe took 9,375 ns on its single sample;
 `captureDetailed` still admitted every capture. Reuse avoids two captures within
 one explicit owning lifetime. No public session abstraction, view cache or
 production-path optimization was introduced.
@@ -389,13 +395,13 @@ preparation, checkpoint and restore each have one observation per mode.
 
 | Stage | Milliseconds, summary / snapshot |
 | --- | ---: |
-| Start admission, construction and lowering | 83.519 / 83.368 |
-| Program preparation | 7.234 / 7.436 |
-| Session start admission | 0.032 / 0.033 |
-| Execution, comparison and optional projection | 4.385 / 4.509 |
+| Start admission, construction and lowering | 81.351 / 81.416 |
+| Program preparation | 6.899 / 6.972 |
+| Session start admission | 0.030 / 0.032 |
+| Execution, comparison and optional projection | 4.241 / 4.347 |
 | Result encoding | 0.001 / 0.002 |
-| Suspended analysis checkpoint | 0.029 / 0.027 |
-| Suspended analysis restore | 0.063 / 0.063 |
+| Suspended analysis checkpoint | 0.027 / 0.025 |
+| Suspended analysis restore | 0.059 / 0.058 |
 
 Replay start admission, source construction and lowering share an interval.
 Execution includes guest steps, request/terminal comparison and optional snapshot
@@ -421,5 +427,5 @@ tail latency, universal throughput, constant memory or work proportional only
 to disclosed data. The result supports the bounded-summary design and reuse of
 an existing captured view, without an additional production optimization claim.
 
-Raw output: `kosmos-replay-diagnostics-final.jsonl`, 460 records, SHA-256
-`be1165eed63857509cdbda151bc3b3e4232169b776b687cf4e6b63911d91e5d8`.
+Raw output: `kosmos-replay-diagnostics-gpa.jsonl`, 460 records, SHA-256
+`e1ea86917cbeb71485fd6bd73c2c0952cd486dcaa26ade6c1869d708dbfc8074`.

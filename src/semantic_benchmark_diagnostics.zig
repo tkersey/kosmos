@@ -50,7 +50,7 @@ pub fn measure(context: Context) !void {
 fn measureFixture(context: Context, family: fixtures.Family, sample: usize) !void {
     var arena = std.heap.ArenaAllocator.init(context.a);
     defer arena.deinit();
-    const a = arena.allocator();
+    const fixture_allocator = arena.allocator();
     var construction = bench.meter(context.a);
     var start = bench.now(context.io);
     const fixture = try fixtures.make(construction.allocator(), family, sample);
@@ -58,26 +58,26 @@ fn measureFixture(context: Context, family: fixtures.Family, sample: usize) !voi
     defer construction.allocator().free(fixture.input);
     const construction_ns = bench.elapsed(context.io, start);
     start = bench.now(context.io);
-    const guest = try data.program_image.Admitted.decode(a, fixture.image);
+    const guest = try data.program_image.Admitted.decode(fixture_allocator, fixture.image);
     defer guest.deinit();
     const admission_ns = bench.elapsed(context.io, start);
-    var direct = try native.Prepared.init(a, fixture.image);
+    var direct = try native.Prepared.init(fixture_allocator, fixture.image);
     defer direct.deinit();
     var trace: std.ArrayList(bench.Step) = .empty;
     const baseline = try bench.run(
         native,
         context.io,
-        a,
+        context.a,
         &direct,
         fixture.input,
         sample,
-        a,
+        fixture_allocator,
         &trace,
         true,
     );
-    const reference = try fixtures.reference(a, trace.items);
+    const reference = try fixtures.reference(fixture_allocator, trace.items);
     if (reference.exchanges.len != fixture.requests) return error.RequestCountChanged;
-    if (family == .aliased_graph) try fixtures.assertAliased(a, reference.pending);
+    if (family == .aliased_graph) try fixtures.assertAliased(fixture_allocator, reference.pending);
     try bench.emit(context.output, .{
         .phase = "diagnostics-fixture",
         .family = @tagName(family),
@@ -92,7 +92,7 @@ fn measureFixture(context: Context, family: fixtures.Family, sample: usize) !voi
         .construction_peak_bytes = construction.peak,
         .native_baseline = baseline,
     });
-    try measurePair(context, fixture, a, &trace);
+    try measurePair(context, fixture, fixture_allocator, &trace);
     const run: Run = .{
         .context = context,
         .fixture = fixture,
@@ -116,7 +116,7 @@ fn measureFixture(context: Context, family: fixtures.Family, sample: usize) !voi
 fn measurePair(
     context: Context,
     fixture: fixtures.Fixture,
-    a: std.mem.Allocator,
+    trace_allocator: std.mem.Allocator,
     trace: *std.ArrayList(bench.Step),
 ) !void {
     var preparation = bench.meter(context.a);
@@ -154,7 +154,7 @@ fn measurePair(
                 if (instrumented) &observed else &plain,
                 fixture.input,
                 fixture.sample,
-                a,
+                trace_allocator,
                 trace,
                 false,
             );
