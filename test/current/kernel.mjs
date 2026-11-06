@@ -45,7 +45,6 @@ for (const scenario of ["matching", "mismatch"]) {
   if (scenario === "matching") assert.equal(report.completed_hex, "0500000000000000");
   assert.ok(report.checkpoint_bytes > 0);
   let k = await kernel();
-  assert.deepEqual(k.invoke(command), expected, `replay ${scenario} native/WASM result and captured state`);
   const prepared = k.prepare(replayProgram);
   const session = k.start(prepared, initialArgs);
   k.releasePrepared(prepared);
@@ -61,7 +60,7 @@ for (const scenario of ["matching", "mismatch"]) {
   const restoredPreparation = k.prepare(replayProgram);
   const restored = k.restore(restoredPreparation, checkpoint);
   k.releasePrepared(restoredPreparation);
-  assert.deepEqual(k.drive(restored), expected, `replay ${scenario} fresh WASM restore`);
+  assert.deepEqual(k.drive(restored), expected, `replay ${scenario} native/WASM result and captured state after fresh restore`);
   k.close(restored);
   assert.equal(k.usage().workingLive, 0n);
 }

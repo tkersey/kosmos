@@ -265,8 +265,12 @@ inputs through native and WASM paths, comparing complete canonical results and
 captured guest state. Its minimal one-request guest returns the supplied response
 directly; the richer two-request retained-blob scenario remains in the native
 integration example. This keeps portable qualification focused on real execution
-and transfer through the additional evaluator layer. Both restore interrupted
-analysis; the WASM continuation uses a fresh instance after caller-input mutation. `check-browser` executes and
+and transfer through the additional evaluator layer. Native execution supplies
+the uninterrupted result. WASM execution starts with the same image and input,
+transfers an interrupted analysis checkpoint, and finishes in a fresh instance
+after caller-input mutation. Native restoration of that checkpoint must also
+produce the same complete result. This combines portability and restoration
+checks in one WASM execution per case. `check-browser` executes and
 restores the compiled analysis through fresh Chromium and Firefox Workers using
 the unchanged byte API. No authoring compiler or live adapter is added to them.
 Both build steps retain `has_side_effects` so each invocation executes the checks.
