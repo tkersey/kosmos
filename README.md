@@ -11,7 +11,7 @@ the runtime artifacts, specialization, reconstruction, and trusted boundaries.
 [Request-checked replay](docs/diagnostic-replay.md) runs supplied transcripts as
 offline ordinary programs and composes scoped views with finite runtime comparisons.
 
-Kosmos `9.1.0` requires exact Zig `0.17.1`; source builds use Horos 8.
+Kosmos `9.2.0` requires exact Zig `0.17.1`; source builds use published Horos 8.0.1.
 It consumes BPI3 programs and PST3 states through ABI 3. See the
 [ABI contract](docs/kernel-abi.md) and [verification boundaries](docs/verification.md).
 Current source/package identities are selected by the consuming lock; published

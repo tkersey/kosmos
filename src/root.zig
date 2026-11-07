@@ -1,5 +1,5 @@
 // Copyright (c) 2026 World contributors. MIT license.
-pub const package_version = "9.1.0";
+pub const package_version = "9.2.0";
 const current = @import("semantic/session.zig");
 pub const Session = current.Session;
 pub const Prepared = current.Prepared;
