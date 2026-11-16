@@ -432,7 +432,7 @@ pub const Store = struct {
         return reference;
     }
 
-    pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
+    pub fn get(self: *const Store, reference: g.NodeRef) Error!g.Node {
         if (reference.id >= self.nodes.items.len or
             !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
         return self.nodes.items[@intCast(reference.id)];
