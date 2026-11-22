@@ -563,12 +563,11 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 
 ## Checked scalar field reuse
 
-The opt-in compiler was measured on an Apple M2 Pro with Zig 0.17.1 in
-safe mode, using Horos `b640746`. The nominated workload was
-`scalar_chain_large` with input 41. Each of two runs alternated six
-structural/opt-in pairs per realization. All 48 executions returned 7,337
-after 385 guest transitions and matched both canonical guest cuts.
-Both diamond branches replaced one of two field evaluations with a slot
+Two runs on an Apple M2 Pro with Zig 0.17.1 in safe mode used Horos `5556595`
+and the nominated workload `scalar_chain_large` with input 41. Each run
+alternated six structural/opt-in pairs per realization. All 48 executions
+returned 7,337 after 385 guest transitions and matched both canonical guest
+cuts. Each diamond branch replaced one of two field evaluations with a slot
 read and finished in eight base transitions.
 
 | Per execution or artifact | Generic structural → opt-in | Specialized structural → opt-in |
@@ -576,39 +575,42 @@ read and finished in eight base transitions.
 | Field evaluations | 82,947 → 81,195 | 87,360 for both |
 | Move slot reads | 0 → 1,752 | 0 for both |
 | Base transitions | 360,704 for both | 377,044 for both |
-| Peak / retained session bytes | 1,900,525 / 1,455,475 for both | 1,845,722 / 1,478,618 for both |
+| Peak session bytes | 1,900,525 for both | 1,845,722 for both |
+| Retained session bytes | 1,455,475 for both | 1,478,618 for both |
 | Image bytes | 97,067 → 96,994 | 3,518,839 for both |
 | Evidence bytes | 52,628 → 52,931 | 31,405,942 → 31,405,947 |
 | Complete artifact bytes | 276,698 → 276,932 | 35,052,051 → 35,052,056 |
 
-The generic image carried 50 witnesses. The specialized search exhausted
-its optional budget and returned the byte-identical ordinary executable,
-providing a timing control. Negative percentages in the table indicate a faster
-opt-in execution.
+The generic image carried 50 witnesses. The specialized search exhausted its
+optional budget and returned the byte-identical ordinary executable, providing
+a timing control. Negative percentages indicate faster opt-in execution.
 
 | Paired observations | Run 1 median | Run 2 median | All individual pairs |
 | --- | ---: | ---: | ---: |
-| Generic execution | +31.56% | +0.13% | −19.27% to +129.90% |
-| Generic checkpoint-inclusive wall time | +31.07% | +0.15% | −21.73% to +124.13% |
-| Specialized execution | −0.88% | +0.27% | −2.93% to +2.56% |
-| Specialized checkpoint-inclusive wall time | −0.87% | +0.24% | −2.86% to +2.48% |
+| Generic execution | +0.28% | +4.57% | −2.71% to +17.35% |
+| Generic checkpoint-inclusive wall time | +0.27% | +4.51% | −2.67% to +16.76% |
+| Specialized execution | −0.70% | +0.79% | −26.97% to +10.99% |
+| Specialized checkpoint-inclusive wall time | −0.75% | +0.70% | −26.39% to +11.19% |
 
-The host was shared. Concurrent Zig compilation was observed during
-the first run. The samples show substantial timing variation and do
-not establish tail percentiles.
+The full pair range reports the observed spread on this shared host. Each
+median covers six pairs.
 
 | Cold observation across two runs | Generic structural → opt-in | Specialized structural → opt-in |
 | --- | --- | --- |
-| Compile seconds | 0.318–0.452 → 0.399–0.554 | 7.055–7.269 → 8.291–9.185 |
-| Admission seconds | 0.017 → 0.017 | 0.285–0.287 → 0.296–0.376 |
-| Independent validation seconds | 0.233–0.286 → 0.327–0.498 | 3.537–3.651 → 5.534–5.938 |
-| Metered compile peak bytes | 849,867,734 → 52,009,442 | 10,149,649,259 → 1,814,118,880 |
-| Metered validation peak bytes | 465,653,726 → 43,055,218 | 4,271,034,052 → 1,560,174,416 |
+| Compile seconds | 0.319–0.338 → 0.395 | 6.731–6.981 → 7.745–7.959 |
+| Admission seconds | 0.017–0.019 → 0.016–0.017 | 0.278–0.284 → 0.279–0.281 |
+| Independent validation seconds | 0.222–0.229 → 0.325–0.345 | 3.644–3.742 → 5.428–5.581 |
+| Metered compile peak bytes | 849,867,734 → 53,692,180 | 10,149,649,259 → 1,814,118,880 |
+| Metered validation peak bytes | 465,653,726 → 43,055,058 | 4,271,034,052 → 1,560,174,416 |
 
-The meters cover allocator requests in each phase. Process RSS was not
-measured. The generic run eliminated field work but showed no repeatable
-elapsed gain on the nominated input. Compilation and independent
-validation cost more. Keep the option experimental and disabled by default.
+The allocation peaks cover requests to the phase allocator. Process RSS was
+unmeasured.
+
+Keep the compiler experimental and disabled by default. Generic execution
+removed 1,752 aggregate field evaluations per run, but its median elapsed time
+increased in both series. The identical specialized executable also had large
+individual timing differences. Both opt-in realizations took longer to compile
+and independently validate.
 
 Reproduce the diamond and both runtime comparisons with
 `zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large`.
