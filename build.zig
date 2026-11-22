@@ -182,6 +182,7 @@ fn configureCapacities(b: *std.Build, profile: Profile) Capacities {
 
 const Dependencies = struct {
     source: std.Build.LazyPath,
+    recovery_source: std.Build.LazyPath,
     data: *std.Build.Module,
     host_data: *std.Build.Module,
     public_kosmos: *std.Build.Module,
@@ -203,28 +204,17 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
     if (supplied_source == .cwd_relative and
         !std.Io.Dir.path.isAbsolute(supplied_source.cwd_relative))
         @panic("Horos source path must be absolute");
-    // Fetch captures the selected package without executing its build code.
-    // Every compiler/emitter consumes the authenticated cache snapshot, never
-    // the caller's mutable source directory after verification.
-    const admission = b.addRunFile(.zig_exe);
-    admission.setCwd(b.graph.path(.global_cache, ""));
-    admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
-    admission.addArg("fetch");
-    admission.addDirectoryArg2(supplied_source, .{ .make_absolute = true });
-    admission.expectStdOutEqual(options.package.dependencies.horos.hash ++ "\n");
-    admission.has_side_effects = true;
-    const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
-    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
-    // PATH still selects tar's decompressor; ambient archive options stay absent.
-    snapshot.clearEnvironment();
-    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
-    snapshot.addFileArg2(b.graph.path(
-        .global_cache,
-        "p/" ++ options.package.dependencies.horos.hash ++ ".tar.gz",
-    ), .{ .make_absolute = true });
-    snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
-    const source = snapshot.addOutputDirectoryArg2("horos", .{});
-    snapshot.step.dependOn(&admission.step);
+    const recovery_dependency = b.lazyDependency("horos_recovery", .{
+        .target = options.target,
+        .optimize = options.optimize,
+        .@"data-only" = true,
+    }) orelse return null;
+    const source = authenticatedSource(b, supplied_source, options.package.dependencies.horos.hash);
+    const recovery_source = authenticatedSource(
+        b,
+        recovery_dependency.path(""),
+        options.package.dependencies.horos_recovery.hash,
+    );
     const data = b.createModule(.{
         .root_source_file = source.path(b, "src/data/root.zig"),
         .target = options.target,
@@ -244,10 +234,41 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
 
     return .{
         .source = source,
+        .recovery_source = recovery_source,
         .data = data,
         .host_data = host_data,
         .public_kosmos = public_kosmos,
     };
+}
+
+fn authenticatedSource(
+    b: *std.Build,
+    supplied_source: std.Build.LazyPath,
+    comptime hash: []const u8,
+) std.Build.LazyPath {
+    // Fetch captures the selected package without executing its build code.
+    // Every compiler/emitter consumes the authenticated cache snapshot, never
+    // the caller's mutable source directory after verification.
+    const admission = b.addRunFile(.zig_exe);
+    admission.setCwd(b.graph.path(.global_cache, ""));
+    admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
+    admission.addArg("fetch");
+    admission.addDirectoryArg2(supplied_source, .{ .make_absolute = true });
+    admission.expectStdOutEqual(hash ++ "\n");
+    admission.has_side_effects = true;
+    const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
+    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
+    // PATH still selects tar's decompressor; ambient archive options stay absent.
+    snapshot.clearEnvironment();
+    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
+    snapshot.addFileArg2(b.graph.path(
+        .global_cache,
+        "p/" ++ hash ++ ".tar.gz",
+    ), .{ .make_absolute = true });
+    snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
+    const source = snapshot.addOutputDirectoryArg2("horos", .{});
+    snapshot.step.dependOn(&admission.step);
+    return source;
 }
 
 const StorageChecks = struct {
@@ -289,7 +310,14 @@ const HostModules = struct {
     host_mode: std.lang.Optimize,
     source_data: *std.Build.Module,
     horos: *std.Build.Module,
+    recovery: *std.Build.Module,
+    recovery_options: *std.Build.Step.Options,
     diagnostic_fixture: *std.Build.Module,
+
+    fn bindRecovery(self: HostModules, module: *std.Build.Module) void {
+        module.addImport("horos_recovery", self.recovery);
+        module.addOptions("recovery_options", self.recovery_options);
+    }
 };
 
 fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependencies) HostModules {
@@ -307,30 +335,30 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
                 .optimize = host_mode,
             },
         );
-    const horos = b.createModule(
-        .{
-            .root_source_file = dependencies.source.path(b, "src/root.zig"),
-            .target = b.graph.host,
-            .optimize = host_mode,
-            .imports = &.{.{
-                .name = "horos_data",
-                .module = source_data,
-            }},
-        },
-    );
-    dependencies.public_kosmos.addImport("horos", if (options.target.query.isNative() and
-        host_mode == options.optimize) horos else b.createModule(
-        .{
-            .root_source_file = dependencies.source.path(b, "src/root.zig"),
-            .target = options.target,
-            .optimize = options.optimize,
-            .imports = &.{.{
-                .name = "horos_data",
-                .module = dependencies.data,
-            }},
-        },
+    const native = options.target.query.isNative() and host_mode == options.optimize;
+    const horos = horosModule(b, dependencies.source, b.graph.host, host_mode, source_data);
+    dependencies.public_kosmos.addImport("horos", if (native) horos else horosModule(
+        b,
+        dependencies.source,
+        options.target,
+        options.optimize,
+        dependencies.data,
     ));
-
+    const recovery = horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
+    const recovery_options = b.addOptions();
+    recovery_options.addOption(
+        []const u8,
+        "horos_package",
+        options.package.dependencies.horos_recovery.hash,
+    );
+    dependencies.public_kosmos.addOptions("recovery_options", recovery_options);
+    dependencies.public_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
+        b,
+        dependencies.recovery_source,
+        options.target,
+        options.optimize,
+        null,
+    ));
     const diagnostic_fixture = b.createModule(.{
         .root_source_file = b.path("src/diagnostic_replay_fixture.zig"),
         .target = b.graph.host,
@@ -341,8 +369,30 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         .host_mode = host_mode,
         .source_data = source_data,
         .horos = horos,
+        .recovery = recovery,
+        .recovery_options = recovery_options,
         .diagnostic_fixture = diagnostic_fixture,
     };
+}
+
+fn horosModule(
+    b: *std.Build,
+    source: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    shared_data: ?*std.Build.Module,
+) *std.Build.Module {
+    const data = shared_data orelse b.createModule(.{
+        .root_source_file = source.path(b, "src/data/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    return b.createModule(.{
+        .root_source_file = source.path(b, "src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "horos_data", .module = data }},
+    });
 }
 
 const ArtifactImages = struct {
@@ -481,6 +531,7 @@ fn configurePublication(
     if (host_kosmos != dependencies.public_kosmos) {
         host_kosmos.addImport("packaged_runtime", runtime_modules.packaged_runtime);
         host_kosmos.addImport("horos", host_modules.horos);
+        host_modules.bindRecovery(host_kosmos);
     }
     const publication_bench = b.addExecutable(
         .{
@@ -582,6 +633,7 @@ fn configureEconomy(
             ),
         },
     );
+    host_modules.bindRecovery(economy_bench.root_module);
     const run_economy_bench = b.addRunArtifact(economy_bench);
     if (options.economy_workload) |name| run_economy_bench.addArg(name);
     run_economy_bench.has_side_effects = true;
@@ -691,6 +743,7 @@ fn configureDriver(
             .module = retained_runtime,
         } },
     }) });
+    host_modules.bindRecovery(driver_tests.root_module);
     const run_driver_tests = b.addRunArtifact(driver_tests);
     driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
     const build_driver = b.step(
@@ -727,6 +780,7 @@ fn configureDiagnosticExample(
             .{ .name = "diagnostic_fixture", .module = host_modules.diagnostic_fixture },
         },
     });
+    host_modules.bindRecovery(example);
     const executable = b.addExecutable(.{
         .name = "diagnostic-replay",
         .root_module = b.createModule(.{
@@ -775,6 +829,7 @@ fn configureSemantics(
             .module = host_modules.source_data,
         }, .{ .name = "horos", .module = host_modules.horos } },
     }) });
+    host_modules.bindRecovery(specialization_tests.root_module);
     const run_specialization_tests = b.addRunArtifact(specialization_tests);
     run_specialization_tests.has_side_effects = true;
     b.step(

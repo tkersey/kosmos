@@ -313,6 +313,19 @@ pub fn main(init: std.process.Init) !void {
     defer arguments_arena.deinit();
     const args = try init.minimal.args.toSlice(arguments_arena.allocator());
     const filter = if (args.len > 1) args[1] else null;
+    if (filter != null and std.mem.eql(u8, filter.?, "recovery_scalar_chain_large")) {
+        const guest = try image(a, .scalar_chain_large);
+        defer a.free(guest);
+        const input = try arguments(a, .scalar_chain_large, 0);
+        defer a.free(input);
+        return @import("semantic_benchmark_recovery.zig").measure(
+            a,
+            init.io,
+            &output.interface,
+            guest,
+            input,
+        );
+    }
     var generic_meter = meter(a);
     const start = now(init.io);
     var generic = try kosmos.RuntimeArtifact.init(

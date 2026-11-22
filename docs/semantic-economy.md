@@ -560,3 +560,48 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 - `kosmos-terminator-new-loop-v2.jsonl`: `bc47cb9cb5a828c62e20b110045b108bef0d4ffbf82fd2fe06828e83c92a511b`
 - `kosmos-terminator-old-handlers-v2.jsonl`: `69385df26213a5a54ac377399d5754d12261566fb4000dc43638b398e418859f`
 - `kosmos-terminator-new-handlers-v2.jsonl`: `cb9fb5d77123b49ff3f6fd6fc653ad99b29368114381628c840b4f6ad1fe96dc`
+
+## Checked scalar field reuse
+
+The opt-in compiler was measured on `scalar_chain_large` with input 41,
+Zig 0.17.1, safe mode, and Horos `bf7207a`. Each of two runs alternated
+six structural/opt-in pairs per realization. All 48 executions returned
+7,337 after 385 guest transitions and matched both canonical guest cuts.
+Both diamond branches replaced one of two field evaluations with a slot
+read and completed in eight base transitions.
+
+| Per execution | Generic structural → opt-in | Specialized structural → opt-in |
+| --- | --- | --- |
+| Field evaluations | 82,947 → 81,195 | 87,360 → 87,360 |
+| Move slot reads | 0 → 1,752 | 0 → 0 |
+| Base transitions | 360,704 for both | 377,044 for both |
+| Peak / retained session bytes | 1,900,525 / 1,455,475 for both | 1,845,722 / 1,478,618 for both |
+| Image bytes | 97,067 → 96,995 | 3,518,839 for both |
+| Evidence bytes | 52,628 → 52,925 | 31,405,942 → 31,405,947 |
+| Complete artifact bytes | 276,698 → 276,927 | 35,052,051 → 35,052,056 |
+
+The generic image carried 49 witnesses. Its median paired execution time
+changed by −0.58% and −0.24% in successive runs, with individual pairs
+ranging from −2.37% to +2.55%. Median paired checkpoint-inclusive wall
+time changed by −0.52% and −0.29%. Specialized compilation exhausted
+the optional budget and returned the byte-identical ordinary executable.
+That timing control shifted by −0.51% and +1.77% across runs, with one
+pair at +16.85%. The cause of that outlier on the shared machine is
+unknown. These samples do not establish tail latency.
+
+| Cold measurement across two runs | Generic structural → opt-in | Specialized structural → opt-in |
+| --- | --- | --- |
+| Compile seconds | 0.323–0.334 → 0.392–0.406 | 7.006–7.130 → 7.652–8.102 |
+| Admission seconds | 0.017 → 0.017 | 0.285–0.300 → 0.280–0.295 |
+| Independent validation seconds | 0.224–0.227 → 0.327–0.335 | 3.563–3.812 → 5.609–6.820 |
+| Metered compile peak bytes | 849,867,734 → 52,737,450 | 10,149,649,259 → 1,832,122,040 |
+| Metered validation peak bytes | 465,653,726 → 43,054,088 | 4,271,034,052 → 1,578,177,576 |
+
+The meters cover allocator requests in each phase. Process RSS was not
+measured. The generic execution gain falls within the timing variation
+of the identical-image control, and compilation and independent validation
+cost more on both realizations. Keep this compiler option experimental
+and disabled by default.
+
+Reproduce both realizations and the two diamond paths with
+`zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large`.
