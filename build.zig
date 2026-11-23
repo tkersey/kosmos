@@ -204,17 +204,7 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
     if (supplied_source == .cwd_relative and
         !std.Io.Dir.path.isAbsolute(supplied_source.cwd_relative))
         @panic("Horos source path must be absolute");
-    const recovery_dependency = b.lazyDependency("horos_recovery", .{
-        .target = options.target,
-        .optimize = options.optimize,
-        .@"data-only" = true,
-    }) orelse return null;
-    const source = authenticatedSource(b, supplied_source, options.package.dependencies.horos.hash);
-    const recovery_source = authenticatedSource(
-        b,
-        recovery_dependency.path(""),
-        options.package.dependencies.horos_recovery.hash,
-    );
+    const source = authenticatedSource(b, supplied_source, options.package.dependencies.horos);
     const data = b.createModule(.{
         .root_source_file = source.path(b, "src/data/root.zig"),
         .target = options.target,
@@ -234,17 +224,31 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
 
     return .{
         .source = source,
-        .recovery_source = recovery_source,
+        .recovery_source = recoverySource(b, options),
         .data = data,
         .host_data = host_data,
         .public_kosmos = public_kosmos,
     };
 }
 
+fn recoverySource(b: *std.Build, options: Options) std.Build.LazyPath {
+    const package = options.package.dependencies.horos_recovery;
+    const entry = std.Build.package_map.get(package.hash).?;
+    if (entry.available)
+        return authenticatedSource(b, b.graph.cwdRelativePath(entry.build_root), package);
+    if (b.graph.system_package_mode) {
+        const missing = b.addFail("Missing recovery compiler package " ++ package.hash);
+        const unavailable = b.addWriteFiles();
+        unavailable.step.dependOn(&missing.step);
+        return unavailable.getDirectory();
+    }
+    return authenticatedSource(b, null, package);
+}
+
 fn authenticatedSource(
     b: *std.Build,
-    supplied_source: std.Build.LazyPath,
-    comptime hash: []const u8,
+    supplied_source: ?std.Build.LazyPath,
+    comptime package: anytype,
 ) std.Build.LazyPath {
     // Fetch captures the selected package without executing its build code.
     // Every compiler/emitter consumes the authenticated cache snapshot, never
@@ -253,8 +257,11 @@ fn authenticatedSource(
     admission.setCwd(b.graph.path(.global_cache, ""));
     admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
     admission.addArg("fetch");
-    admission.addDirectoryArg2(supplied_source, .{ .make_absolute = true });
-    admission.expectStdOutEqual(hash ++ "\n");
+    if (supplied_source) |source|
+        admission.addDirectoryArg2(source, .{ .make_absolute = true })
+    else
+        admission.addArg(package.url);
+    admission.expectStdOutEqual(package.hash ++ "\n");
     admission.has_side_effects = true;
     const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
     // Hash only extraction inputs, not caller run IDs or unrelated credentials.
@@ -263,7 +270,7 @@ fn authenticatedSource(
     if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
     snapshot.addFileArg2(b.graph.path(
         .global_cache,
-        "p/" ++ hash ++ ".tar.gz",
+        "p/" ++ package.hash ++ ".tar.gz",
     ), .{ .make_absolute = true });
     snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
     const source = snapshot.addOutputDirectoryArg2("horos", .{});

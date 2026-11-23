@@ -3,6 +3,8 @@ const legacy = @import("compiler.zig");
 const backend = @import("recovery_backend.zig");
 const artifact = @import("artifact.zig");
 
+const export_source = @import("recovery_export.zig");
+
 pub const recovery_policy = backend.policy;
 pub const recovery_limits = backend.limits;
 pub const recoveryContext = backend.context;
@@ -37,9 +39,11 @@ pub fn validateWithPolicy(
     admitted: *const artifact.Admitted,
     policy: ValidationPolicy,
 ) !void {
-    if (std.mem.eql(u8, admitted.content.value.manifest.compiler.policy, recovery_policy))
-        return backend.validate(a, admitted);
-    return legacy.validateWithPolicy(a, admitted, policy);
+    var owned = try admitted.clone();
+    defer owned.deinit();
+    if (std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
+        return backend.validate(a, &owned);
+    return legacy.validateWithPolicy(a, &owned, policy);
 }
 
 pub fn validateAgainst(
@@ -47,10 +51,14 @@ pub fn validateAgainst(
     candidate: *const artifact.Admitted,
     ancestor: *const artifact.Admitted,
 ) !void {
-    if (!std.mem.eql(u8, candidate.content.value.manifest.compiler.policy, recovery_policy))
-        return legacy.validateAgainst(a, candidate, ancestor);
-    if (!std.mem.eql(u8, &candidate.identity, &ancestor.identity)) return error.InvalidAncestor;
-    return backend.validate(a, candidate);
+    var owned = try candidate.clone();
+    defer owned.deinit();
+    var parent = try ancestor.clone();
+    defer parent.deinit();
+    if (!std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
+        return legacy.validateAgainst(a, &owned, &parent);
+    if (!std.mem.eql(u8, &owned.identity, &parent.identity)) return error.InvalidAncestor;
+    return backend.validate(a, &owned);
 }
 
 pub const checker_identity = legacy.checker_identity;
@@ -72,10 +80,11 @@ pub const sourceReferences = legacy.sourceReferences;
 pub const SourceHelper = legacy.SourceHelper;
 pub const PureEntry = legacy.PureEntry;
 pub const SourceEntries = legacy.SourceEntries;
-pub const SourceBundle = legacy.SourceBundle;
-pub const ExportedSource = legacy.ExportedSource;
-pub const exportSource = legacy.exportSource;
+pub const SourceBundle = export_source.SourceBundle;
+pub const ExportedSource = export_source.ExportedSource;
+pub const exportSource = export_source.exportSource;
 pub const exportBuiltinSource = legacy.exportBuiltinSource;
+pub const exportLegacySource = legacy.exportSource;
 pub const sourceModule = legacy.sourceModule;
 pub const context = legacy.context;
 pub const contextWithHooks = legacy.contextWithHooks;

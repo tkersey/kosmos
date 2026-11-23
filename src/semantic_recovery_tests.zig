@@ -15,6 +15,12 @@ const provenance: capsule.Provenance = .{
     .publication = null,
 };
 
+fn scalarBytes(value: u64) [8]u8 {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    return bytes;
+}
+
 fn branchGuest() ![]u8 {
     const p: data.activation.Program = .{
         .roots = .{ .entry = 0, .result = 1, .failure = 0 },
@@ -122,6 +128,7 @@ const Run = struct {
     sites: []const Location,
     coverage: *Coverage,
     awaiting: ?Location = null,
+    oracle_transitions: usize = 0,
 
     fn transfer(self: *Run, kind: capsule.Kind) !void {
         const owner = &self.owner.?;
@@ -270,14 +277,22 @@ const Run = struct {
         var result = try self.pump();
         defer result.deinit();
         try std.testing.expect(result == .event and result.event.value == .cut);
+        const work = oracle.transitions -% self.oracle_transitions;
+        try std.testing.expectEqual(@as(u64, work), result.event.value.cut.guest_work);
+        self.oracle_transitions = oracle.transitions;
         const expected = try oracle.checkpoint(a);
         defer a.free(expected);
         const actual = try self.owner.?.checkpoint(a);
         defer a.free(actual);
         try std.testing.expectEqualSlices(u8, expected, actual);
-        if (!self.coverage.parked and self.owner.?.guest_revision != 0) {
-            self.coverage.parked = true;
+        if (result.event.value.cut.status == .parked and !self.coverage.parked) {
+            var pending = try oracle.pendingBinding(a, false);
+            defer pending.deinit();
             try self.transfer(.outer_execution);
+            var restored = try self.owner.?.pendingBinding(a, false);
+            defer restored.deinit();
+            try std.testing.expectEqualDeep(pending.request, restored.request);
+            self.coverage.parked = true;
         }
     }
 
@@ -325,7 +340,7 @@ fn advance(owner: *driver.Driver, oracle: *native.Session) !void {
             try std.testing.expectEqualDeep(expected.request, actual.request);
             const response = try data.invocation.encodeOwned(data.invocation.Result, a, .{
                 .request_identity = expected.request.request_identity,
-                .value = &std.mem.toBytes(@as(u64, 41)),
+                .value = &scalarBytes(41),
             });
             defer a.free(response);
             try oracle.answer(response);
@@ -339,7 +354,7 @@ const Fixture = struct {
     image: []const u8,
     input: []const u8,
     answer: ?u64 = null,
-    hydration: bool = false,
+    hydration: enum { none, committed, parked } = .none,
 };
 
 fn execute(
@@ -374,18 +389,23 @@ fn execute(
         const observed = try oracle.run(1);
         try run.committed(&oracle);
         if (observed != .completed) {
-            if (fixture.hydration and !hydrated) {
+            const transfer_cut = switch (fixture.hydration) {
+                .none => false,
+                .committed => true,
+                .parked => run.owner.?.last_cut.?.status == .parked,
+            };
+            if (transfer_cut and !hydrated) {
                 try run.transfer(.guest_cut);
                 run.sites = &.{};
                 hydrated = true;
             }
             continue;
         }
-        try std.testing.expectEqual(fixture.hydration, hydrated);
+        try std.testing.expectEqual(fixture.hydration != .none, hydrated);
         const value = try oracle.bytes(&observed.completed);
         if (fixture.answer) |expected| try std.testing.expectEqualSlices(
             u8,
-            &std.mem.toBytes(expected),
+            &scalarBytes(expected),
             value,
         );
         try run.owner.?.submit(.observe);
@@ -410,8 +430,8 @@ fn expectBranchPaths(
     var before: Coverage = .{};
     var after: Coverage = .{};
     for ([_]u8{ 0, 1 }) |condition| {
-        const input = [1]u8{condition} ++ std.mem.toBytes(@as(u64, 17)) ++
-            std.mem.toBytes(@as(u64, 29));
+        const input = [1]u8{condition} ++ scalarBytes(17) ++
+            scalarBytes(29);
         const fixture: Fixture = .{
             .image = image,
             .input = &input,
@@ -419,6 +439,8 @@ fn expectBranchPaths(
         };
         try execute(legacy, optimized, fixture, &.{}, &before);
         try execute(optimized, legacy, fixture, sites, &after);
+        try std.testing.expectEqual(condition != 0, before.parked);
+        try std.testing.expectEqual(condition != 0, after.parked);
     }
     try std.testing.expect(before.init and before.publish and before.parked and before.finish);
     try std.testing.expect(after.init and after.publish and after.parked and after.finish);
@@ -426,14 +448,16 @@ fn expectBranchPaths(
     std.debug.print("branch suspensions structural={d} optimized={d}\n", .{
         before.cuts, after.cuts,
     });
-    const input = [1]u8{0} ++ std.mem.toBytes(@as(u64, 2)) ++ std.mem.toBytes(@as(u64, 5));
-    var hydration: Coverage = .{};
-    try execute(legacy, optimized, .{
-        .image = image,
-        .input = &input,
-        .answer = 5,
-        .hydration = true,
-    }, &.{}, &hydration);
+    for ([_]u8{ 0, 1 }) |condition| {
+        const input = [1]u8{condition} ++ scalarBytes(2) ++ scalarBytes(5);
+        var hydration: Coverage = .{};
+        try execute(legacy, optimized, .{
+            .image = image,
+            .input = &input,
+            .answer = if (condition == 0) 5 else 41,
+            .hydration = if (condition == 0) .committed else .parked,
+        }, &.{}, &hydration);
+    }
 }
 
 fn expectClone(
@@ -443,7 +467,7 @@ fn expectClone(
 ) !void {
     const image = try @import("semantic/capsule_tests.zig").rawCloneGuest();
     defer a.free(image);
-    const fixture: Fixture = .{ .image = image, .input = &std.mem.toBytes(@as(u64, 17)) };
+    const fixture: Fixture = .{ .image = image, .input = &scalarBytes(17) };
     var before: Coverage = .{};
     var after: Coverage = .{};
     try execute(legacy, optimized, fixture, &.{}, &before);

@@ -213,6 +213,15 @@ realization. Horos `source.slice.extract` admits the complete module, extracts
 the selected function's dependency closure and can require an effect-free slice.
 The resulting source is ordinary editable Horos data.
 
+For an ordinary root, the direct lowering map is available at
+`value.evidence.recovery.correspondence`. An opt-in root carries its complete
+proof in `value.evidence.recovery.source_lower_3`. Its witnesses describe the
+field-to-move substitutions, and its correspondence maps the resulting program
+through final coalescing. Both exports provide the checked source
+specialization in `value.evidence.derivation` when one was used.
+`RuntimeCompiler.exportLegacySource` returns the original statically typed
+bundle for ordinary and relation artifacts.
+
 `RuntimeCompiler.deriveRecord` packages a proposed module and finite relation
 steps as an admitted candidate. `validateAgainst` separately checks it against
 the owner-selected ancestor. The new artifact and lowering contracts are

@@ -54,6 +54,58 @@ fn checkContext(bundle: artifact.Bundle) !void {
     try rejects(changed, error.InvalidRealization);
 }
 
+fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation) !void {
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    var definition = try compiler.SourceDefinition.init(a, true, bundle.hooks);
+    defer definition.deinit();
+    const original = try records.module(scratch.allocator(), definition.module());
+    var work: u64 = original.functions.len + proof.functions.len +
+        proof.request.arguments[0].known.bytes.len;
+    inline for (.{ "schemas", "constants", "effects", "handlers", "resources" }) |name|
+        work += @field(proof.residual, name).len;
+    inline for (.{ "variables", "values", "terms", "functions" }) |name|
+        work += @field(proof.residual, name).len;
+    try std.testing.expectError(
+        error.RelationLimit,
+        @import("semantic/recovery_specialization.zig").validate(
+            a,
+            &definition,
+            original,
+            proof,
+            bundle,
+            &work,
+        ),
+    );
+    try std.testing.expectEqual(0, work);
+}
+
+fn checkEvidenceLimits(bundle: artifact.Bundle) !void {
+    const limits = compiler.recovery_limits;
+    var exact: u64 = bundle.evidence.len;
+    var decoded = try records.decodeEvidence(a, bundle.evidence, true, limits, &exact);
+    defer decoded.deinit();
+    try std.testing.expectEqual(0, exact);
+    try checkVerifierWork(bundle, decoded.value.derivation.?);
+    const encoded = try records.encodeEvidence(a, a, decoded.value, limits);
+    defer a.free(encoded);
+    try std.testing.expectEqualSlices(u8, bundle.evidence, encoded);
+    var smaller = limits;
+    smaller.lowering_bytes = encoded.len - 1;
+    var remaining = limits.source_work;
+    try std.testing.expectError(error.Capacity, records.decodeEvidence(
+        a,
+        bundle.evidence,
+        true,
+        smaller,
+        &remaining,
+    ));
+    try std.testing.expectError(
+        error.Capacity,
+        records.encodeEvidence(a, a, decoded.value, smaller),
+    );
+}
+
 test "specialized scalar recovery binds the guest compiler package and residual context" {
     const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
@@ -74,6 +126,11 @@ test "specialized scalar recovery binds the guest compiler package and residual 
         @import("recovery_options").horos_package,
         bundle.manifest.compiler.horos_package,
     );
+    try checkEvidenceLimits(bundle);
     try checkIdentity(bundle);
     try checkContext(bundle);
+}
+
+test {
+    _ = @import("semantic/recovery_specialization.zig");
 }

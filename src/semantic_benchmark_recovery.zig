@@ -47,14 +47,23 @@ pub fn measure(
         &trace,
         true,
     );
+    const cuts = try scratch.allocator().alloc(u64, trace.items.len);
+    for (trace.items, cuts) |step, *work| work.* = step.guest_work;
     try bench.emit(output, .{
         .phase = "recovery-environment",
+        .reference_cut_guest_work = cuts,
         .workload = "scalar_chain_large",
         .replicates = repetitions,
         .quantum = 256,
         .input = std.fmt.bytesToHex(input[0..8].*, .lower),
         .guest = std.fmt.bytesToHex(guest.identity(), .lower),
         .guest_image_sha256 = std.fmt.bytesToHex(artifact.digest(image), .lower),
+        .structural_horos_package = packaged.horos_package,
+        .opt_in_horos_package = @import("recovery_options").horos_package,
+        .execute_interval = "invocation.advance sum, ordinary allocator, statistics off",
+        .construction_interval = "compile and validation times include allocator metering",
+        .wall_interval = "session start through final outcome and checkpoint checks",
+        .counter_interval = "sum of invocation.advance calls on a separate instrumented session",
         .reference_guest_work = reference.guest_work,
         .reference_cuts = trace.items.len,
         .zig = @import("builtin").zig_version_string,
@@ -76,7 +85,9 @@ pub fn measure(
     for (std.meta.tags(Realization)) |kind| try measurePair(context, kind);
 }
 
-fn build(context: Context, kind: Realization, optimized: bool) !kosmos.Prepared {
+const Built = struct { prepared: kosmos.Prepared, effective_rule: []const u8 };
+
+fn build(context: Context, kind: Realization, optimized: bool) !Built {
     var construction = bench.meter(context.a);
     var start = bench.now(context.io);
     const bytes = try kosmos.RuntimeCompiler.compile(construction.allocator(), .{
@@ -86,8 +97,9 @@ fn build(context: Context, kind: Realization, optimized: bool) !kosmos.Prepared 
     });
     const compile_ns = bench.elapsed(context.io, start);
     defer construction.allocator().free(bytes);
+    const expected = artifact.digest(bytes);
     start = bench.now(context.io);
-    var admitted = try kosmos.RuntimeArtifact.init(context.a, bytes, artifact.digest(bytes));
+    var admitted = try kosmos.RuntimeArtifact.init(context.a, bytes, expected);
     defer admitted.deinit();
     const admission_ns = bench.elapsed(context.io, start);
     var validation = bench.meter(context.a);
@@ -97,8 +109,10 @@ fn build(context: Context, kind: Realization, optimized: bool) !kosmos.Prepared 
     if (validation.live != 0) return error.LeakedValidation;
     const bundle = admitted.content.value;
     const proof = if (optimized) try recoveryShape(context.a, bundle.evidence) else null;
+    const rule = if (proof) |p| p.rule else "legacy_structural";
     try bench.emit(context.output, .{
         .phase = "recovery-construction",
+        .effective_rule = rule,
         .realization = @tagName(kind),
         .optimized = optimized,
         .compiler_policy = bundle.manifest.compiler.policy,
@@ -115,7 +129,10 @@ fn build(context: Context, kind: Realization, optimized: bool) !kosmos.Prepared 
         .compile_peak_bytes = construction.peak,
         .validation_peak_bytes = validation.peak,
     });
-    return kosmos.Prepared.initWithRuntime(context.a, context.image, &admitted);
+    return .{
+        .prepared = try kosmos.Prepared.initWithRuntime(context.a, context.image, &admitted),
+        .effective_rule = rule,
+    };
 }
 
 const ProofShape = struct { rule: []const u8, evidence_bytes: usize, field_witnesses: usize };
@@ -137,87 +154,142 @@ fn recoveryShape(a: Allocator, bytes: []const u8) !ProofShape {
     };
 }
 
-const Costs = struct {
-    start_ns: i96,
-    wall_ns: i96 = 0,
-    execute_ns: i96 = 0,
-    field_evaluations: u64 = 0,
-    move_slot_reads: u64 = 0,
-    base_work: u64 = 0,
+const Observations = struct {
     guest_work: u64 = 0,
-    resident_peak_bytes: usize = 0,
-    resident_retained_bytes: usize = 0,
     checked_cuts: usize = 0,
     answer: ?u64 = null,
     terminal_checkpoint: Digest = undefined,
 };
+const Timings = struct { start_ns: i96, execute_ns: i96 = 0, wall_ns: i96 = 0 };
+const Counters = struct {
+    field_evaluations: u64 = 0,
+    move_slot_reads: u64 = 0,
+    base_work: u64 = 0,
+    resident_peak_bytes: usize = 0,
+    resident_retained_bytes: usize = 0,
+};
 
 fn measurePair(context: Context, kind: Realization) !void {
     var structural = try build(context, kind, false);
-    defer structural.deinit();
+    defer structural.prepared.deinit();
     var optimized = try build(context, kind, true);
-    defer optimized.deinit();
+    defer optimized.prepared.deinit();
     for (0..repetitions) |replicate| {
         for (0..2) |order| {
             const selected = (replicate + order) % 2 == 1;
-            const runtime = if (selected) &optimized else &structural;
-            const costs = try sample(context, runtime);
+            const built = if (selected) &optimized else &structural;
+            const sample = try timed(context, &built.prepared);
+            const observed = sample.observed;
+            const manifest = built.prepared.runtime.content.value.manifest;
             try bench.emit(context.output, .{
                 .phase = "recovery-execution",
                 .realization = @tagName(kind),
                 .optimized = selected,
+                .effective_rule = built.effective_rule,
+                .horos_package = manifest.compiler.horos_package,
                 .replicate = replicate,
                 .order = order,
-                .artifact = std.fmt.bytesToHex(runtime.runtime.identity, .lower),
-                .checked_cuts = costs.checked_cuts,
-                .guest_work = costs.guest_work,
-                .answer = costs.answer,
-                .terminal_checkpoint = std.fmt.bytesToHex(costs.terminal_checkpoint, .lower),
-                .base_work = costs.base_work,
-                .field_evaluations = costs.field_evaluations,
-                .move_slot_reads = costs.move_slot_reads,
-                .start_ns = costs.start_ns,
-                .execute_ns = costs.execute_ns,
-                .wall_ns = costs.wall_ns,
-                .resident_peak_bytes = costs.resident_peak_bytes,
-                .resident_retained_bytes = costs.resident_retained_bytes,
+                .artifact = std.fmt.bytesToHex(built.prepared.runtime.identity, .lower),
+                .checked_cuts = observed.checked_cuts,
+                .guest_work = observed.guest_work,
+                .answer = observed.answer,
+                .terminal_checkpoint = std.fmt.bytesToHex(observed.terminal_checkpoint, .lower),
+                .start_ns = sample.time.start_ns,
+                .execute_ns = sample.time.execute_ns,
+                .wall_ns = sample.time.wall_ns,
             });
         }
     }
+    for ([_]*const Built{ &structural, &optimized }, 0..) |built, index| {
+        const measured = try counted(context, &built.prepared);
+        const observed = measured.observed;
+        const manifest = built.prepared.runtime.content.value.manifest;
+        try bench.emit(context.output, .{
+            .phase = "recovery-counters",
+            .realization = @tagName(kind),
+            .optimized = index == 1,
+            .effective_rule = built.effective_rule,
+            .horos_package = manifest.compiler.horos_package,
+            .artifact = std.fmt.bytesToHex(built.prepared.runtime.identity, .lower),
+            .checked_cuts = observed.checked_cuts,
+            .guest_work = observed.guest_work,
+            .answer = observed.answer,
+            .terminal_checkpoint = std.fmt.bytesToHex(observed.terminal_checkpoint, .lower),
+            .base_work = measured.cost.base_work,
+            .field_evaluations = measured.cost.field_evaluations,
+            .move_slot_reads = measured.cost.move_slot_reads,
+            .resident_peak_bytes = measured.cost.resident_peak_bytes,
+            .resident_retained_bytes = measured.cost.resident_retained_bytes,
+        });
+    }
 }
 
-fn sample(context: Context, prepared: *const kosmos.Prepared) !Costs {
-    var m = bench.meter(context.a);
-    var statistics: kosmos.Statistics = .{};
+fn timed(context: Context, prepared: *const kosmos.Prepared) !struct {
+    time: Timings,
+    observed: Observations,
+} {
     const start = bench.now(context.io);
-    var session = try kosmos.Session.start(m.allocator(), prepared, context.input);
-    var costs: Costs = .{ .start_ns = bench.elapsed(context.io, start) };
+    var session = try kosmos.Session.start(context.a, prepared, context.input);
+    var time: Timings = .{ .start_ns = bench.elapsed(context.io, start) };
+    defer session.deinit();
+    var observed: Observations = .{};
+    for (context.trace) |step| {
+        const before = session.transitions;
+        const begin = bench.now(context.io);
+        _ = try kosmos.invocation.advance(&session, step.control, 256);
+        time.execute_ns += bench.elapsed(context.io, begin);
+        try checkCut(context, &session, step, session.transitions -% before, &observed);
+    }
+    time.wall_ns = bench.elapsed(context.io, start);
+    try checkComplete(context, observed);
+    return .{ .time = time, .observed = observed };
+}
+
+fn counted(context: Context, prepared: *const kosmos.Prepared) !struct {
+    cost: Counters,
+    observed: Observations,
+} {
+    var m = bench.meter(context.a);
+    var stats: kosmos.Statistics = .{};
+    var cost: Counters = .{};
+    var observed: Observations = .{};
     {
+        var session = try kosmos.Session.start(m.allocator(), prepared, context.input);
         defer session.deinit();
-        session.setStatistics(&statistics);
+        session.setStatistics(&stats);
         for (context.trace) |step| {
-            const fields = statistics.storage.base_field_evaluations;
-            const moves = statistics.storage.base_move_slot_reads;
-            const begin = bench.now(context.io);
+            const fields = stats.storage.base_field_evaluations;
+            const moves = stats.storage.base_move_slot_reads;
+            const guest_before = session.transitions;
+            const base_before = session.driver.outer.transitions;
             _ = try kosmos.invocation.advance(&session, step.control, 256);
-            costs.execute_ns += bench.elapsed(context.io, begin);
-            costs.field_evaluations += statistics.storage.base_field_evaluations - fields;
-            costs.move_slot_reads += statistics.storage.base_move_slot_reads - moves;
-            try checkCut(context, &session, step, &costs);
+            cost.field_evaluations += stats.storage.base_field_evaluations - fields;
+            cost.move_slot_reads += stats.storage.base_move_slot_reads - moves;
+            cost.base_work += session.driver.outer.transitions -% base_before;
+            try checkCut(context, &session, step, session.transitions -% guest_before, &observed);
         }
-        costs.wall_ns = bench.elapsed(context.io, start);
-        costs.guest_work = statistics.transitions;
-        costs.base_work = statistics.base_transitions;
-        costs.resident_peak_bytes = m.peak;
-        costs.resident_retained_bytes = m.live;
+        cost.resident_peak_bytes = m.peak;
+        cost.resident_retained_bytes = m.live;
     }
     if (m.live != 0) return error.LeakedExecution;
-    if (costs.answer == null or costs.guest_work != context.guest_work)
-        return error.GuestObservationChanged;
-    return costs;
+    try checkComplete(context, observed);
+    return .{ .cost = cost, .observed = observed };
 }
 
-fn checkCut(context: Context, session: *kosmos.Session, step: bench.Step, costs: *Costs) !void {
+fn checkComplete(context: Context, observed: Observations) !void {
+    if (observed.answer == null or observed.guest_work != context.guest_work)
+        return error.GuestObservationChanged;
+}
+
+fn checkCut(
+    context: Context,
+    session: *kosmos.Session,
+    step: bench.Step,
+    guest_work: usize,
+    observed: *Observations,
+) !void {
+    if (guest_work != step.guest_work) return error.GuestWorkChanged;
+    observed.guest_work += guest_work;
     var outcome = try kosmos.invocation.finish(context.a, session, false);
     defer outcome.deinit();
     const encoded = try protocol.encodeOwned(protocol.Outcome, context.a, outcome.record);
@@ -226,11 +298,11 @@ fn checkCut(context: Context, session: *kosmos.Session, step: bench.Step, costs:
     defer context.a.free(checkpoint);
     if (!std.mem.eql(u8, checkpoint, step.checkpoint) or !std.mem.eql(u8, encoded, step.outcome))
         return error.GuestObservationChanged;
-    costs.checked_cuts += 1;
+    observed.checked_cuts += 1;
     if (outcome.record == .completed) {
         const result = outcome.record.completed;
         if (result.len != 8) return error.GuestObservationChanged;
-        costs.answer = std.mem.readInt(u64, result[0..8], .little);
-        costs.terminal_checkpoint = artifact.digest(checkpoint);
+        observed.answer = std.mem.readInt(u64, result[0..8], .little);
+        observed.terminal_checkpoint = artifact.digest(checkpoint);
     }
 }

@@ -16,7 +16,7 @@ pub const Derivation = spec.Derivation;
 pub const policy = spec.policy;
 pub const context = spec.context;
 pub const limits: opt.Limits = .{};
-pub const Evidence = struct { recovery: []const u8, derivation: ?Derivation };
+pub const Evidence = records.Evidence;
 
 const Selection = struct {
     module: source.Module,
@@ -103,14 +103,19 @@ pub fn compile(a: Allocator, options: legacy.Options) ![]u8 {
         },
         .branch_returns = entries.branches,
         .template_entries = entries.templates,
-        .evidence = try records.encode(mem, Evidence{
+        .evidence = try records.encodeEvidence(a, mem, .{
             .recovery = try records.encode(mem, result.evidence),
             .derivation = derivation,
-        }),
+        }, limits),
     });
     errdefer a.free(bundle);
     var admitted = try art.Admitted.init(a, bundle, art.digest(bundle));
     defer admitted.deinit();
+    var work = limits.source_work;
+    const content = admitted.content.value;
+    var envelope = try openEvidence(a, content, &work);
+    defer envelope.deinit();
+    try spec.validate(a, &definition, original, envelope.value.derivation, content, &work);
     return bundle;
 }
 
@@ -169,6 +174,19 @@ fn buildHelpers(
 }
 
 pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
+    try checkManifest(admitted);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const mem = arena.allocator();
+    const bundle = admitted.content.value;
+    var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
+    defer definition.deinit();
+    var remaining = limits.source_work;
+    var validated = try validateDefined(a, mem, &remaining, admitted, &definition);
+    defer validated.deinit(a);
+}
+
+pub fn checkManifest(admitted: *const art.Admitted) !void {
     const bundle = admitted.content.value;
     const m = bundle.manifest;
     if (bundle.lineage != null or !std.mem.eql(u8, m.contract, art.identity) or
@@ -177,17 +195,73 @@ pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
         !std.mem.eql(u8, m.compiler.horos_package, @import("recovery_options").horos_package) or
         !std.mem.eql(u8, m.compiler.zig, @import("builtin").zig_version_string))
         return error.UnsupportedSource;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const mem = arena.allocator();
-    const evidence = try decodeEvidence(mem, bundle.evidence);
+}
+
+pub const Validated = struct {
+    envelope: records.DecodedEvidence,
+    derivation: ?Derivation,
+    proof: opt.Decoded,
+    parameters: []const source.RecoveryBinding,
+
+    pub fn deinit(self: *Validated, a: Allocator) void {
+        a.free(self.parameters);
+        self.proof.deinit();
+        self.envelope.deinit();
+    }
+};
+
+pub fn validateDefined(
+    a: Allocator,
+    scratch: Allocator,
+    remaining: *u64,
+    admitted: *const art.Admitted,
+    definition: *const legacy.SourceDefinition,
+) !Validated {
+    const bundle = admitted.content.value;
+    var envelope = try openEvidence(a, bundle, remaining);
+    errdefer envelope.deinit();
+    const evidence = envelope.value;
     var proof = try opt.decode(a, evidence.recovery, limits);
-    defer proof.deinit();
-    var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
-    defer definition.deinit();
-    const original = try records.module(mem, definition.module());
-    try spec.validate(a, mem, &definition, original, evidence.derivation, bundle);
-    const selected = try Selection.init(mem, &definition, original, evidence.derivation);
+    errdefer proof.deinit();
+    const original = try records.module(scratch, definition.module());
+    try spec.validate(a, definition, original, evidence.derivation, bundle, remaining);
+    const selected = try Selection.init(scratch, definition, original, evidence.derivation);
+    const parameters = try validateSelected(
+        a,
+        scratch,
+        admitted,
+        definition,
+        original,
+        selected,
+        proof.evidence,
+    );
+    return .{
+        .envelope = envelope,
+        .derivation = evidence.derivation,
+        .proof = proof,
+        .parameters = parameters,
+    };
+}
+
+fn openEvidence(
+    a: Allocator,
+    bundle: art.Bundle,
+    remaining: *u64,
+) !records.DecodedEvidence {
+    if ((bundle.guest != null) != (bundle.specialization != null)) return error.InvalidRealization;
+    return records.decodeEvidence(a, bundle.evidence, bundle.guest != null, limits, remaining);
+}
+
+fn validateSelected(
+    a: Allocator,
+    mem: Allocator,
+    admitted: *const art.Admitted,
+    definition: *const legacy.SourceDefinition,
+    original: source.Module,
+    selected: Selection,
+    proof: opt.Evidence,
+) ![]const source.RecoveryBinding {
+    const bundle = admitted.content.value;
     try records.checkImage(a, bundle.image, admitted.program);
     const target = try data.program_image.Admitted.decode(a, bundle.image);
     defer target.deinit();
@@ -195,11 +269,11 @@ pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
         a,
         selected.module,
         target.program(),
-        proof.evidence,
+        proof,
         selected.options,
     );
-    defer a.free(parameters);
-    const mapped = try selected.interfaces(mem, &definition, parameters);
+    errdefer a.free(parameters);
+    const mapped = try selected.interfaces(mem, definition, parameters);
     if (!old.record.equal([]const art.Anchor, mapped.anchors, bundle.recovery.anchors) or
         !std.mem.eql(u64, mapped.branches, bundle.branch_returns) or
         !std.mem.eql(u64, mapped.templates, bundle.template_entries)) return error.InvalidRecovery;
@@ -212,16 +286,5 @@ pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
         if (!std.mem.eql(u8, try helperImage(a, mem, original, entry), helper.image))
             return error.InvalidRecovery;
     }
-}
-
-fn decodeEvidence(mem: Allocator, bytes: []const u8) !Evidence {
-    var capacity = limits.lowering_bytes;
-    if (bytes.len > capacity) return error.Capacity;
-    var reader: data.wire.Reader = .{ .input = bytes };
-    const inner = try reader.bytes();
-    if (inner.len > @max(limits.evidence_bytes, limits.structural_evidence_bytes))
-        return error.ScalarFieldLimit;
-    const derivation = try data.record.readBounded(?Derivation, &reader, mem, &capacity);
-    try reader.finish();
-    return .{ .recovery = inner, .derivation = derivation };
+    return parameters;
 }
