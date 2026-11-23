@@ -44,9 +44,7 @@ pub fn validateWithPolicy(
     defer owned.deinit();
     if (!std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
         return legacy.validateWithPolicy(a, &owned, policy);
-    var checked = try backend.independentCopy(a, &owned);
-    defer checked.deinit();
-    return backend.validate(a, &checked);
+    return backend.validate(a, &owned);
 }
 
 pub fn validateAgainst(
@@ -61,18 +59,19 @@ pub fn validateAgainst(
     if (!std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
         return legacy.validateAgainst(a, &owned, &parent);
     if (!std.mem.eql(u8, &owned.identity, &parent.identity)) return error.InvalidAncestor;
-    var checked = try backend.independentCopy(a, &owned);
-    defer checked.deinit();
     if (owned.core != parent.core) {
+        if (owned.core.?.encoded_length != parent.core.?.encoded_length)
+            return error.InvalidAncestor;
         var work = recovery_limits.source_work;
         if (!try @import("horos_recovery").data.record.equalWithWork(
             artifact.Bundle,
-            checked.content.value,
+            owned.content.value,
             parent.content.value,
             &work,
         )) return error.InvalidAncestor;
+        try backend.bindOwners(&parent, &work);
     }
-    return backend.validate(a, &checked);
+    return backend.validate(a, &owned);
 }
 
 pub const checker_identity = legacy.checker_identity;
@@ -83,7 +82,10 @@ pub const DeriveOptions = legacy.DeriveOptions;
 pub const ValidationPolicy = legacy.ValidationPolicy;
 pub const derive = legacy.derive;
 pub const deriveRecord = legacy.deriveRecord;
-pub const approvedRootIdentity = legacy.approvedRootIdentity;
+pub fn approvedRootIdentity(candidate: *const artifact.Admitted) artifact.Digest {
+    const core = candidate.core orelse return legacy.approvedRootIdentity(candidate);
+    return if (core.content.value.lineage) |lineage| lineage.root else core.identity;
+}
 pub const Derivation = legacy.Derivation;
 pub const Evidence = legacy.Evidence;
 pub const SourceDefinition = legacy.SourceDefinition;

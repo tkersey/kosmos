@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     }
     const options = configureOptions(b);
     const dependencies = configureDependencies(b, options) orelse return;
+    configureRecoveryPrefetch(b, options, dependencies);
     const storage_checks = configureStorageChecks(b, options, dependencies);
     const host_modules = configureHostModules(b, options, dependencies);
     const artifact_images = configureArtifactImages(b, options, host_modules);
@@ -189,6 +190,21 @@ const Dependencies = struct {
     public_kosmos: *std.Build.Module,
     recovery_kosmos: *std.Build.Module,
 };
+
+fn configureRecoveryPrefetch(b: *std.Build, options: Options, deps: Dependencies) void {
+    const prefetch = b.step("prefetch-recovery", "Install both pinned Horos sources for --system");
+    inline for (.{
+        .{ deps.source, options.package.dependencies.horos.hash },
+        .{ deps.recovery_source, options.package.horos_recovery.hash },
+    }) |package| {
+        const install = b.addInstallDirectory(.{
+            .source_dir = package[0],
+            .install_dir = .prefix,
+            .install_subdir = package[1],
+        });
+        prefetch.dependOn(&install.step);
+    }
+}
 
 fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
     const recovery_override = b.option(

@@ -110,7 +110,11 @@ app.root_module.addImport("kosmos", dependency.module("kosmos_recovery"));
 Both modules share the same public session and artifact types, so an application
 can use the checked compiler with libraries that import ordinary `kosmos`.
 The recovery module authenticates the `horos_recovery` pin in `build.zig.zon`.
-With `zig build --system`, install both pinned packages in the system directory.
+For an offline checked build, run `zig build prefetch-recovery -p /path/to/packages`
+from the Kosmos source directory while online. This populates the directory with
+both authenticated Horos packages for `zig build --system /path/to/packages`.
+Zig's `--fetch=all` covers ordinary manifest dependencies. The optional
+recovery compiler has its own pin.
 If `-Dhoros-source` supplies the ordinary compiler outside that directory, you
 can supply the checked compiler with `-Dhoros-recovery-source=/absolute/source`.
 The compiler defaults to ordinary lowering and its original package identity.

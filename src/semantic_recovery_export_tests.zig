@@ -7,6 +7,10 @@ const artifact = @import("semantic/artifact.zig");
 const packaged = @import("semantic_packaged.zig");
 const a = std.testing.allocator;
 
+comptime {
+    _ = @import("semantic/recovery_backend.zig");
+}
+
 fn checkSource(exported: anytype, candidate: *const artifact.Admitted) !void {
     const v = exported.value;
     const bundle = candidate.content.value;
@@ -53,7 +57,7 @@ fn checkSource(exported: anytype, candidate: *const artifact.Admitted) !void {
     } else try std.testing.expectEqual(v.generic.digest, v.selected.digest);
 }
 
-fn checkRecoveryExport(candidate: *const artifact.Admitted) !void {
+fn checkRecoveryExport(candidate: *const artifact.Admitted) !artifact.Admitted {
     var exported: compiler.ExportedRecoverySource = try compiler.exportRecoverySource(a, candidate);
     defer exported.deinit();
     try checkSource(&exported, candidate);
@@ -71,6 +75,7 @@ fn checkRecoveryExport(candidate: *const artifact.Admitted) !void {
         candidate.content.value.evidence,
     ));
     try std.testing.expectEqual(proof.rule == .structural_fallback, proof.witnesses.len == 0);
+    return exported.retained.clone();
 }
 
 fn checkBindings(
@@ -98,7 +103,7 @@ fn checkLegacyExport(exported: *const compiler.ExportedSource) !void {
     defer arena.deinit();
     const protected = try roles.selected(
         arena.allocator(),
-        try roles.roots(a, arena.allocator(), &exported.definition),
+        roles.roots(&exported.definition),
         @as([]const Function, &.{}),
         &work,
     );
@@ -138,6 +143,23 @@ test "public checked source export preserves ordinary compiler types and lowerin
     }
 }
 
+fn checkDetachedOwners(retained: *artifact.Admitted, bytes: []const u8) !void {
+    const canonical = try retained.encode(a);
+    defer a.free(canonical);
+    try std.testing.expectEqualSlices(u8, bytes, canonical);
+    try std.testing.expectEqual(artifact.digest(bytes), compiler.approvedRootIdentity(retained));
+    const expected = retained.content.value.manifest.image;
+    const helper_image = retained.helpers[0].identity();
+    const core = retained.core.?;
+    var prepared = try core.executable.clone();
+    defer prepared.deinit();
+    var helper = try core.helper_executables[0].clone();
+    defer helper.deinit();
+    retained.deinit();
+    try std.testing.expectEqual(expected, prepared.core.?.admitted().identity());
+    try std.testing.expectEqual(helper_image, helper.core.?.admitted().identity());
+}
+
 test "public checked source export retains builtin and specialized recovery source" {
     var ordinary = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
     defer ordinary.deinit();
@@ -152,7 +174,9 @@ test "public checked source export retains builtin and specialized recovery sour
             .guest = selection,
         });
         defer a.free(bytes);
-        var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+        var parent = std.testing.FailingAllocator.init(a, .{});
+        const identity = artifact.digest(bytes);
+        var candidate = try artifact.Admitted.init(parent.allocator(), bytes, identity);
         defer candidate.deinit();
         var independent = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
         defer independent.deinit();
@@ -162,32 +186,44 @@ test "public checked source export retains builtin and specialized recovery sour
             &candidate,
             &ordinary,
         ));
-        try checkRecoveryExport(&candidate);
+        var retained = try checkRecoveryExport(&candidate);
+        defer retained.deinit();
+        candidate.deinit();
+        try std.testing.expectEqual(parent.allocated_bytes, parent.freed_bytes);
+        try checkDetachedOwners(&retained, bytes);
     }
 }
 
-test "protected roots follow the staged ordinary exporter with instrumented cuts" {
+test "protected roots match ordinary exports across staging and hook selections" {
     const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
+    const toggles = [_]bool{ false, true };
+    for ([_]?*const data.program_image.Admitted{ null, guest }) |selected| {
+        for (toggles) |control| {
+            for (toggles) |storage| {
+                try expectOrdinaryRoots(selected, .{ .control = control, .storage = storage });
+            }
+        }
+    }
+}
+
+fn expectOrdinaryRoots(
+    guest: ?*const data.program_image.Admitted,
+    hooks: @FieldType(legacy.Options, "hooks"),
+) !void {
     const bytes = try legacy.compile(a, .{
         .horos_package = packaged.horos_package,
         .guest = guest,
-        .hooks = .{ .control = true, .storage = true },
+        .hooks = hooks,
     });
     defer a.free(bytes);
     var admitted = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
     defer admitted.deinit();
     var ordinary = try legacy.exportBuiltinSource(a, &admitted);
     defer ordinary.deinit();
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const roots = try @import("semantic/recovery_roles.zig").roots(
-        a,
-        arena.allocator(),
-        &ordinary.definition,
-    );
+    const roots = @import("semantic/recovery_roles.zig").roots(&ordinary.definition);
     try std.testing.expect(data.record.equal(@TypeOf(roots), ordinary.value.generic_roles, roots));
 }
 

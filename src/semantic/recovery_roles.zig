@@ -3,7 +3,11 @@ const runtime = @import("../runtime_sources.zig");
 const source = @import("horos_recovery").source;
 const compiler = runtime.compiler;
 const artifact = runtime.artifact;
-const role = compiler.SourceRole;
+const SourceRole = compiler.SourceRole;
+const service = runtime.service;
+const clones = struct {
+    const Definition = @FieldType(compiler.SourceDefinition, "clone");
+};
 const Allocator = std.mem.Allocator;
 const Id = u64;
 const Function = source.specialize.FunctionProof;
@@ -12,54 +16,39 @@ const spend = @import("horos_recovery").data.admission.spend;
 
 pub const Roots = @FieldType(compiler.SourceBundle, "generic_roles");
 
-pub fn roots(
-    a: Allocator,
-    storage: Allocator,
-    definition: *const compiler.SourceDefinition,
-) !Roots {
-    const packaged = runtime.packaged;
-    var identity: artifact.Digest = undefined;
-    _ = try std.fmt.hexToBytes(&identity, packaged.artifact_sha256);
-    var retained = try artifact.Admitted.init(a, packaged.bytes, identity);
-    defer retained.deinit();
-    var ordinary = try compiler.exportBuiltinSource(a, &retained);
-    defer ordinary.deinit();
-    var result = try copyRoots(storage, ordinary.value.generic_roles);
-    for (&result) |*entry| entry.function = try reboundFunction(
-        &ordinary.definition,
-        definition,
-        entry.function,
-    );
-    return result;
+pub fn roots(definition: *const compiler.SourceDefinition) Roots {
+    return sourceRoles(definition.service, definition.clone);
 }
 
-pub fn copyRoots(storage: Allocator, original: Roots) !Roots {
-    var result = original;
-    for (&result) |*entry| entry.ordinals = try storage.dupe(u32, entry.ordinals);
-    return result;
+comptime {
+    const ordinary = @embedFile("compiler.zig");
+    const checked = @embedFile("recovery_roles.zig");
+    @setEvalBranchQuota(8 * (ordinary.len + checked.len));
+    if (!std.mem.eql(u8, roleDefinition(ordinary), roleDefinition(checked)))
+        @compileError("checked sourceRoles must match the ordinary compiler definition");
 }
 
-fn reboundFunction(
-    ordinary: *const compiler.SourceDefinition,
-    selected_definition: *const compiler.SourceDefinition,
-    original: Id,
-) !Id {
-    var rebound: ?Id = null;
-    inline for (.{
-        .{ "service", .{
-            "entry", "loop", "dispatch", "advance", "commit", "control_commit", "publish", "cut",
-        } },
-        .{ "clone", .{ "instantiate", "run", "rebase" } },
-    }) |group| {
-        inline for (group[1]) |name| {
-            if (@field(@field(ordinary, group[0]), name) == original) {
-                const mapped = @field(@field(selected_definition, group[0]), name);
-                if (rebound != null and rebound.? != mapped) return error.InvalidRecovery;
-                rebound = mapped;
-            }
-        }
-    }
-    return rebound orelse error.InvalidRecovery;
+fn roleDefinition(comptime file: []const u8) []const u8 {
+    const begin = std.mem.find(u8, file, "\nfn sourceRoles(") orelse
+        @compileError("missing sourceRoles definition");
+    const declaration = file[begin + 1 ..];
+    const end = std.mem.find(u8, declaration, "\n}\n") orelse
+        @compileError("incomplete sourceRoles definition");
+    return declaration[0 .. end + 2];
+}
+
+fn sourceRoles(s: service.Definition, clone: clones.Definition) [9]SourceRole {
+    return .{
+        .{ .function = s.loop, .role = .published_service, .ordinals = &.{1} },
+        .{ .function = s.dispatch, .role = .committed_service, .ordinals = &.{1} },
+        .{ .function = s.publish, .role = .committed_service, .ordinals = &.{1} },
+        .{ .function = s.publish, .role = .committed_service, .ordinals = &.{2} },
+        .{ .function = s.commit, .role = .committed_machine, .ordinals = &.{0} },
+        .{ .function = s.control_commit, .role = .committed_machine, .ordinals = &.{0} },
+        .{ .function = s.cut, .role = .committed_machine, .ordinals = &.{0} },
+        .{ .function = clone.run, .role = .clone_context, .ordinals = &.{ 0, 1 } },
+        .{ .function = clone.rebase, .role = .clone_rebase, .ordinals = &.{ 0, 1, 2, 3 } },
+    };
 }
 
 pub fn selected(
@@ -67,8 +56,8 @@ pub fn selected(
     root_roles: Roots,
     functions: anytype,
     work: *u64,
-) ![]const role {
-    var result: std.ArrayList(role) = .empty;
+) ![]const SourceRole {
+    var result: std.ArrayList(SourceRole) = .empty;
     try spend(work, root_roles.len);
     for (root_roles) |root| {
         try spend(work, functions.len);
@@ -94,7 +83,7 @@ pub fn selected(
 
 pub fn formals(
     a: Allocator,
-    roles: []const role,
+    roles: []const SourceRole,
     work: *u64,
 ) ![]const source.recovery_optimization.Formal {
     var result: std.ArrayList(source.recovery_optimization.Formal) = .empty;
@@ -109,7 +98,7 @@ pub fn formals(
 
 pub fn anchors(
     a: Allocator,
-    roles: []const role,
+    roles: []const SourceRole,
     module: source.Module,
     parameters: []const Binding,
     work: *u64,

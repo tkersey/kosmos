@@ -35,7 +35,7 @@ pub const Inputs = struct {
             if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
             return err;
         };
-        const roots = try roles.roots(a, arena.allocator(), definition);
+        const roots = roles.roots(definition);
         arena.child_allocator = a;
         return .{ .arena = arena, .original = original, .roots = roots };
     }
@@ -114,7 +114,13 @@ pub fn compile(a: Allocator, options: legacy.Options) !Compiled {
     defer inputs.arena.deinit();
     const result = try emit(a, options, &definition, &inputs);
     errdefer a.free(result.bytes);
-    var admitted = try art.Admitted.init(a, result.bytes, art.digest(result.bytes));
+    var physical = limits.lowering_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    const digest = art.digest(result.bytes);
+    var admitted = art.Admitted.init(cap.allocator(), result.bytes, digest) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
     defer admitted.deinit();
     try preflight(&admitted);
     try validatePrepared(a, &admitted, &definition, &inputs);
@@ -262,6 +268,8 @@ fn buildHelpers(
 
 pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
     try preflight(admitted);
+    const bytes = try canonicalBytes(a, admitted);
+    a.free(bytes);
     const bundle = admitted.content.value;
     var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
     defer definition.deinit();
@@ -282,21 +290,132 @@ fn validatePrepared(
     defer a.free(validated.parameters);
 }
 
+const SnapshotAllocator = struct {
+    backing: Allocator,
+    references: std.atomic.Value(usize) = .init(1),
+
+    fn release(self: *SnapshotAllocator) void {
+        if (self.references.fetchSub(1, .acq_rel) == 1) self.backing.destroy(self);
+    }
+
+    fn allocator(self: *SnapshotAllocator) Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, align_to: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *SnapshotAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, align_to, ra) orelse return null;
+        _ = self.references.fetchAdd(1, .monotonic);
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, align_to: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *SnapshotAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(buf, align_to, len, ra);
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        buf: []u8,
+        align_to: std.mem.Alignment,
+        len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *SnapshotAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(buf, align_to, len, ra);
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, align_to: std.mem.Alignment, ra: usize) void {
+        const self: *SnapshotAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(buf, align_to, ra);
+        self.release();
+    }
+};
+
 pub fn independentCopy(a: Allocator, owned: *const art.Admitted) !art.Admitted {
     try preflight(owned);
+    var physical = limits.lowering_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    const bytes = canonicalBytes(cap.allocator(), owned) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+    defer cap.allocator().free(bytes);
+    return admitSnapshot(&cap, bytes, owned.identity);
+}
+
+fn admitSnapshot(
+    cap: *data.AllocationBudget,
+    bytes: []const u8,
+    identity: art.Digest,
+) !art.Admitted {
+    const storage = cap.allocator().create(SnapshotAllocator) catch |err| {
+        if (cap.exhausted) return error.Capacity;
+        return err;
+    };
+    storage.* = .{ .backing = cap.allocator() };
+    const result = art.Admitted.init(storage.allocator(), bytes, identity) catch |err| {
+        storage.release();
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+    storage.backing = cap.parent;
+    storage.release();
+    return result;
+}
+
+fn canonicalBytes(a: Allocator, owned: *const art.Admitted) ![]u8 {
     const core = owned.core orelse return error.InvalidState;
     var physical = core.encoded_length;
+    if (physical > limits.lowering_bytes) return error.Capacity;
     var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
     const bytes = owned.encode(cap.allocator()) catch |err| {
         if (err == error.OutOfMemory and cap.exhausted) return error.ArtifactIdentityMismatch;
         return err;
     };
-    defer cap.allocator().free(bytes);
-    if (bytes.len != core.encoded_length) return error.ArtifactIdentityMismatch;
-    return art.Admitted.init(a, bytes, owned.identity);
+    errdefer a.free(bytes);
+    if (bytes.len != core.encoded_length or !std.mem.eql(u8, &art.digest(bytes), &owned.identity))
+        return error.ArtifactIdentityMismatch;
+    return bytes;
+}
+
+fn bindImage(
+    handle: @FieldType(art.Core, "executable"),
+    mirror: *const old.program_image.Admitted,
+    bytes: []const u8,
+    work: *u64,
+) !void {
+    const core = handle.core orelse return error.InvalidState;
+    const admitted = core.admitted();
+    if (admitted != mirror) return error.ArtifactIdentityMismatch;
+    try data.admission.spend(work, bytes.len);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(old.program_image.identity_domain);
+    hash.update(bytes);
+    if (!std.mem.eql(u8, &hash.finalResult(), &admitted.identity()))
+        return error.ArtifactIdentityMismatch;
+}
+
+pub fn bindOwners(owned: *const art.Admitted, work: *u64) !void {
+    const core = owned.core orelse return error.InvalidState;
+    const bundle = core.content.value;
+    try bindImage(core.executable, core.program, bundle.image, work);
+    if (!std.mem.eql(u8, &core.program.identity(), &bundle.manifest.image))
+        return error.ArtifactIdentityMismatch;
+    const recovery = bundle.recovery;
+    for (core.helper_executables, core.helpers, [_]art.Helper{
+        recovery.projector, recovery.storage, recovery.clone_context, recovery.clone_rebase,
+    }) |handle, mirror, helper| try bindImage(handle, mirror, helper.image, work);
 }
 
 pub fn preflight(admitted: *const art.Admitted) !void {
+    const core = admitted.core orelse return error.InvalidState;
+    if (core.encoded_length > limits.lowering_bytes) return error.Capacity;
     const bundle = admitted.content.value;
     const m = bundle.manifest;
     if (bundle.lineage != null or !std.mem.eql(u8, m.contract, art.identity) or
@@ -311,6 +430,7 @@ pub fn preflight(admitted: *const art.Admitted) !void {
     var work = limits.source_work;
     var sizing: data.wire.Writer = .{ .remaining = &work };
     try data.record.write(art.Bundle, bundle, &sizing);
+    try bindOwners(admitted, &work);
 }
 
 pub const Validated = struct {
@@ -390,6 +510,9 @@ fn validateSelected(
 ) ![]const source.RecoveryBinding {
     const bundle = admitted.content.value;
     const target = try records.targetProgram(mem, admitted.program, limits.lowering_bytes, work);
+    const expected = try manifest(mem, admitted.program);
+    if (!try data.record.equalWithWork(art.Manifest, expected, bundle.manifest, work))
+        return error.ArtifactIdentityMismatch;
     const parameters = try opt.parameters(
         a,
         selected.module,
@@ -414,6 +537,9 @@ fn validateSelected(
         var compiled = try source.lower(a, selected_helper);
         defer compiled.deinit();
         try records.checkProgramWithWork(owner, compiled.program, work);
+        const inventory = try art.inventory(mem, try profile.check(owner, .{}));
+        if (!try equal(art.Inventory, inventory, helper.inventory, work))
+            return error.InvalidInventory;
         const bytes = try records.image(a, a, compiled.program);
         defer a.free(bytes);
         if (bytes.len != helper.image.len) return error.InvalidRecovery;
@@ -421,4 +547,20 @@ fn validateSelected(
         if (!std.mem.eql(u8, bytes, helper.image)) return error.InvalidRecovery;
     }
     return parameters;
+}
+
+test "private admission reports its own storage refusal and preserves backing allocator errors" {
+    const a = std.testing.allocator;
+    const bytes = runtime.packaged.bytes;
+    const identity = art.digest(bytes);
+    var physical: usize = @sizeOf(SnapshotAllocator);
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    try std.testing.expectError(error.Capacity, admitSnapshot(&cap, bytes, identity));
+    try std.testing.expectEqual(@sizeOf(SnapshotAllocator), physical);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    cap.parent = failing.allocator();
+    physical = limits.lowering_bytes;
+    try std.testing.expectError(error.OutOfMemory, admitSnapshot(&cap, bytes, identity));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(limits.lowering_bytes, physical);
 }

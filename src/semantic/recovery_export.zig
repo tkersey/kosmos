@@ -133,7 +133,6 @@ fn sourceBundle(
         .slot = checked.slot,
         .schema = checked.schema,
     };
-    const generic_roles = try roles.copyRoots(storage, roots);
     return .{
         .realization = retained.identity,
         .image = bundle.manifest.image,
@@ -152,8 +151,8 @@ fn sourceBundle(
             functions,
             work,
         ),
-        .generic_roles = generic_roles,
-        .selected_roles = try roles.selected(storage, generic_roles, functions, work),
+        .generic_roles = roots,
+        .selected_roles = try roles.selected(storage, roots, functions, work),
         .generic_pure_entries = pure,
         .parameters = parameters,
         .anchors = bundle.recovery.anchors,

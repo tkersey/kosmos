@@ -225,10 +225,12 @@ types expose the checked specialization in `value.evidence.derivation` when
 one was used. The benchmark records Horos's lowering decision as
 `producer_outcome` alongside the rule from the checked proof.
 
-When validating a checked root, Kosmos admits a private copy of its canonical
-bytes against the retained digest. For a separately owned ancestor,
-`validateAgainst` also checks that the ancestor's canonical bytes have that
-digest. Independently admitted copies of the same root can be compared.
+When validating a checked root, Kosmos checks its canonical bytes against the
+retained digest and binds the main image and four helper images to the prepared
+executables used by the driver. For a separately owned ancestor,
+`validateAgainst` also compares the two bundles and checks the ancestor's
+executables. Source export admits its own copy under the same 1 GiB limit so
+the exported artifact can outlive the input.
 
 The `work` field of `RuntimeCompiler.ValidationPolicy` bounds validation of
 `kosmos.source-relation/1` lineage. Source roots use the limits of their
@@ -240,6 +242,12 @@ budget. Horos releases its construction scratch before validating the
 derivation and releases its checker scratch before admitting the residual.
 Kosmos independently validates the resulting specialization before returning
 the artifact. Exhausting the producer budget returns `Capacity`.
+
+On the pinned Horos producer, the requested work allowance covers partial
+evaluation. Original source admission and producer-side validation each start
+with a fresh work counter. A caller-selected ceiling across those passes
+requires Horos to accept and debit the caller's remaining work. Kosmos runs
+its own bounded derivation checks after the producer returns.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected

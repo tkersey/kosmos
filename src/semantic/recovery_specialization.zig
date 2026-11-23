@@ -224,21 +224,49 @@ fn checkRelation(
         "variables", "values",    "terms",   "functions",
     }) |name| @field(out.builder, name) = .fromOwnedSlice(@constCast(@field(d.residual, name)));
     out.builder.region_count = d.residual.region_count;
+    try chargeEnvelope(original, work);
     try source.specialize.validateWithWork(a, original, d.request, &out, work);
     try checkCatalogs(a, original, d, work);
+}
+
+fn chargeEnvelope(original: source.Module, work: *u64) !void {
+    var size: data.wire.Writer = .{ .remaining = work };
+    try data.record.write(source.Module, original, &size);
+    try data.admission.spend(work, size.position);
+    const scalars = data.wire.naturalLength(original.entry) +
+        data.wire.naturalLength(original.failure) + data.wire.naturalLength(original.region_count);
+    try data.admission.spend(work, size.position - scalars);
 }
 
 const relocation = source.relation.Relocation;
 const Catalog = struct { prefix: usize, limit: usize, reached: []bool };
 const Catalogs = [std.meta.tags(relocation.Kind).len]Catalog;
+const bindings = source.constructor_bindings;
+
+fn coverageCatalog(
+    a: Allocator,
+    storage: Allocator,
+    admitted: source.Module,
+    work: *u64,
+) !bindings.Catalog {
+    for (admitted.constants) |literal| {
+        try data.admission.spend(work, 1);
+        if (admitted.schemas[@intCast(literal.schema)] != .unit) continue;
+        for (admitted.values) |value| {
+            try data.admission.spend(work, 1);
+            if (bindings.raw(value) != null) break;
+        } else return .{ .constructors = &.{}, .constants = admitted.constants };
+        break;
+    }
+    return bindings.admitCatalog(a, storage, admitted, work);
+}
 
 fn checkCatalogs(a: Allocator, original: source.Module, d: Derivation, work: *u64) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
-    const bindings = source.constructor_bindings;
-    const before = try bindings.admitCatalog(a, storage, original, work);
-    const after = try bindings.admitCatalog(a, storage, d.residual, work);
+    const before = try coverageCatalog(a, storage, original, work);
+    const after = try coverageCatalog(a, storage, d.residual, work);
     try bindings.validate(original, before.constructors, after.constructors, .{}, work);
     var emitted = d.residual;
     emitted.constants = after.constants;
@@ -271,11 +299,7 @@ fn checkCatalogs(a: Allocator, original: source.Module, d: Derivation, work: *u6
             constants.reached[i - constants.prefix] = true;
     }
     try visitAdded(a, &catalogs, emitted, after.constructors, d, work);
-    for (catalogs) |catalog| {
-        try data.admission.spend(work, catalog.reached.len);
-        if (std.mem.indexOfScalar(bool, catalog.reached, false) != null)
-            return error.InvalidSpecialization;
-    }
+    for (catalogs) |catalog| try requireReached(catalog.reached, work);
 }
 
 fn visitAdded(
@@ -317,6 +341,15 @@ const Calls = struct {
     reached: []bool,
     terms: []bool,
     pending: std.ArrayList(usize) = .empty,
+
+    fn walk(self: *Calls, a: Allocator, proof: Derivation, entry: usize, work: *u64) !void {
+        try self.function(a, proof, entry, work);
+        while (self.pending.pop()) |index| {
+            const term_proof = proof.terms[index];
+            if (term_proof.callee) |callee| try self.function(a, proof, callee, work);
+            for (term_proof.children) |child| try self.term(a, child, work);
+        }
+    }
 
     fn function(
         self: *Calls,
@@ -364,17 +397,15 @@ fn checkFunctions(a: Allocator, function_count: usize, proof: Derivation, work: 
     @memset(terms, false);
     var calls: Calls = .{ .reached = reached, .terms = terms };
     defer calls.pending.deinit(a);
-    try calls.function(a, proof, 0, work);
-    while (calls.pending.pop()) |index| {
-        const term = proof.terms[index];
-        if (term.callee) |callee| try calls.function(a, proof, callee, work);
-        for (term.children) |child| try calls.term(a, child, work);
-    }
+    try calls.walk(a, proof, 0, work);
+    try requireReached(reached, work);
+    try requireReached(terms, work);
+    try checkValues(a, proof, work);
+}
+
+fn requireReached(reached: []const bool, work: *u64) !void {
     try data.admission.spend(work, reached.len);
     if (std.mem.indexOfScalar(bool, reached, false) != null) return error.InvalidSpecialization;
-    try data.admission.spend(work, terms.len);
-    if (std.mem.indexOfScalar(bool, terms, false) != null) return error.InvalidSpecialization;
-    try checkValues(a, proof, work);
 }
 
 fn checkValues(a: Allocator, proof: Derivation, work: *u64) !void {
@@ -432,34 +463,45 @@ fn checkGuest(a: Allocator, guest: artifact.Digest, bytes: []const u8, work: *u6
     var checked = try data.program_image.identityWithFlow(a, value.code, work);
     defer checked.deinit();
     if (!std.mem.eql(u8, &checked.identity, &guest)) return error.InvalidRealization;
+    try checkSchemaFacts(a, value.code.schemas, value.schemas, value.uses, work);
+    try checkLive(a, checked.facts.pool, checked.facts.live, value.live, work);
+}
+
+fn checkSchemaFacts(
+    a: Allocator,
+    catalog: []const data.program.Schema,
+    expected_schemas: data.admission.SchemaFacts,
+    expected_uses: data.traits.Facts,
+    work: *u64,
+) !void {
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const mem = scratch.allocator();
-    const schemas = try data.admission.schemasWithWork(mem, value.code.schemas, work);
-    if (!try data.record.equalWithWork(data.admission.SchemaFacts, schemas, value.schemas, work))
+    const schemas = try data.admission.schemasWithWork(mem, catalog, work);
+    const equal = data.record.equalWithWork;
+    if (!try equal(data.admission.SchemaFacts, schemas, expected_schemas, work))
         return error.InvalidRealization;
-    const uses = try data.traits.deriveWithWork(mem, value.code.schemas, work);
-    if (!try data.record.equalWithWork(data.traits.Facts, uses, value.uses, work))
-        return error.InvalidRealization;
-    try checkLive(a, &checked.facts, value.live, work);
+    const uses = try data.traits.deriveWithWork(mem, catalog, work);
+    if (!try equal(data.traits.Facts, uses, expected_uses, work)) return error.InvalidRealization;
 }
 
 fn checkLive(
     a: Allocator,
-    facts: *const data.activation_flow.Facts,
+    pool: *data.analysis_sets.Pool,
+    live: []const []const data.analysis_sets.Root,
     submitted: []const []const []const u64,
     work: *u64,
 ) !void {
-    if (facts.live.len != submitted.len) return error.InvalidRealization;
-    const previous = facts.pool.work;
-    facts.pool.work = work;
-    defer facts.pool.work = previous;
-    try data.admission.spend(work, facts.live.len);
-    for (facts.live, submitted) |positions, rows| {
+    if (live.len != submitted.len) return error.InvalidRealization;
+    const previous = pool.work;
+    pool.work = work;
+    defer pool.work = previous;
+    try data.admission.spend(work, live.len);
+    for (live, submitted) |positions, rows| {
         if (positions.len != rows.len) return error.InvalidRealization;
         try data.admission.spend(work, rows.len);
         for (positions, rows) |root, slots| {
-            const expected = try facts.pool.materialize(a, root);
+            const expected = try pool.materialize(a, root);
             defer a.free(expected);
             try data.admission.spend(work, slots.len);
             if (!std.mem.eql(u64, expected, slots)) return error.InvalidRealization;
@@ -503,6 +545,7 @@ test "entry rooted specialization admits each requested key allowance" {
         try std.testing.expectEqual(keys + 1, bounded.functions.items.len);
         try std.testing.expectEqualSlices(u8, &producer.key, &bounded.key);
         const derivation = Derivation.from(&bounded);
+        try checkLeafCoverage(a, derivation);
         var work: u64 = 100_000;
         try checkRelation(a, original, derivation, bounded.key, &work);
         try std.testing.expect(work < 100_000);
@@ -514,4 +557,105 @@ test "entry rooted specialization admits each requested key allowance" {
             checkFunctions(a, original.functions.len, reduced, &work),
         );
     }
+}
+
+test "trusted envelope comparisons consume their source record widths" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const entry = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.constant(void, {})));
+    const original = b.module(entry, unit);
+    var remaining: u64 = 100_000;
+    const equal = data.record.equalWithWork;
+    try std.testing.expect(try equal(source.Module, original, original, &remaining));
+    const measured = 100_000 - remaining;
+    inline for (.{
+        "schemas",   "constants", "effects", "handlers",  "resources",
+        "variables", "values",    "terms",   "functions",
+    }) |field| {
+        const table = @field(original, field);
+        try std.testing.expect(try equal(@TypeOf(table), table, table, &remaining));
+    }
+    const total = measured + (100_000 - remaining);
+    var exact = total;
+    try chargeEnvelope(original, &exact);
+    try std.testing.expectEqual(0, exact);
+    var short = total - 1;
+    try std.testing.expectError(error.RelationLimit, chargeEnvelope(original, &short));
+}
+
+test "admitted explicit unit supplies the observable specialization catalog" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const entry = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.constant(void, {})));
+    const module = b.module(entry, unit);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var remaining = limits.source_work;
+    const observed = try bindings.admitCatalog(a, arena.allocator(), module, &remaining);
+    var exact: u64 = module.values.len + 1;
+    const explicit = try coverageCatalog(a, arena.allocator(), module, &exact);
+    try std.testing.expectEqual(0, exact);
+    try std.testing.expect(data.record.equal(bindings.Catalog, observed, explicit));
+    var short: u64 = module.values.len;
+    try std.testing.expectError(
+        error.RelationLimit,
+        coverageCatalog(a, arena.allocator(), module, &short),
+    );
+}
+
+fn checkLeafCoverage(a: Allocator, proof: Derivation) !void {
+    const reached = try a.alloc(bool, proof.functions.len);
+    defer a.free(reached);
+    @memset(reached, false);
+    const terms = try a.alloc(bool, proof.terms.len);
+    defer a.free(terms);
+    @memset(terms, false);
+    var calls: Calls = .{ .reached = reached, .terms = terms };
+    defer calls.pending.deinit(a);
+    var work = limits.source_work;
+    try calls.walk(a, proof, 1, &work);
+    try std.testing.expect(reached[1]);
+    try std.testing.expect(!reached[0]);
+    try std.testing.expectError(error.InvalidSpecialization, requireReached(reached, &work));
+    try calls.walk(a, proof, 0, &work);
+    try requireReached(reached, &work);
+    try requireReached(terms, &work);
+}
+
+test "guest projection facts distinguish admitted catalogs and live rows" {
+    const a = std.testing.allocator;
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const mem = scratch.allocator();
+    const catalog: []const data.program.Schema = &.{.boolean};
+    const other: []const data.program.Schema = &.{ .unit, .u64 };
+    const schemas = try data.admission.schemas(mem, catalog);
+    const other_schemas = try data.admission.schemas(mem, other);
+    const uses = try data.traits.derive(mem, catalog);
+    const other_uses = try data.traits.derive(mem, other);
+    var work = limits.source_work;
+    try checkSchemaFacts(a, catalog, schemas, uses, &work);
+    try std.testing.expectError(
+        error.InvalidRealization,
+        checkSchemaFacts(a, catalog, other_schemas, uses, &work),
+    );
+    try std.testing.expectError(
+        error.InvalidRealization,
+        checkSchemaFacts(a, catalog, schemas, other_uses, &work),
+    );
+    var pool: data.analysis_sets.Pool = .{ .allocator = a, .limit = 4 };
+    defer pool.deinit();
+    const root = try pool.run(1, 3);
+    const live: []const []const data.analysis_sets.Root = &.{&.{root}};
+    try checkLive(a, &pool, live, &.{&.{&.{ 1, 2 }}}, &work);
+    try std.testing.expectError(
+        error.InvalidRealization,
+        checkLive(a, &pool, live, &.{&.{&.{ 2, 3 }}}, &work),
+    );
 }

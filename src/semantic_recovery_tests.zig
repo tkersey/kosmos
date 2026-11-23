@@ -137,7 +137,7 @@ const Run = struct {
         const origin = self.selected;
         const target = if (kind == .guest_cut) self.other else origin;
         var custody: Custody = .{ .expected = capsule.reference(bytes), .target = target.identity };
-        if (kind == .outer_execution) {
+        if (kind == .outer_execution and !std.meta.eql(self.other.identity, origin.identity)) {
             try std.testing.expectError(error.IncompatibleRuntime, capsule.restoreSelected(
                 a,
                 self.prepared,
@@ -557,4 +557,28 @@ test "checked scalar recovery executes both paths and restores interrupted phase
     const sites = try targets(arena.allocator(), &optimized);
     try expectBranchPaths(&legacy, &optimized, sites);
     try expectClone(&legacy, &optimized, sites);
+}
+
+test "guest-specialized checked recovery restores an unfinished guest advance" {
+    const image = try @import("semantic/test_support.zig").guestImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const bytes = try compiler.compile(a, .{ .guest = guest, .scalar_field_reuse = true });
+    defer a.free(bytes);
+    var selected = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer selected.deinit();
+    try compiler.validate(a, &selected);
+    try std.testing.expectEqualStrings(
+        compiler.recovery_policy,
+        selected.content.value.manifest.compiler.policy,
+    );
+    try std.testing.expectEqual(guest.identity(), selected.content.value.guest);
+    var coverage: Coverage = .{};
+    try execute(&selected, &selected, .{
+        .image = image,
+        .input = &scalarBytes(5),
+        .answer = 11,
+    }, &.{}, &coverage);
+    try std.testing.expect(coverage.init and coverage.publish and coverage.finish);
 }
