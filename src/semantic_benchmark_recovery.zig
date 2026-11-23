@@ -21,6 +21,12 @@ const Context = struct {
 const Realization = enum { generic, specialized };
 const repetitions = 6;
 const construction_order = [2][2]bool{ .{ false, true }, .{ true, false } };
+const allocation_meter = .{
+    .allocator = "AllocationBudget",
+    .resize = "noResize",
+    .remap = "noRemap",
+    .quantity = "live requested bytes",
+};
 
 pub fn measure(
     a: Allocator,
@@ -159,6 +165,7 @@ fn buildMetered(context: Context, kind: Realization, optimized: bool) !Built {
         .image_bytes = bundle.image.len,
         .evidence_bytes = bundle.evidence.len,
         .recovery_proof = proof,
+        .allocation_meter = allocation_meter,
         .compile_peak_bytes = construction.peak,
         .validation_peak_bytes = validation.peak,
     });
@@ -283,6 +290,7 @@ fn measurePair(context: Context, kind: Realization) !void {
             .base_work = measured.cost.base_work,
             .field_evaluations = measured.cost.field_evaluations,
             .move_slot_reads = measured.cost.move_slot_reads,
+            .allocation_meter = allocation_meter,
             .resident_memory_allocator = "session allocations only",
             .resident_memory_excludes = "prepared runtime and caller-owned buffers",
             .resident_peak_interval = "Session.start through the final checkpoint check",

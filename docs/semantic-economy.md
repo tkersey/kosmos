@@ -623,17 +623,21 @@ are medians with the minimum and maximum in parentheses.
 The timing ranges cover four ordinary-allocator builds per policy and realization.
 Each process built the two policies in both orders, releasing each timed artifact
 before starting the next. Admission began with the expected digest in hand.
-Separate builds of the same checked artifact identities measured peak requested
-bytes during compilation and independent validation.
+Separate builds of the same artifact identities measured peak live requested
+bytes during compilation and independent validation. The session and construction
+meters use `AllocationBudget`, which disables resize and remap. Growing a buffer
+can therefore count both its old and new allocation at once. Peak storage for
+the ordinary allocator was unmeasured.
 
 Keep the option experimental and disabled by default. The generic evaluator saved
 1,752 field evaluations per execution. Its paired median time rose 0.59% in the
 first run and fell 0.57% in the second. The largest generic difference paired a
 100.41 ms structural execution with an 89.14 ms opt-in execution. The byte-identical
-specialization also varied across pairs. Peak and retained session storage were
-identical within each realization. Both checked builds took longer to compile
-and used less peak allocator storage. These measurements do not establish a
-repeatable runtime gain on the nominated workload.
+specialization also varied across pairs. The meter recorded identical peak and
+retained session bytes within each realization and lower compile and validation
+peaks for both checked builds. Both took longer to compile with the ordinary
+allocator. The paired execution timings showed no repeatable runtime gain on
+the nominated workload.
 
 Reproduce the diamond and both runtime comparisons with
 `zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large`.
