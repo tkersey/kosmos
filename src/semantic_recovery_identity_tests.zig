@@ -60,8 +60,24 @@ fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation
     var definition = try compiler.SourceDefinition.init(a, true, bundle.hooks);
     defer definition.deinit();
     const original = try records.module(scratch.allocator(), definition.module());
-    var work: u64 = original.functions.len + proof.functions.len +
-        proof.request.arguments[0].known.bytes.len;
+    const spec = @import("semantic/recovery_specialization.zig");
+    const limits = compiler.recovery_limits;
+    const guest = bundle.guest.?;
+    const known = proof.request.arguments[0].known.bytes;
+    var budget = limits.source_work;
+    try spec.validateGuest(a, guest, known, limits.lowering_bytes, &budget);
+    const guest_cost = limits.source_work - budget;
+    budget = guest_cost - 1;
+    try std.testing.expectError(error.RelationLimit, spec.validateGuest(
+        a,
+        guest,
+        known,
+        limits.lowering_bytes,
+        &budget,
+    ));
+    budget = guest_cost;
+    try std.testing.expectError(error.Capacity, spec.validateGuest(a, guest, known, 1, &budget));
+    var work: u64 = original.functions.len + proof.functions.len + guest_cost;
     inline for (.{ "schemas", "constants", "effects", "handlers", "resources" }) |name|
         work += @field(proof.residual, name).len;
     inline for (.{ "variables", "values", "terms", "functions" }) |name|
@@ -74,6 +90,7 @@ fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation
             original,
             proof,
             bundle,
+            compiler.recovery_limits.lowering_bytes,
             &work,
         ),
     );
@@ -111,6 +128,16 @@ test "specialized scalar recovery binds the guest compiler package and residual 
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
+    const same = try checked.program_image.Admitted.decode(a, image);
+    defer same.deinit();
+    try records.checkProgram(guest, same.program());
+    var different = same.program();
+    const constants = try a.dupe(@TypeOf(different.constants[0]), different.constants);
+    defer a.free(constants);
+    constants[0].bytes = &std.mem.toBytes(@as(u64, 8));
+    different.constants = constants;
+    _ = try checked.program_image.identity(a, different);
+    try std.testing.expectError(error.InvalidRecovery, records.checkProgram(guest, different));
     const bytes = try compiler.compile(a, .{
         .horos_package = packaged.horos_package,
         .guest = guest,

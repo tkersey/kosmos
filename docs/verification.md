@@ -138,7 +138,7 @@ for each identical immutable command. It awaits both before the next observation
 retaining every restore, transfer checkpoint, byte comparison and source assertion.
 
 CI runs session behavior, session ownership/failure, source regression, native
-owners, native semantic driver, specialization/publication, two source-agreement
+owners, native semantic driver, specialization, publication, two source-agreement
 and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
 86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and

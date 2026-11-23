@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, source, source-second, portable, browser, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, publication, source, source-second, portable, browser, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -64,10 +64,10 @@ jobs:
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-driver' && 'native' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-driver' && 'native' || matrix.lane == 'publication' && 'specialization' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || matrix.lane }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || matrix.lane == 'publication' && 'specialization' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -177,10 +177,15 @@ jobs:
             zig build check-semantic-driver \
               --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
           fi
-      - name: Check specialization and public receipt owners
+      - name: Check specialization
         if: matrix.lane == 'specialization'
         run: >-
-          zig build check-semantic-specialization check-publication
+          zig build check-semantic-specialization
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check public receipt owners
+        if: matrix.lane == 'publication'
+        run: >-
+          zig build check-publication
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check every selected current session fixture
         if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
@@ -208,13 +213,18 @@ jobs:
           zig build emit-native-input -Doptimize=safe -Dpackaged-runtime=true --summary all
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
+          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer" "$scratch/system"
           git --no-replace-objects archive --format=tar HEAD > "$scratch/source.tar"
           tar -xf "$scratch/source.tar" -C "$scratch/source"
           package_hash=$(ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig fetch "$scratch/source")
           tar -xzf "$scratch/cache/p/$package_hash.tar.gz" --strip-components=1 -C "$scratch/kosmos"
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
-          zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
+          legacy_hash=$(awk -F'"' '/^[[:space:]]*\.horos = / { legacy=1 } legacy && /\.hash = / { print $2; exit }' build.zig.zon)
+          test -n "$legacy_hash"
+          cp -R "zig-pkg/$legacy_hash" "$scratch/system/$legacy_hash"
+          ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig build --build-file "$scratch/consumer/build.zig" \
+            --system "$scratch/system" --cache-dir "$PWD/.zig-cache/native-consumer" \
+            -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second'
         with:

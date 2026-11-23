@@ -92,10 +92,33 @@ Native consumers use the public `kosmos` module and the package selected by
 captured by Zig and admitted against the selected package hash; the native build
 uses `tar` to unpack that authenticated snapshot for compilation. No interpreter,
 JS/WASM archive or script-generated metadata is a native prerequisite.
-`check-storage` and `build-runtime` require only the original Horos package.
-Builds that compile the opt-in recovery backend also use the `horos_recovery`
-pin. With `zig build --system`, supply that package in the system package
-directory when building a recovery consumer.
+The ordinary `kosmos` module, `check-storage`, and `build-runtime` require only
+the original Horos package. Add the public module to the application's root
+module in the consuming build.
+
+```zig
+app.root_module.addImport("kosmos", dependency.module("kosmos"));
+```
+
+To include the checked recovery compiler, select its sibling under the same
+local import name.
+
+```zig
+app.root_module.addImport("kosmos", dependency.module("kosmos_recovery"));
+```
+
+The recovery module adds the authenticated `horos_recovery` pin. With
+`zig build --system`, supply both pinned packages in the system directory.
+The compiler defaults to ordinary lowering. Select checked lowering for an
+individual compilation.
+
+```zig
+const bytes = try kosmos.RuntimeCompiler.compile(a, .{
+    .horos_package = package_hash,
+    .scalar_field_reuse = true,
+});
+defer a.free(bytes);
+```
 
 `check-native` and `check-storage` use shared native build roots. `check-source`
 compares 44 source examples with the independent higher-order oracle and actual

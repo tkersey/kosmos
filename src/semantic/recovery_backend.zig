@@ -76,19 +76,48 @@ pub fn compile(a: Allocator, options: legacy.Options) ![]u8 {
     var definition = try legacy.SourceDefinition.init(a, options.guest != null, options.hooks);
     defer definition.deinit();
     const original = try records.module(mem, definition.module());
-    var out = try spec.select(a, mem, &definition, original, options);
+    const bundle = try emit(a, options, &definition, original);
+    errdefer a.free(bundle);
+    var admitted = try art.Admitted.init(a, bundle, art.digest(bundle));
+    defer admitted.deinit();
+    var work = limits.source_work;
+    const content = admitted.content.value;
+    var envelope = try openEvidence(a, content, &work);
+    defer envelope.deinit();
+    try spec.validate(
+        a,
+        &definition,
+        original,
+        envelope.value.derivation,
+        content,
+        limits.lowering_bytes,
+        &work,
+    );
+    return bundle;
+}
+
+fn emit(
+    a: Allocator,
+    options: legacy.Options,
+    definition: *const legacy.SourceDefinition,
+    original: source.Module,
+) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const mem = arena.allocator();
+    var out = try spec.select(a, mem, definition, original, options);
     defer if (out) |*o| o.deinit();
     const derivation = if (out) |*o| Derivation.from(o) else null;
-    const selected = try Selection.init(mem, &definition, original, derivation);
+    const selected = try Selection.init(mem, definition, original, derivation);
     var result = try source.lowerRecoveryOptimized(a, selected.module, selected.options);
     defer result.deinit();
     const image = try records.image(a, a, result.program);
     defer a.free(image);
     const target = try old.program_image.Admitted.decode(a, image);
     defer target.deinit();
-    const entries = try selected.interfaces(mem, &definition, result.parameters);
+    const entries = try selected.interfaces(mem, definition, result.parameters);
     const helpers = try buildHelpers(a, mem, original, definition.helpers);
-    const bundle = try art.encode(a, .{
+    return art.encode(a, .{
         .manifest = try manifest(mem, target),
         .image = image,
         .guest = if (options.guest) |g| g.identity() else null,
@@ -108,15 +137,6 @@ pub fn compile(a: Allocator, options: legacy.Options) ![]u8 {
             .derivation = derivation,
         }, limits),
     });
-    errdefer a.free(bundle);
-    var admitted = try art.Admitted.init(a, bundle, art.digest(bundle));
-    defer admitted.deinit();
-    var work = limits.source_work;
-    const content = admitted.content.value;
-    var envelope = try openEvidence(a, content, &work);
-    defer envelope.deinit();
-    try spec.validate(a, &definition, original, envelope.value.derivation, content, &work);
-    return bundle;
 }
 
 fn manifest(a: Allocator, admitted: *const old.program_image.Admitted) !art.Manifest {
@@ -224,7 +244,15 @@ pub fn validateDefined(
     var proof = try opt.decode(a, evidence.recovery, limits);
     errdefer proof.deinit();
     const original = try records.module(scratch, definition.module());
-    try spec.validate(a, definition, original, evidence.derivation, bundle, remaining);
+    try spec.validate(
+        a,
+        definition,
+        original,
+        evidence.derivation,
+        bundle,
+        limits.lowering_bytes,
+        remaining,
+    );
     const selected = try Selection.init(scratch, definition, original, evidence.derivation);
     const parameters = try validateSelected(
         a,
@@ -262,9 +290,9 @@ fn validateSelected(
     proof: opt.Evidence,
 ) ![]const source.RecoveryBinding {
     const bundle = admitted.content.value;
-    try records.checkImage(a, bundle.image, admitted.program);
     const target = try data.program_image.Admitted.decode(a, bundle.image);
     defer target.deinit();
+    try records.checkProgram(admitted.program, target.program());
     const parameters = try opt.parameters(
         a,
         selected.module,
@@ -282,9 +310,14 @@ fn validateSelected(
         bundle.recovery.clone_context, bundle.recovery.clone_rebase,
     };
     for (definition.helpers, helpers, admitted.helpers) |entry, helper, owner| {
-        try records.checkImage(a, helper.image, owner);
-        if (!std.mem.eql(u8, try helperImage(a, mem, original, entry), helper.image))
-            return error.InvalidRecovery;
+        var selected_helper = original;
+        selected_helper.entry = entry;
+        var compiled = try source.lower(a, selected_helper);
+        defer compiled.deinit();
+        try records.checkProgram(owner, compiled.program);
+        const bytes = try records.image(a, a, compiled.program);
+        defer a.free(bytes);
+        if (!std.mem.eql(u8, bytes, helper.image)) return error.InvalidRecovery;
     }
     return parameters;
 }

@@ -282,6 +282,9 @@ const Run = struct {
         self.oracle_transitions = oracle.transitions;
         const expected = try oracle.checkpoint(a);
         defer a.free(expected);
+        var expected_cut = try data.state_image.decodeGraph(a, expected);
+        defer expected_cut.deinit();
+        try std.testing.expectEqual(expected_cut.state.status, result.event.value.cut.status);
         const actual = try self.owner.?.checkpoint(a);
         defer a.free(actual);
         try std.testing.expectEqualSlices(u8, expected, actual);

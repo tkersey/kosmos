@@ -1,7 +1,7 @@
 const std = @import("std");
 const current = @import("horos_recovery");
 const source = current.source;
-const old = @import("horos_data");
+const data = current.data;
 const legacy = @import("compiler.zig");
 const projection = @import("projection.zig");
 const artifact = @import("artifact.zig");
@@ -92,6 +92,7 @@ pub fn validate(
     original: source.Module,
     derivation: ?Derivation,
     bundle: artifact.Bundle,
+    guest_storage_bytes: usize,
     work: *u64,
 ) !void {
     const d = derivation orelse {
@@ -108,8 +109,7 @@ pub fn validate(
         return error.InvalidRealization;
     try checkKeys(a, original.functions.len, d.functions, d.request.policy.keys_per_function, work);
     const known = d.request.arguments[0].known.bytes;
-    try current.data.admission.spend(work, known.len);
-    try validateGuest(a, guest, known);
+    try validateGuest(a, guest, known, guest_storage_bytes, work);
     var out: source.specialize.Output = .{
         .builder = source.Builder.init(a),
         .original = original,
@@ -153,23 +153,70 @@ fn checkKeys(
     }
 }
 
-fn validateGuest(
+const GuestProjection = struct {
+    identity: artifact.Digest,
+    code: data.activation.Program,
+    schemas: data.admission.SchemaFacts,
+    uses: data.traits.Facts,
+    live: []const []const []const u64,
+};
+
+pub fn validateGuest(
     a: Allocator,
     guest: artifact.Digest,
     bytes: []const u8,
+    storage_bytes: usize,
+    work: *u64,
 ) !void {
-    var known = try projection.decode(projection.Program, a, bytes);
+    try data.admission.spend(work, bytes.len);
+    var physical = storage_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    checkGuest(cap.allocator(), guest, bytes, work) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+}
+
+fn checkGuest(a: Allocator, guest: artifact.Digest, bytes: []const u8, work: *u64) !void {
+    var known = try projection.decode(GuestProjection, a, bytes);
     defer known.deinit();
-    if (!std.mem.eql(u8, &known.value.identity, &guest)) return error.InvalidRealization;
-    const encoded = try a.alloc(u8, try old.program_image.encodedLength(known.value.code));
-    defer a.free(encoded);
-    _ = try old.program_image.encode(a, known.value.code, encoded);
-    const admitted = try old.program_image.Admitted.decode(a, encoded);
-    defer admitted.deinit();
-    if (!std.mem.eql(u8, &admitted.identity(), &guest)) return error.InvalidRealization;
-    const projected = try projection.programBytes(a, admitted);
-    defer a.free(projected);
-    if (!std.mem.eql(u8, projected, bytes)) return error.InvalidRealization;
+    const value = known.value;
+    if (!std.mem.eql(u8, &value.identity, &guest)) return error.InvalidRealization;
+    var checked = try data.program_image.identityWithFlow(a, value.code, work);
+    defer checked.deinit();
+    if (!std.mem.eql(u8, &checked.identity, &guest)) return error.InvalidRealization;
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const mem = scratch.allocator();
+    const schemas = try data.admission.schemasWithWork(mem, value.code.schemas, work);
+    if (!try data.record.equalWithWork(data.admission.SchemaFacts, schemas, value.schemas, work))
+        return error.InvalidRealization;
+    const uses = try data.traits.deriveWithWork(mem, value.code.schemas, work);
+    if (!try data.record.equalWithWork(data.traits.Facts, uses, value.uses, work))
+        return error.InvalidRealization;
+    try checkLive(&checked.facts, value.live, work);
+}
+
+fn checkLive(
+    facts: *const data.activation_flow.Facts,
+    submitted: []const []const []const u64,
+    work: *u64,
+) !void {
+    if (facts.live.len != submitted.len) return error.InvalidRealization;
+    try data.admission.spend(work, facts.live.len);
+    for (facts.live, submitted) |positions, rows| {
+        if (positions.len != rows.len) return error.InvalidRealization;
+        try data.admission.spend(work, rows.len);
+        for (positions, rows) |root, slots| {
+            try data.admission.spend(work, slots.len);
+            var iter = facts.pool.iterator(root);
+            for (slots) |slot| {
+                const expected = iter.next() orelse return error.InvalidRealization;
+                if (expected != slot) return error.InvalidRealization;
+            }
+            if (iter.next() != null) return error.InvalidRealization;
+        }
+    }
 }
 
 test "specialization key allowance counts distinct emitted records for each original function" {

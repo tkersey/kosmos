@@ -186,6 +186,7 @@ const Dependencies = struct {
     data: *std.Build.Module,
     host_data: *std.Build.Module,
     public_kosmos: *std.Build.Module,
+    recovery_kosmos: *std.Build.Module,
 };
 
 fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
@@ -215,12 +216,14 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .target = b.graph.host,
         .optimize = options.optimize,
     });
-    const public_kosmos = b.addModule("kosmos", .{
+    const module: std.Build.Module.CreateOptions = .{
         .root_source_file = b.path("src/root.zig"),
         .target = options.target,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
-    });
+    };
+    const public_kosmos = b.addModule("kosmos", module);
+    public_kosmos.addOptions("recovery_options", b.addOptions());
 
     return .{
         .source = source,
@@ -228,6 +231,7 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .data = data,
         .host_data = host_data,
         .public_kosmos = public_kosmos,
+        .recovery_kosmos = b.addModule("kosmos_recovery", module),
     };
 }
 
@@ -344,13 +348,15 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         );
     const native = options.target.query.isNative() and host_mode == options.optimize;
     const horos = horosModule(b, dependencies.source, b.graph.host, host_mode, source_data);
-    dependencies.public_kosmos.addImport("horos", if (native) horos else horosModule(
+    const public_horos = if (native) horos else horosModule(
         b,
         dependencies.source,
         options.target,
         options.optimize,
         dependencies.data,
-    ));
+    );
+    dependencies.public_kosmos.addImport("horos", public_horos);
+    dependencies.recovery_kosmos.addImport("horos", public_horos);
     const recovery = horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
     const recovery_options = b.addOptions();
     recovery_options.addOption(
@@ -358,8 +364,8 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         "horos_package",
         options.package.dependencies.horos_recovery.hash,
     );
-    dependencies.public_kosmos.addOptions("recovery_options", recovery_options);
-    dependencies.public_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
+    dependencies.recovery_kosmos.addOptions("recovery_options", recovery_options);
+    dependencies.recovery_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
         b,
         dependencies.recovery_source,
         options.target,
@@ -492,16 +498,16 @@ fn configureRuntimeModules(
         _ = files.addCopyFile(artifact_images.semantic_artifact, "semantic-core.kar");
         break :rebuilt files.getDirectory();
     };
-    dependencies.public_kosmos.addImport(
-        "packaged_runtime",
-        if (options.target.query.isNative()) packaged_runtime else b.createModule(
-            .{
-                .root_source_file = runtime_source,
-                .target = options.target,
-                .optimize = options.optimize,
-            },
-        ),
-    );
+    const public_runtime = if (options.target.query.isNative())
+        packaged_runtime
+    else
+        b.createModule(.{
+            .root_source_file = runtime_source,
+            .target = options.target,
+            .optimize = options.optimize,
+        });
+    dependencies.public_kosmos.addImport("packaged_runtime", public_runtime);
+    dependencies.recovery_kosmos.addImport("packaged_runtime", public_runtime);
     b.step("semantic-artifact", "Compile and admit the reproducible portable evaluator bundle")
         .dependOn(&b.addInstallFile(artifact_images.semantic_artifact, "semantic-core.kar").step);
 
@@ -538,7 +544,7 @@ fn configurePublication(
     if (host_kosmos != dependencies.public_kosmos) {
         host_kosmos.addImport("packaged_runtime", runtime_modules.packaged_runtime);
         host_kosmos.addImport("horos", host_modules.horos);
-        host_modules.bindRecovery(host_kosmos);
+        host_kosmos.addOptions("recovery_options", b.addOptions());
     }
     const publication_bench = b.addExecutable(
         .{

@@ -12,7 +12,10 @@ pub const RuntimeArtifact = @import("semantic/artifact.zig").Admitted;
 pub const RuntimeCapsule = @import("semantic/capsule.zig");
 /// Host-side source construction and independent derivation validation. This
 /// namespace is not part of the restricted base's execution closure.
-pub const RuntimeCompiler = @import("semantic/recovery_compiler.zig");
+pub const RuntimeCompiler = if (@hasDecl(@import("recovery_options"), "horos_package"))
+    @import("semantic/recovery_compiler.zig")
+else
+    @import("semantic/compiler.zig");
 pub const RuntimeViews = @import("semantic/views.zig");
 pub const RuntimeAnalysis = @import("semantic/analysis.zig");
 pub const RuntimeInstrumentation = @import("semantic/instrumentation.zig");

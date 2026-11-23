@@ -29,15 +29,63 @@ pub fn image(a: Allocator, storage: Allocator, program: data.activation.Program)
     return bytes;
 }
 
-pub fn checkImage(
-    a: Allocator,
-    bytes: []const u8,
+pub fn checkProgram(
     owner: *const old.data.program_image.Admitted,
+    checked: data.activation.Program,
 ) !void {
-    var decoded = try old.data.program_image.decode(a, bytes);
-    defer decoded.deinit();
-    if (!old.data.record.equal(old.data.activation.Program, decoded.program, owner.program()))
-        return error.InvalidRecovery;
+    @setEvalBranchQuota(100_000);
+    if (!sameRecords(owner.program(), checked)) return error.InvalidRecovery;
+}
+
+fn sameRecords(before: anytype, after: anytype) bool {
+    return RecordPair(@TypeOf(before), @TypeOf(after)).equal(before, after);
+}
+
+fn RecordPair(comptime Before: type, comptime After: type) type {
+    const layout = @typeInfo(Before);
+    const other_layout = @typeInfo(After);
+    std.debug.assert(std.meta.activeTag(layout) == std.meta.activeTag(other_layout));
+    return struct {
+        fn equal(before: Before, after: After) bool {
+            return switch (layout) {
+                .void => true,
+                .int, .bool => before == after,
+                .@"enum" => @backingInt(before) == @backingInt(after),
+                .@"struct" => |info| blk: {
+                    const names = other_layout.@"struct".field_names;
+                    comptime std.debug.assert(info.field_names.len == names.len);
+                    inline for (info.field_names, names) |old_name, new_name| {
+                        comptime std.debug.assert(std.mem.eql(u8, old_name, new_name));
+                        if (!sameRecords(@field(before, old_name), @field(after, new_name)))
+                            break :blk false;
+                    }
+                    break :blk true;
+                },
+                .@"union" => switch (before) {
+                    inline else => |value, tag| blk: {
+                        const other = @field(other_layout.@"union".tag_type.?, @tagName(tag));
+                        comptime std.debug.assert(@backingInt(tag) == @backingInt(other));
+                        if (after != other) break :blk false;
+                        break :blk sameRecords(value, @field(after, @tagName(tag)));
+                    },
+                },
+                .optional => if (before) |value|
+                    if (after) |other| sameRecords(value, other) else false
+                else
+                    after == null,
+                inline .pointer, .array => |info| blk: {
+                    if (before.len != after.len) break :blk false;
+                    if (info.child == u8 and other_layout == .pointer)
+                        break :blk std.mem.eql(u8, before, after);
+                    for (before, after) |left, right| {
+                        if (!sameRecords(left, right)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => @compileError("unsupported program record " ++ @typeName(@TypeOf(before))),
+            };
+        }
+    };
 }
 
 const opt = current.source.recovery_optimization;
@@ -47,6 +95,7 @@ pub const Evidence = struct { recovery: []const u8, derivation: ?Derivation };
 pub const DecodedEvidence = struct {
     arena: std.heap.ArenaAllocator,
     value: Evidence,
+    derivation_bytes: ?[]const u8,
 
     pub fn deinit(self: *DecodedEvidence) void {
         self.arena.deinit();
@@ -72,6 +121,7 @@ pub fn decodeEvidence(
         else => return error.InvalidTag,
     };
     if (present != specialized) return error.InvalidRealization;
+    const start = reader.position;
     try data.admission.spend(work, bytes.len);
     var logical = limits.lowering_bytes;
     var physical = limits.lowering_bytes;
@@ -87,7 +137,11 @@ pub fn decodeEvidence(
     } else null;
     try reader.finish();
     arena.child_allocator = a;
-    return .{ .arena = arena, .value = .{ .recovery = inner, .derivation = derivation } };
+    return .{
+        .arena = arena,
+        .value = .{ .recovery = inner, .derivation = derivation },
+        .derivation_bytes = if (present) bytes[start..reader.position] else null,
+    };
 }
 
 pub fn encodeEvidence(

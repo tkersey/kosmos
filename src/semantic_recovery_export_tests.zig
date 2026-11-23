@@ -2,13 +2,12 @@ const std = @import("std");
 const horos = @import("horos");
 const data = horos.data;
 const compiler = @import("root.zig").RuntimeCompiler;
+const legacy = @import("semantic/compiler.zig");
 const artifact = @import("semantic/artifact.zig");
 const packaged = @import("semantic_packaged.zig");
 const a = std.testing.allocator;
 
-fn checkExport(candidate: *const artifact.Admitted) !void {
-    var exported = try compiler.exportSource(a, candidate);
-    defer exported.deinit();
+fn checkSource(exported: anytype, candidate: *const artifact.Admitted) !void {
     const v = exported.value;
     const bundle = candidate.content.value;
     try std.testing.expect(exported.retained.core != candidate.core);
@@ -45,48 +44,37 @@ fn checkExport(candidate: *const artifact.Admitted) !void {
     ));
     try std.testing.expectEqualSlices(u64, bundle.branch_returns, v.branch_returns);
     try std.testing.expectEqualSlices(u64, bundle.template_entries, v.template_entries);
-    try checkBindings(v, candidate.program.program());
+    try checkBindings(v.selected.module, v.parameters, candidate.program.program());
     if (v.evidence.derivation) |d| {
         try std.testing.expect(v.guest != null);
         const digest = (try compiler.sourceModule(d.residual)).digest;
         try std.testing.expectEqual(digest, v.selected.digest);
         try std.testing.expect(!std.mem.eql(u8, &v.selected.digest, &v.generic.digest));
     } else try std.testing.expectEqual(v.generic.digest, v.selected.digest);
-    try checkProof(&exported, candidate);
 }
 
-fn checkProof(exported: *const compiler.ExportedSource, candidate: *const artifact.Admitted) !void {
-    const v = exported.value;
-    const policy = candidate.content.value.manifest.compiler.policy;
-    const transported = std.mem.eql(u8, policy, compiler.recovery_policy);
-    switch (v.evidence.recovery) {
-        .correspondence => {
-            try std.testing.expect(!transported);
-            const bindings = try horos.source.recovery.parameters(
-                a,
-                v.selected.module,
-                candidate.program.program(),
-                .{ .correspondence = exported.value.evidence.recovery.correspondence },
-            );
-            defer a.free(bindings);
-            try std.testing.expect(data.record.equal(
-                []const horos.source.RecoveryBinding,
-                bindings,
-                v.parameters,
-            ));
-        },
-        .source_lower_3 => |proof| {
-            try std.testing.expect(transported);
-            const fallback = proof.rule == .structural_fallback;
-            try std.testing.expectEqual(fallback, proof.witnesses.len == 0);
-        },
+fn checkRecoveryExport(candidate: *const artifact.Admitted) !void {
+    var exported: compiler.ExportedRecoverySource = try compiler.exportRecoverySource(a, candidate);
+    defer exported.deinit();
+    try checkSource(&exported, candidate);
+    if (exported.value.evidence.derivation) |d| {
+        try std.testing.expect(data.record.overlaps(
+            []const u8,
+            d.request.arguments[0].known.bytes,
+            exported.retained.content.value.evidence,
+        ));
     }
+    const proof = exported.value.evidence.recovery;
+    try std.testing.expectEqual(proof.rule == .structural_fallback, proof.witnesses.len == 0);
 }
 
-fn checkBindings(value: compiler.SourceBundle, program: data.activation.Program) !void {
-    try std.testing.expect(value.parameters.len != 0);
-    const module = value.selected.module;
-    for (value.parameters) |binding| {
+fn checkBindings(
+    module: horos.source.Module,
+    parameters: []const horos.source.RecoveryBinding,
+    program: data.activation.Program,
+) !void {
+    try std.testing.expect(parameters.len != 0);
+    for (parameters) |binding| {
         const formals = module.functions[binding.source_function].parameters;
         try std.testing.expect(std.mem.indexOfScalar(u64, formals, binding.variable) != null);
         try std.testing.expectEqual(module.variables[binding.variable], binding.source_schema);
@@ -95,10 +83,43 @@ fn checkBindings(value: compiler.SourceBundle, program: data.activation.Program)
     }
 }
 
+fn checkLegacyExport(exported: *const compiler.ExportedSource) !void {
+    const bundle: compiler.SourceBundle = exported.value;
+    const evidence: compiler.Evidence = bundle.evidence;
+    const bindings = try horos.source.recovery.parameters(
+        a,
+        bundle.selected.module,
+        exported.retained.program.program(),
+        evidence.recovery,
+    );
+    defer a.free(bindings);
+    try std.testing.expect(data.record.equal(
+        []const horos.source.RecoveryBinding,
+        bindings,
+        bundle.parameters,
+    ));
+}
+
+test "public checked source export preserves ordinary compiler types and lowering evidence" {
+    try std.testing.expect(legacy.SourceBundle == compiler.SourceBundle);
+    try std.testing.expect(legacy.ExportedSource == compiler.ExportedSource);
+    try std.testing.expect(legacy.Evidence == compiler.Evidence);
+    try std.testing.expect(@TypeOf(legacy.exportSource) == @TypeOf(compiler.exportSource));
+    const BuiltinExporter = @TypeOf(legacy.exportBuiltinSource);
+    try std.testing.expect(BuiltinExporter == @TypeOf(compiler.exportBuiltinSource));
+    var ordinary = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
+    defer ordinary.deinit();
+    inline for (.{ compiler.exportSource, compiler.exportBuiltinSource }) |exporter| {
+        var result: compiler.ExportedSource = try exporter(a, &ordinary);
+        defer result.deinit();
+        try checkSource(&result, &ordinary);
+        try checkLegacyExport(&result);
+    }
+}
+
 test "public checked source export retains builtin and specialized recovery source" {
     var ordinary = try artifact.Admitted.init(a, packaged.bytes, artifact.digest(packaged.bytes));
     defer ordinary.deinit();
-    try checkExport(&ordinary);
     const image = try @import("semantic/test_support.zig").guestImage();
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
@@ -120,6 +141,6 @@ test "public checked source export retains builtin and specialized recovery sour
             &candidate,
             &ordinary,
         ));
-        try checkExport(&candidate);
+        try checkRecoveryExport(&candidate);
     }
 }

@@ -205,29 +205,37 @@ that request; checking active/unknown delivery belongs to the enclosing owner.
 
 ## Semantic source and checked construction
 
-`RuntimeCompiler.exportSource` reconstructs and checks the actual selected
-artifact before returning its source bundle. The bundle distinguishes the
-approved root, selected module, guest scope, recovery interfaces and four helper
-images. It does not substitute the packaged generic module for a selected
-realization. Horos `source.slice.extract` admits the complete module, extracts
-the selected function's dependency closure and can require an effect-free slice.
-The resulting source is ordinary editable Horos data.
+`RuntimeCompiler.exportSource` reconstructs and checks an ordinary
+`kosmos.source-lower/2` root or a `kosmos.source-relation/1` descendant.
+`RuntimeCompiler.exportBuiltinSource` checks an ordinary root. Both return
+`RuntimeCompiler.ExportedSource`. Its source bundle retains the approved root,
+the selected module, guest scope, recovery interfaces and four helper images.
+An ordinary root's direct lowering proof is `value.evidence.recovery`. A
+descendant also carries its checked relation steps and final lowering proof in
+`value.construction`.
 
-For an ordinary root, the direct lowering map is available at
-`value.evidence.recovery.correspondence`. An opt-in root carries its complete
-proof in `value.evidence.recovery.source_lower_3`. Its witnesses describe the
-field-to-move substitutions, and its correspondence maps the resulting program
-through final coalescing. Both exports provide the checked source
-specialization in `value.evidence.derivation` when one was used.
-`RuntimeCompiler.exportLegacySource` returns the original statically typed
-bundle for ordinary and relation artifacts.
+For a `kosmos.source-lower/3` root, the optional `kosmos_recovery` build
+module exposes `RuntimeCompiler.exportRecoverySource`. Its
+`ExportedRecoverySource` holds the selected module and the complete transport
+proof in `value.evidence.recovery`. The rule identifies structural fallback or
+scalar field reuse. For scalar field reuse, the witnesses describe the
+field-to-move substitutions and the
+correspondence maps their result through final coalescing. Both source bundle
+types expose the checked specialization in `value.evidence.derivation` when
+one was used.
 
-`RuntimeCompiler.deriveRecord` packages a proposed module and finite relation
+The selected source is ordinary editable Horos data. Horos
+`source.slice.extract` admits the complete module, extracts a selected
+function's dependency closure and can require an effect-free slice.
+
+`RuntimeCompiler.derive` and `deriveRecord` accept an ordinary
+`kosmos.source-lower/2` root or a previously derived `kosmos.source-relation/1`
+descendant of that root. They package a proposed module and finite relation
 steps as an admitted candidate. `validateAgainst` separately checks it against
-the owner-selected ancestor. The new artifact and lowering contracts are
-`kosmos.semantic-artifact/3` and `kosmos.source-relation/1`; historical `/2` decoding
-and verification retain their original meaning. A candidate cannot supply its
-own approved root or convert successful compilation into validation.
+the owner-selected ancestor. Derived artifacts use the `kosmos.semantic-artifact/3`
+envelope and the `kosmos.source-relation/1` policy. Historical `/2` artifacts
+retain their original decoding and verification rules. The enclosing owner
+selects the approved root independently of the candidate.
 
 The Horos relation checker reconstructs scalar simplifications, closed pure
 inlining, private product coordinate permutations, catalog relocation and

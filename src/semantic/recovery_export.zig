@@ -4,23 +4,12 @@ const current = @import("horos_recovery");
 const artifact = @import("artifact.zig");
 const backend = @import("recovery_backend.zig");
 const legacy = @import("compiler.zig");
-const records = @import("recovery_records.zig");
 const roles = @import("recovery_roles.zig");
 const opt = current.source.recovery_optimization;
 const Allocator = std.mem.Allocator;
 const Arena = std.heap.ArenaAllocator;
 
-const LegacyRecovery = @FieldType(legacy.Evidence, "recovery");
-
-const Evidence = struct {
-    derivation: ?legacy.Derivation,
-    recovery: union(enum) {
-        correspondence: @FieldType(LegacyRecovery, "correspondence"),
-        source_lower_3: opt.Evidence,
-    },
-};
-
-pub const SourceBundle = struct {
+pub const RecoverySourceBundle = struct {
     realization: artifact.Digest,
     image: artifact.Digest,
     emitter: artifact.Digest,
@@ -39,69 +28,40 @@ pub const SourceBundle = struct {
     anchors: []const artifact.Anchor,
     branch_returns: []const u64,
     template_entries: []const u64,
-    evidence: Evidence,
-    construction: @FieldType(legacy.SourceBundle, "construction") = null,
-    lineage: ?artifact.Lineage = null,
+    evidence: struct {
+        recovery: opt.Evidence,
+        derivation: ?legacy.Derivation,
+    },
 };
 
-pub const ExportedSource = struct {
-    arena: *Arena,
-    value: SourceBundle,
+pub const ExportedRecoverySource = struct {
+    arena: Arena,
+    value: RecoverySourceBundle,
     retained: artifact.Admitted,
-    derived: ?artifact.Admitted = null,
     definition: legacy.SourceDefinition,
-    transport: ?opt.Decoded = null,
+    transport: opt.Decoded,
 
-    pub fn deinit(self: *ExportedSource) void {
-        if (self.transport) |*transport| transport.deinit();
-        if (self.derived) |*derived| derived.deinit();
+    pub fn deinit(self: *ExportedRecoverySource) void {
+        self.transport.deinit();
         self.definition.deinit();
         self.retained.deinit();
-        const parent = self.arena.child_allocator;
         self.arena.deinit();
-        parent.destroy(self.arena);
         self.* = undefined;
     }
 };
 
-pub fn exportSource(a: Allocator, candidate: *const artifact.Admitted) !ExportedSource {
+pub fn exportRecoverySource(
+    a: Allocator,
+    candidate: *const artifact.Admitted,
+) !ExportedRecoverySource {
     var owned = try candidate.clone();
     defer owned.deinit();
-    if (std.mem.eql(u8, owned.content.value.manifest.compiler.policy, backend.policy))
-        return recoverySource(a, &owned);
-    return fromLegacy(try legacy.exportSource(a, &owned));
-}
-
-fn fromLegacy(exported: legacy.ExportedSource) ExportedSource {
-    var value: SourceBundle = undefined;
-    inline for (@typeInfo(legacy.SourceBundle).@"struct".field_names) |name| {
-        if (comptime !std.mem.eql(u8, name, "evidence"))
-            @field(value, name) = @field(exported.value, name);
-    }
-    value.evidence = .{
-        .derivation = exported.value.evidence.derivation,
-        .recovery = .{ .correspondence = exported.value.evidence.recovery.correspondence },
-    };
-    return .{
-        .arena = exported.arena,
-        .retained = exported.retained,
-        .derived = exported.derived,
-        .definition = exported.definition,
-        .value = value,
-    };
-}
-
-fn recoverySource(a: Allocator, owned: *const artifact.Admitted) !ExportedSource {
-    try backend.checkManifest(owned);
+    try backend.checkManifest(&owned);
     var temporary = Arena.init(a);
     defer temporary.deinit();
     const scratch = temporary.allocator();
-    const arena = try a.create(Arena);
-    arena.* = Arena.init(a);
-    errdefer {
-        arena.deinit();
-        a.destroy(arena);
-    }
+    var arena = Arena.init(a);
+    errdefer arena.deinit();
     const storage = arena.allocator();
     var retained = try artifact.Admitted.init(a, try owned.encode(scratch), owned.identity);
     errdefer retained.deinit();
@@ -113,9 +73,10 @@ fn recoverySource(a: Allocator, owned: *const artifact.Admitted) !ExportedSource
     defer validated.envelope.deinit();
     defer a.free(validated.parameters);
     errdefer validated.proof.deinit();
+    const value = try sourceBundle(storage, &retained, &definition, validated);
     return .{
         .arena = arena,
-        .value = try sourceBundle(storage, &retained, &definition, validated),
+        .value = value,
         .retained = retained,
         .definition = definition,
         .transport = validated.proof,
@@ -127,9 +88,9 @@ fn sourceBundle(
     retained: *const artifact.Admitted,
     definition: *legacy.SourceDefinition,
     validated: backend.Validated,
-) !SourceBundle {
-    const derivation: ?legacy.Derivation = if (validated.derivation) |d|
-        try convertDerivation(storage, d)
+) !RecoverySourceBundle {
+    const derivation: ?legacy.Derivation = if (validated.envelope.derivation_bytes) |bytes|
+        try readDerivation(storage, bytes)
     else
         null;
     const functions = if (validated.derivation) |d| d.functions else &.{};
@@ -169,15 +130,15 @@ fn sourceBundle(
         .template_entries = bundle.template_entries,
         .evidence = .{
             .derivation = derivation,
-            .recovery = .{ .source_lower_3 = validated.proof.evidence },
+            .recovery = validated.proof.evidence,
         },
     };
 }
 
-fn convertDerivation(storage: Allocator, d: backend.Derivation) !legacy.Derivation {
-    const bytes = try records.encode(storage, d);
+fn readDerivation(storage: Allocator, bytes: []const u8) !legacy.Derivation {
     var reader: old.data.wire.Reader = .{ .input = bytes };
-    const result = try old.data.record.read(legacy.Derivation, &reader, storage);
+    var capacity = backend.limits.lowering_bytes;
+    const result = try old.data.record.readBounded(legacy.Derivation, &reader, storage, &capacity);
     try reader.finish();
     return result;
 }
