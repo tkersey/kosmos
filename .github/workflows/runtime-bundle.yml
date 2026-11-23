@@ -125,7 +125,7 @@ jobs:
               -Doptimize=safe --summary all --verbose
           else
             /usr/bin/time -v zig build build-semantic-driver-check \
-              --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all --verbose
+              --cache-dir .zig-cache/native-driver -Doptimize=safe -j12 --summary all --verbose
           fi
       - name: Admit completed native compilation before execution
         id: native_cache_size
