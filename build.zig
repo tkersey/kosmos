@@ -875,6 +875,17 @@ fn configureSemantics(
     b.step("check-semantics", "Check portable semantics against the immutable historical evaluator")
         .dependOn(&run_semantic_tests.step);
     driver.native_checks.dependOn(&run_semantic_tests.step);
+    configureSpecialization(b, host_modules, baseline, driver);
+    driver.native_checks.dependOn(&sessions.stable_source.step);
+    driver.native_checks.dependOn(&storage_checks.run_native_tests.step);
+}
+
+fn configureSpecialization(
+    b: *std.Build,
+    host_modules: HostModules,
+    baseline: Baseline,
+    driver: Driver,
+) void {
     const specialization_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_specialization.zig"),
         .target = b.graph.host,
@@ -884,17 +895,34 @@ fn configureSemantics(
             .module = host_modules.source_data,
         }, .{ .name = "horos", .module = host_modules.horos } },
     }) });
-    host_modules.bindRecovery(specialization_tests.root_module);
     const run_specialization_tests = b.addRunArtifact(specialization_tests);
     run_specialization_tests.has_side_effects = true;
-    b.step(
+    const ordinary = b.step("check-ordinary-specialization", "Check ordinary specialization");
+    ordinary.dependOn(&run_specialization_tests.step);
+    const recovery_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_semantic_recovery_specialization.zig"),
+            .target = b.graph.host,
+            .optimize = host_modules.host_mode,
+            .imports = &.{
+                .{ .name = "horos_data", .module = host_modules.source_data },
+                .{ .name = "horos", .module = host_modules.horos },
+            },
+        }),
+        .filters = &.{ "src.semantic_recovery_", "src.semantic.recovery_" },
+    });
+    host_modules.bindRecovery(recovery_tests.root_module);
+    const run_recovery = b.addRunArtifact(recovery_tests);
+    run_recovery.has_side_effects = true;
+    const recovery = b.step("check-recovery-specialization", "Check recovery identity and export");
+    recovery.dependOn(&run_recovery.step);
+    const all = b.step(
         "check-semantic-specialization",
         "Check specialized transitions, scalar storage and retained reconstruction",
-    )
-        .dependOn(&run_specialization_tests.step);
-    driver.native_checks.dependOn(&run_specialization_tests.step);
-    driver.native_checks.dependOn(&sessions.stable_source.step);
-    driver.native_checks.dependOn(&storage_checks.run_native_tests.step);
+    );
+    all.dependOn(ordinary);
+    all.dependOn(recovery);
+    driver.native_checks.dependOn(all);
 }
 
 fn configurePublicTests(

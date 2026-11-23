@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, publication, source, source-second, portable, browser, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, recovery-specialization, publication, source, source-second, portable, browser, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -64,10 +64,10 @@ jobs:
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || matrix.lane == 'publication' && 'specialization' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || matrix.lane == 'publication' && 'specialization' || matrix.lane }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -198,7 +198,12 @@ jobs:
       - name: Check specialization
         if: matrix.lane == 'specialization'
         run: >-
-          zig build check-semantic-specialization
+          zig build check-ordinary-specialization
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check recovery specialization
+        if: matrix.lane == 'recovery-specialization'
+        run: >-
+          zig build check-recovery-specialization
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check public receipt owners
         if: matrix.lane == 'publication'
