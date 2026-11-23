@@ -564,8 +564,8 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 ## Checked scalar field reuse
 
 Two runs on an Apple M2 Pro with Zig 0.17.1 in safe mode compared the structural
-compiler at Horos `1f53200` with the opt-in compiler at `30402e1` on Kosmos
-`5bdff07`. Zig reported the compilation target CPU model as `apple_a15`.
+compiler at Horos `1f53200` with the opt-in compiler at `4a93f3d` on Kosmos
+`f1d72b5`. Zig reported the compilation target CPU model as `apple_a15`.
 The nominated workload was `scalar_chain_large` with input 41. Each run alternated six
 structural/opt-in pairs per realization. The first process began with the
 structural policy and the second began with the opt-in policy. Each used that
@@ -593,14 +593,25 @@ control. Negative percentages indicate faster opt-in execution.
 
 | Paired observations | Run 1 median | Run 2 median | All individual pairs |
 | --- | ---: | ---: | ---: |
-| Generic execution | −1.59% | −7.50% | −30.91% to +7.14% |
-| Generic checkpoint-inclusive wall time | −1.64% | −8.02% | −35.73% to +6.87% |
-| Specialized execution | −0.11% | +0.24% | −52.66% to +11.06% |
-| Specialized checkpoint-inclusive wall time | −1.28% | +0.10% | −52.49% to +11.11% |
+| Generic execution | +0.52% | +0.25% | −2.57% to +8.76% |
+| Generic checkpoint-inclusive wall time | +0.56% | +0.16% | −2.64% to +8.52% |
+| Specialized execution | −0.04% | +0.61% | −0.65% to +1.91% |
+| Specialized checkpoint-inclusive wall time | −0.02% | +0.59% | −0.72% to +5.75% |
 
-Elapsed times used the ordinary allocator with statistics off. Each median covers
-six alternating pairs. The full range shows the observed spread on this shared
-host. Separate instrumented sessions counted the same calls to advance, including
+For each pair, the percentage change is 100 × (opt-in time / structural time − 1).
+The run medians summarize six such changes. The last column below compares
+the two policies’ separate median execution times within a run. The first
+pair used each retained runtime for the first time. The five later pairs ran
+new sessions on those same runtimes.
+
+| Realization | Run | First pair | Median of the five later pairs | Change between policy medians, all six pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Generic | 1 | −0.23% | +0.54% | +0.39% |
+| Generic | 2 | +8.76% | −0.02% | −0.71% |
+| Specialized | 1 | −0.65% | +0.47% | −0.11% |
+| Specialized | 2 | +1.28% | +0.15% | +0.84% |
+
+Elapsed times used the ordinary allocator with statistics off. Separate instrumented sessions counted the same calls to advance, including
 the terminal observation exchange. The session allocation meter spans session
 start through the final checkpoint check. Retained bytes are sampled there,
 before session teardown. The meter excludes the prepared runtime and caller-owned
@@ -611,16 +622,16 @@ are medians with the minimum and maximum in parentheses.
 
 | Realization and policy | Advance, ms | Checkpoint-inclusive wall time, ms |
 | --- | ---: | ---: |
-| Generic structural | 102.58 (94.38–137.84) | 106.16 (97.00–152.26) |
-| Generic opt-in | 98.25 (94.17–108.48) | 100.91 (96.87–111.12) |
-| Specialized structural | 110.56 (98.62–275.67) | 115.34 (102.06–281.91) |
-| Specialized opt-in | 113.72 (97.56–130.50) | 118.12 (100.96–133.93) |
+| Generic structural | 91.96 (90.56–94.28) | 94.65 (93.23–97.01) |
+| Generic opt-in | 92.18 (89.99–102.54) | 94.88 (92.73–105.28) |
+| Specialized structural | 97.18 (95.69–99.46) | 100.49 (98.88–102.78) |
+| Specialized opt-in | 97.48 (96.33–99.61) | 100.76 (99.59–105.43) |
 
 | Construction across two runs | Generic structural → opt-in | Specialized structural → opt-in |
 | --- | --- | --- |
-| Compile seconds | 0.341–0.453 → 0.391–0.455 | 7.879–10.676 → 9.776–12.289 |
-| Admission seconds | 0.017–0.020 → 0.017–0.019 | 0.293–0.389 → 0.337–0.460 |
-| Independent validation seconds | 0.251–0.279 → 0.328–0.497 | 4.512–5.083 → 4.082–4.624 |
+| Compile seconds | 0.318–0.326 → 0.366–0.369 | 7.048–7.527 → 8.390–8.577 |
+| Admission seconds | 0.016–0.017 → 0.017 | 0.282–0.296 → 0.284–0.289 |
+| Independent validation seconds | 0.231–0.238 → 0.304–0.310 | 3.837–3.895 → 3.429–3.541 |
 | Metered compile peak bytes | 849,867,734 → 48,953,628 | 10,149,649,259 → 1,814,143,080 |
 | Metered validation peak bytes | 465,653,726 → 43,055,058 | 4,271,034,052 → 1,188,291,964 |
 
@@ -634,15 +645,20 @@ can therefore count both its old and new allocation at once. Peak storage for
 the ordinary allocator was unmeasured.
 
 Keep the option experimental and disabled by default. The generic evaluator
-saved 1,752 field evaluations per execution. Its opt-in execution was faster
-in eight of twelve pairs, with median times 1.59% and 7.50% lower in the two
-runs. On the byte-identical specialized control, each policy was faster in six
-pairs. Individual control differences ranged from 52.66% faster to 11.06%
-slower for opt-in. The one-minute host load averages at the beginning, between
-runs and at the end were 11.36, 15.59 and 12.95. This spread leaves the
-elapsed benefit of the generic rule unresolved. Both realizations had equal
-structural and opt-in peak and retained session bytes. The opt-in compiler had
-lower compile and validation peaks under the allocation meter.
+saved 1,752 field evaluations per execution. Opt-in execution was faster in
+five of twelve generic pairs. The median within-pair change was +0.52% in the
+structural-first run and +0.25% in the opt-in-first run. Across the five later
+pairs in each run the medians were +0.54% and −0.02%. The byte-identical
+specialized control ranged from −0.65% to +1.91%. The measured generic work
+saving did not produce a repeatable elapsed-time gain. The one-minute host
+load averages before, between and after the benchmark commands were 6.85,
+8.20 and 8.25.
+
+Session peak and retained bytes were equal across policies within each
+realization. The opt-in compiler had lower metered construction and validation
+peaks. Ordinary-allocator compilation took longer in both realizations.
+Generic independent validation also took longer, while specialized validation
+took less time over the observed runs.
 
 Reproduce the comparison in two separate processes on the same host.
 
