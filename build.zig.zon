@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0xda7fbe49074dc2bd,
     .horos_recovery = .{
-        .url = "git+https://github.com/tkersey/horos#41117da447f197e333b0e1c8e8d3f87e4893d1a3",
-        .hash = "horos-8.0.1-flclaFgXWwBP4xvmVCWTVpqXpid3-iUdhHWSbje93_Rk",
+        .url = "git+https://github.com/tkersey/horos#fc884e6898cd0f69d452085c3761e3025be0e583",
+        .hash = "horos-8.0.1-flclaFwmWwDqeTClLOXbEl8Je_uGA1KB74bwvisr-DMY",
     },
     .dependencies = .{
         .horos = .{

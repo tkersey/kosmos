@@ -9,6 +9,8 @@ const artifact = runtime.artifact;
 const Allocator = std.mem.Allocator;
 const Hooks = runtime.instrumentation.Hooks;
 pub const limits: source.recovery_optimization.Limits = .{};
+const producer_passes = 3;
+const producer_work = producer_passes * limits.source_work;
 pub const policy = "kosmos.source-lower/3";
 pub const Derivation = struct {
     residual: source.Module,
@@ -76,8 +78,8 @@ pub fn select(
     const guest = opts.guest orelse return null;
     const bytes = try projectGuest(a, guest, limits.lowering_bytes);
     defer a.free(bytes);
-    var work = limits.source_work;
-    return try specialize(a, original, .{
+    var work: u64 = producer_work;
+    return try source.specialize.specializeWithWork(a, original, .{
         .function = definition.service.entry,
         .arguments = &.{
             .{ .known = .{ .schema = definition.machine.program, .bytes = bytes } },
@@ -165,23 +167,6 @@ pub fn validate(
     try validateRelation(a, original, d, key, storage_bytes, work);
 }
 
-fn specialize(
-    a: Allocator,
-    original: source.Module,
-    request: source.specialize.Request,
-    work: *u64,
-) !source.specialize.Output {
-    var bounded = request;
-    bounded.policy.work = @min(request.policy.work, work.*, limits.source_work);
-    var out = try source.specialize.specialize(a, original, bounded);
-    errdefer out.deinit();
-    if (bounded.policy.work != request.policy.work) {
-        out.request.policy.work = request.policy.work;
-        out.key = try source.specialize.identityWithWork(a, original, out.request, work);
-    }
-    return out;
-}
-
 pub fn validateRelation(
     a: Allocator,
     original: source.Module,
@@ -224,18 +209,8 @@ fn checkRelation(
         "variables", "values",    "terms",   "functions",
     }) |name| @field(out.builder, name) = .fromOwnedSlice(@constCast(@field(d.residual, name)));
     out.builder.region_count = d.residual.region_count;
-    try chargeEnvelope(original, work);
     try source.specialize.validateWithWork(a, original, d.request, &out, work);
     try checkCatalogs(a, original, d, work);
-}
-
-fn chargeEnvelope(original: source.Module, work: *u64) !void {
-    var size: data.wire.Writer = .{ .remaining = work };
-    try data.record.write(source.Module, original, &size);
-    try data.admission.spend(work, size.position);
-    const scalars = data.wire.naturalLength(original.entry) +
-        data.wire.naturalLength(original.failure) + data.wire.naturalLength(original.region_count);
-    try data.admission.spend(work, size.position - scalars);
 }
 
 const relocation = source.relation.Relocation;
@@ -530,16 +505,20 @@ test "entry rooted specialization admits each requested key allowance" {
         .context = context(@splat(0), .{}),
         .policy = .{ .work = 1_000_000, .keys_per_function = 0 },
     };
-    var remaining: u64 = 1024;
+    const produce = source.specialize.specializeWithWork;
+    var remaining = limits.source_work;
     try std.testing.expectError(
         error.UnsupportedSpecialization,
-        specialize(a, original, request, &remaining),
+        produce(a, original, request, &remaining),
     );
     for ([_]usize{ 1, 2 }) |keys| {
         request.policy.keys_per_function = keys;
-        remaining = 1024;
-        var bounded = try specialize(a, original, request, &remaining);
+        remaining = limits.source_work;
+        var bounded = try produce(a, original, request, &remaining);
         defer bounded.deinit();
+        const spent = limits.source_work - remaining;
+        var short = spent - 1;
+        try std.testing.expectError(error.RelationLimit, produce(a, original, request, &short));
         var producer = try source.specialize.specialize(a, original, request);
         defer producer.deinit();
         try std.testing.expectEqual(keys + 1, bounded.functions.items.len);
@@ -557,33 +536,6 @@ test "entry rooted specialization admits each requested key allowance" {
             checkFunctions(a, original.functions.len, reduced, &work),
         );
     }
-}
-
-test "trusted envelope comparisons consume their source record widths" {
-    const a = std.testing.allocator;
-    var b = source.Builder.init(a);
-    defer b.deinit();
-    const unit = try b.scalar(void);
-    const entry = try b.declare(&.{}, unit, &.{}, &.{});
-    try b.define(entry, try b.pure(try b.constant(void, {})));
-    const original = b.module(entry, unit);
-    var remaining: u64 = 100_000;
-    const equal = data.record.equalWithWork;
-    try std.testing.expect(try equal(source.Module, original, original, &remaining));
-    const measured = 100_000 - remaining;
-    inline for (.{
-        "schemas",   "constants", "effects", "handlers",  "resources",
-        "variables", "values",    "terms",   "functions",
-    }) |field| {
-        const table = @field(original, field);
-        try std.testing.expect(try equal(@TypeOf(table), table, table, &remaining));
-    }
-    const total = measured + (100_000 - remaining);
-    var exact = total;
-    try chargeEnvelope(original, &exact);
-    try std.testing.expectEqual(0, exact);
-    var short = total - 1;
-    try std.testing.expectError(error.RelationLimit, chargeEnvelope(original, &short));
 }
 
 test "admitted explicit unit supplies the observable specialization catalog" {
