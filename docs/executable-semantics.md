@@ -235,11 +235,11 @@ The `work` field of `RuntimeCompiler.ValidationPolicy` bounds validation of
 compiler policy. The checked module exposes its root limits as
 `RuntimeCompiler.recovery_limits`.
 
-The pinned Horos specializer at `4a93f3d` retains its construction scratch
-during final lowering. On the default specialized export, that call exceeds
-the checked compiler’s 1 GiB storage limit when the caller enforces it.
-The checked consumer bounds its own validation stages. Bounding the Horos
-producer while preserving that export requires an upstream change.
+The checked compiler gives Horos specialization a 1 GiB live allocation
+budget. Horos releases its construction scratch before validating the
+derivation and releases its checker scratch before admitting the residual.
+Kosmos independently validates the resulting specialization before returning
+the artifact. Exhausting the producer budget returns `Capacity`.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected

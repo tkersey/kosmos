@@ -144,7 +144,18 @@ fn emitDefined(
     definition: *const legacy.SourceDefinition,
     inputs: *const Inputs,
 ) !Compiled {
-    var out = try spec.select(a, definition, inputs.original, options);
+    var physical = limits.lowering_bytes;
+    var specialization: data.AllocationBudget =
+        .{ .parent = a, .remaining = &physical, .accounting = .live };
+    var out = spec.select(
+        specialization.allocator(),
+        definition,
+        inputs.original,
+        options,
+    ) catch |err| {
+        if (err == error.OutOfMemory and specialization.exhausted) return error.Capacity;
+        return err;
+    };
     defer if (out) |*o| o.deinit();
     const derivation = if (out) |*o| Derivation.from(o) else null;
     var work = limits.source_work;
