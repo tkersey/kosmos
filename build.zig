@@ -649,6 +649,7 @@ fn configureEconomy(
     host_modules.bindRecovery(economy_bench.root_module);
     const run_economy_bench = b.addRunArtifact(economy_bench);
     if (options.economy_workload) |name| run_economy_bench.addArg(name);
+    run_economy_bench.addPassthruArgs();
     run_economy_bench.has_side_effects = true;
     b.step(
         "bench-semantics",

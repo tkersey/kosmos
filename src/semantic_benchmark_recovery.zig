@@ -17,6 +17,12 @@ const Context = struct {
     input: []const u8,
     trace: []const bench.Step,
     guest_work: u64,
+    opt_in_first: bool,
+
+    fn orders(self: Context) [2][2]bool {
+        if (self.opt_in_first) return .{ construction_order[1], construction_order[0] };
+        return construction_order;
+    }
 };
 const Realization = enum { generic, specialized };
 const repetitions = 6;
@@ -34,6 +40,7 @@ pub fn measure(
     output: *std.Io.Writer,
     image: []const u8,
     input: []const u8,
+    opt_in_first: bool,
 ) !void {
     try @import("semantic_benchmark_recovery_diamond.zig").measure(a, output);
     var scratch = std.heap.ArenaAllocator.init(a);
@@ -61,6 +68,7 @@ pub fn measure(
         .reference_cut_guest_work = cuts,
         .workload = "scalar_chain_large",
         .replicates = repetitions,
+        .opt_in_first = opt_in_first,
         .quantum = 256,
         .input = std.fmt.bytesToHex(input[0..8].*, .lower),
         .guest = std.fmt.bytesToHex(guest.identity(), .lower),
@@ -78,7 +86,7 @@ pub fn measure(
         .reference_cuts = trace.items.len,
         .zig = @import("builtin").zig_version_string,
         .mode = @tagName(@import("builtin").mode),
-        .cpu_model = @import("builtin").cpu.model.name,
+        .target_cpu_model = @import("builtin").cpu.model.name,
         .arch = @tagName(@import("builtin").cpu.arch),
         .os = @tagName(@import("builtin").os.tag),
     });
@@ -91,6 +99,7 @@ pub fn measure(
         .input = input,
         .trace = trace.items,
         .guest_work = reference.guest_work,
+        .opt_in_first = opt_in_first,
     };
     for (std.meta.tags(Realization)) |kind| try measurePair(context, kind);
 }
@@ -177,17 +186,19 @@ fn buildMetered(context: Context, kind: Realization, optimized: bool) !Built {
 
 fn measureConstruction(context: Context, kind: Realization) ![2]Built {
     var samples: [construction_order.len][2]ConstructionTiming = undefined;
-    for (construction_order, &samples) |pair, *timings| {
+    const orders = context.orders();
+    for (orders, &samples) |pair, *timings| {
         for (pair, timings) |optimized, *sample| {
             sample.* = try timeConstruction(context, compileOptions(context, kind, optimized));
         }
     }
-    var structural = try buildMetered(context, kind, false);
-    errdefer structural.prepared.deinit();
-    var optimized = try buildMetered(context, kind, true);
-    errdefer optimized.prepared.deinit();
-    const built = [2]Built{ structural, optimized };
-    for (construction_order, samples, 0..) |pair, timings, replicate| {
+    var built: [2]Built = undefined;
+    const first = orders[0][0];
+    built[@intFromBool(first)] = try buildMetered(context, kind, first);
+    errdefer built[@intFromBool(first)].prepared.deinit();
+    built[@intFromBool(!first)] = try buildMetered(context, kind, !first);
+    errdefer built[@intFromBool(!first)].prepared.deinit();
+    for (orders, samples, 0..) |pair, timings, replicate| {
         for (pair, timings, 0..) |selected, sample, order| {
             const runtime = &built[@intFromBool(selected)].prepared.runtime;
             if (!std.mem.eql(u8, &runtime.identity, &sample.artifact))
@@ -246,9 +257,9 @@ const Counters = struct {
 fn measurePair(context: Context, kind: Realization) !void {
     var builds = try measureConstruction(context, kind);
     defer for (&builds) |*built| built.prepared.deinit();
+    const orders = context.orders();
     for (0..repetitions) |replicate| {
-        for (0..2) |order| {
-            const selected = (replicate + order) % 2 == 1;
+        for (orders[replicate % orders.len], 0..) |selected, order| {
             const built = &builds[@intFromBool(selected)];
             const sample = try timed(context, &built.prepared);
             const observed = sample.observed;
@@ -272,14 +283,15 @@ fn measurePair(context: Context, kind: Realization) !void {
             });
         }
     }
-    for (&builds, 0..) |*built, index| {
+    for (orders[0]) |selected| {
+        const built = &builds[@intFromBool(selected)];
         const measured = try counted(context, &built.prepared);
         const observed = measured.observed;
         const manifest = built.prepared.runtime.content.value.manifest;
         try bench.emit(context.output, .{
             .phase = "recovery-counters",
             .realization = @tagName(kind),
-            .optimized = index == 1,
+            .optimized = selected,
             .effective_rule = built.effective_rule,
             .horos_package = manifest.compiler.horos_package,
             .artifact = std.fmt.bytesToHex(built.prepared.runtime.identity, .lower),
