@@ -138,7 +138,7 @@ for each identical immutable command. It awaits both before the next observation
 retaining every restore, transfer checkpoint, byte comparison and source assertion.
 
 CI runs session behavior, session ownership/failure, source regression, native
-owners, native semantic driver, specialization, publication, two source-agreement
+owners, ordinary and checked recovery drivers, specialization, publication, two source-agreement
 and portable groups independently; their union is
 exactly the aggregate `check` dependency set. The session partitions retain all
 86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and
@@ -156,12 +156,13 @@ ABI fixture peer. Compiler caches may reuse content across dependency-lock chang
 Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
-The native owners and semantic-driver lanes compile on separate native runners
-before retaining their bounded compiler caches. The driver lane builds the complete
-test executable and regenerates the core concurrently in separate compiler caches.
-After both builds succeed, the lane runs all driver tests in the regenerated core's
-directory, including the byte-for-byte comparison with the shipped artifact.
-The local `check-semantic-driver` target builds both inputs and runs the same suite.
+The native owners, ordinary driver and checked recovery driver each compile on
+a separate runner and retain their bounded compiler caches before execution.
+The ordinary driver uses the legacy compiler and compares the shipped artifact
+byte for byte with the independently regenerated core. The checked recovery
+driver uses the optional compiler and the authenticated packaged core to exercise
+both branch paths and restore interrupted phases. The local `check-semantic-driver`
+and `check-native` targets include both suites.
 The Zig installation uses a stable tool-cache path because dependency extraction
 includes `PATH` in its input identity. Neither cache restoration nor successful
 compilation substitutes for completed tests.

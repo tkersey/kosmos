@@ -756,15 +756,15 @@ fn configureDriver(
             .module = retained_runtime,
         } },
     }) });
-    host_modules.bindRecovery(driver_tests.root_module);
+    driver_tests.root_module.addOptions("recovery_options", b.addOptions());
     const run_driver_tests = b.addRunArtifact(driver_tests);
     driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
-    b.step("build-semantic-driver-executable", "Build the complete native driver test executable")
+    b.step("build-semantic-driver-executable", "Build the ordinary native driver test executable")
         .dependOn(&driver_tests.step);
     const installed_core_tests = b.addRunArtifact(driver_tests);
     installed_core_tests.setCwd(b.graph.path(.install_prefix, ""));
     installed_core_tests.has_side_effects = true;
-    b.step("check-installed-semantic-driver", "Run all driver tests against the installed core")
+    b.step("check-installed-semantic-driver", "Run the ordinary driver tests on the installed core")
         .dependOn(&installed_core_tests.step);
     const build_driver = b.step(
         "build-semantic-driver-check",
@@ -774,14 +774,49 @@ fn configureDriver(
     runtime_modules.rebuilt_directory.addStepDependencies(build_driver);
     run_driver_tests.setCwd(runtime_modules.rebuilt_directory);
     run_driver_tests.has_side_effects = true;
-    b.step(
+    const check_driver = b.step(
         "check-semantic-driver",
         "Check packaged artifact admission and guest/outer bridge framing",
-    ).dependOn(&run_driver_tests.step);
-    native_checks.dependOn(&run_driver_tests.step);
+    );
+    check_driver.dependOn(&run_driver_tests.step);
+    configureRecoveryDriver(b, host_modules, baseline, runtime_modules, build_driver, check_driver);
+    native_checks.dependOn(check_driver);
     configureDiagnosticExample(b, host_modules, retained_runtime);
 
     return .{ .native_checks = native_checks };
+}
+
+fn configureRecoveryDriver(
+    b: *std.Build,
+    host: HostModules,
+    baseline: Baseline,
+    runtime: RuntimeModules,
+    build_driver: *std.Build.Step,
+    check_driver: *std.Build.Step,
+) void {
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_semantic_recovery.zig"),
+            .target = b.graph.host,
+            .optimize = host.host_mode,
+            .imports = &.{
+                .{ .name = "horos", .module = host.horos },
+                .{ .name = "horos_data", .module = host.source_data },
+                .{ .name = "native_baseline", .module = baseline.native_baseline },
+                .{ .name = "packaged_runtime", .module = runtime.packaged_runtime },
+            },
+        }),
+        .filters = &.{ "src.semantic_recovery_tests.", "src.semantic.recovery_" },
+    });
+    host.bindRecovery(tests.root_module);
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("build-semantic-recovery-driver", "Build the checked recovery driver tests")
+        .dependOn(&tests.step);
+    b.step("check-semantic-recovery-driver", "Run the checked recovery driver tests")
+        .dependOn(&run.step);
+    build_driver.dependOn(&tests.step);
+    check_driver.dependOn(&run.step);
 }
 
 fn configureDiagnosticExample(
@@ -800,7 +835,7 @@ fn configureDiagnosticExample(
             .{ .name = "diagnostic_fixture", .module = host_modules.diagnostic_fixture },
         },
     });
-    host_modules.bindRecovery(example);
+    example.addOptions("recovery_options", b.addOptions());
     const executable = b.addExecutable(.{
         .name = "diagnostic-replay",
         .root_module = b.createModule(.{
