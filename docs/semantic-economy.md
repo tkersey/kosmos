@@ -565,7 +565,7 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 
 Two runs on an Apple M2 Pro with Zig 0.17.1 in safe mode compared the structural
 compiler at Horos `1f53200` with the opt-in compiler at `4a93f3d` on Kosmos
-`f1d72b5`. Zig reported the compilation target CPU model as `apple_a15`.
+`9541264`. Zig reported the compilation target CPU model as `apple_a15`.
 The nominated workload was `scalar_chain_large` with input 41. Each run alternated six
 structural/opt-in pairs per realization. The first process began with the
 structural policy and the second began with the opt-in policy. Each used that
@@ -593,10 +593,10 @@ control. Negative percentages indicate faster opt-in execution.
 
 | Paired observations | Run 1 median | Run 2 median | All individual pairs |
 | --- | ---: | ---: | ---: |
-| Generic execution | +0.52% | +0.25% | −2.57% to +8.76% |
-| Generic checkpoint-inclusive wall time | +0.56% | +0.16% | −2.64% to +8.52% |
-| Specialized execution | −0.04% | +0.61% | −0.65% to +1.91% |
-| Specialized checkpoint-inclusive wall time | −0.02% | +0.59% | −0.72% to +5.75% |
+| Generic execution | +0.43% | −0.19% | −2.98% to +3.42% |
+| Generic checkpoint-inclusive wall time | +0.44% | −0.19% | −2.88% to +3.53% |
+| Specialized execution | −1.04% | +0.76% | −4.16% to +2.17% |
+| Specialized checkpoint-inclusive wall time | −1.16% | +0.80% | −4.14% to +2.18% |
 
 For each pair, the percentage change is 100 × (opt-in time / structural time − 1).
 The run medians summarize six such changes. The last column below compares
@@ -606,10 +606,10 @@ new sessions on those same runtimes.
 
 | Realization | Run | First pair | Median of the five later pairs | Change between policy medians, all six pairs |
 | --- | ---: | ---: | ---: | ---: |
-| Generic | 1 | −0.23% | +0.54% | +0.39% |
-| Generic | 2 | +8.76% | −0.02% | −0.71% |
-| Specialized | 1 | −0.65% | +0.47% | −0.11% |
-| Specialized | 2 | +1.28% | +0.15% | +0.84% |
+| Generic | 1 | +0.02% | +0.84% | −0.22% |
+| Generic | 2 | −2.14% | −0.13% | −0.08% |
+| Specialized | 1 | −4.16% | −0.47% | +0.12% |
+| Specialized | 2 | +1.14% | +0.38% | +0.81% |
 
 Elapsed times used the ordinary allocator with statistics off. Separate instrumented sessions counted the same calls to advance, including
 the terminal observation exchange. The session allocation meter spans session
@@ -622,18 +622,18 @@ are medians with the minimum and maximum in parentheses.
 
 | Realization and policy | Advance, ms | Checkpoint-inclusive wall time, ms |
 | --- | ---: | ---: |
-| Generic structural | 91.96 (90.56–94.28) | 94.65 (93.23–97.01) |
-| Generic opt-in | 92.18 (89.99–102.54) | 94.88 (92.73–105.28) |
-| Specialized structural | 97.18 (95.69–99.46) | 100.49 (98.88–102.78) |
-| Specialized opt-in | 97.48 (96.33–99.61) | 100.76 (99.59–105.43) |
+| Generic structural | 88.60 (85.23–90.65) | 91.19 (87.70–93.29) |
+| Generic opt-in | 88.53 (85.12–91.00) | 91.16 (87.60–93.68) |
+| Specialized structural | 95.89 (92.13–103.46) | 99.08 (95.22–106.81) |
+| Specialized opt-in | 96.36 (92.87–99.36) | 99.66 (95.99–102.59) |
 
 | Construction across two runs | Generic structural → opt-in | Specialized structural → opt-in |
 | --- | --- | --- |
-| Compile seconds | 0.318–0.326 → 0.366–0.369 | 7.048–7.527 → 8.390–8.577 |
-| Admission seconds | 0.016–0.017 → 0.017 | 0.282–0.296 → 0.284–0.289 |
-| Independent validation seconds | 0.231–0.238 → 0.304–0.310 | 3.837–3.895 → 3.429–3.541 |
+| Compile seconds | 0.295–0.317 → 0.344–0.360 | 6.447–6.734 → 7.644–7.958 |
+| Admission seconds | 0.017 → 0.016–0.017 | 0.262–0.266 → 0.263–0.268 |
+| Independent validation seconds | 0.213–0.222 → 0.277–0.288 | 3.557–3.578 → 2.956–3.076 |
 | Metered compile peak bytes | 849,867,734 → 48,953,628 | 10,149,649,259 → 1,814,143,080 |
-| Metered validation peak bytes | 465,653,726 → 43,055,058 | 4,271,034,052 → 1,188,291,964 |
+| Metered validation peak bytes | 465,653,726 → 43,381,514 | 4,271,034,052 → 1,090,061,266 |
 
 The timing ranges cover four ordinary-allocator builds per policy and realization.
 Each process built the two policies in both orders, releasing each timed artifact
@@ -644,15 +644,15 @@ meters use `AllocationBudget`, which disables resize and remap. Growing a buffer
 can therefore count both its old and new allocation at once. Peak storage for
 the ordinary allocator was unmeasured.
 
-Keep the option experimental and disabled by default. The generic evaluator
-saved 1,752 field evaluations per execution. Opt-in execution was faster in
-five of twelve generic pairs. The median within-pair change was +0.52% in the
-structural-first run and +0.25% in the opt-in-first run. Across the five later
-pairs in each run the medians were +0.54% and −0.02%. The byte-identical
-specialized control ranged from −0.65% to +1.91%. The measured generic work
-saving did not produce a repeatable elapsed-time gain. The one-minute host
-load averages before, between and after the benchmark commands were 6.85,
-8.20 and 8.25.
+The two runs showed no repeatable elapsed-time gain, so scalar field reuse stays
+experimental and disabled by default. The generic evaluator saved
+1,752 field evaluations per execution. Opt-in execution was faster in
+6 of 12 generic pairs. The median within-pair change was +0.43% in the
+structural-first run and −0.19% in the opt-in-first run. Across the five later
+pairs the respective medians were +0.84% and −0.13%. The byte-identical
+specialized control ranged from −4.16% to +2.17%.
+The one-minute host load averages before, between and after the commands
+were 6.80, 7.26 and 4.01.
 
 Session peak and retained bytes were equal across policies within each
 realization. The opt-in compiler had lower metered construction and validation
