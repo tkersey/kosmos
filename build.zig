@@ -759,6 +759,13 @@ fn configureDriver(
     host_modules.bindRecovery(driver_tests.root_module);
     const run_driver_tests = b.addRunArtifact(driver_tests);
     driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
+    b.step("build-semantic-driver-executable", "Build the complete native driver test executable")
+        .dependOn(&driver_tests.step);
+    const installed_core_tests = b.addRunArtifact(driver_tests);
+    installed_core_tests.setCwd(b.graph.path(.install_prefix, ""));
+    installed_core_tests.has_side_effects = true;
+    b.step("check-installed-semantic-driver", "Run all driver tests against the installed core")
+        .dependOn(&installed_core_tests.step);
     const build_driver = b.step(
         "build-semantic-driver-check",
         "Build the native semantic driver test artifact and independently rebuilt core",

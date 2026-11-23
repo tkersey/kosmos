@@ -157,10 +157,11 @@ Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
 The native owners and semantic-driver lanes compile on separate native runners
-before retaining their bounded compiler caches. The driver lane independently
-rebuilds the core. Each then executes its original check roots, so neither lane
-waits for the other's compilation or tests, and a later test timeout does not
-discard completed compilation.
+before retaining their bounded compiler caches. The driver lane builds the complete
+test executable and regenerates the core concurrently in separate compiler caches.
+After both builds succeed, the lane runs all driver tests in the regenerated core's
+directory, including the byte-for-byte comparison with the shipped artifact.
+The local `check-semantic-driver` target builds both inputs and runs the same suite.
 The Zig installation uses a stable tool-cache path because dependency extraction
 includes `PATH` in its input identity. Neither cache restoration nor successful
 compilation substitutes for completed tests.

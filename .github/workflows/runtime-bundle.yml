@@ -124,8 +124,19 @@ jobs:
               build-zig17-check --cache-dir .zig-cache/native-owners \
               -Doptimize=safe --summary all --verbose
           else
-            /usr/bin/time -v zig build build-semantic-driver-check \
-              --cache-dir .zig-cache/native-driver -Doptimize=safe -j12 --summary all --verbose
+            ZIG_LOCAL_PKG_DIR="$PWD/.zig-cache/native-driver-core/zig-pkg" \
+              /usr/bin/time -v zig build semantic-artifact --prefix "$RUNNER_TEMP/driver-core" \
+              --global-cache-dir .zig-cache/native-driver-core --cache-dir .zig-cache/native-driver-core \
+              -Doptimize=safe --summary all --verbose &
+            core_pid=$!
+            /usr/bin/time -v zig build build-semantic-driver-executable \
+              --cache-dir .zig-cache/native-driver \
+              -Doptimize=safe --summary all --verbose &
+            driver_pid=$!
+            status=0
+            wait "$core_pid" || status=1
+            wait "$driver_pid" || status=1
+            exit "$status"
           fi
       - name: Admit completed native compilation before execution
         id: native_cache_size
@@ -151,7 +162,7 @@ jobs:
             rm -rf -- "$object"
             bytes=$((bytes - removed))
           done < <(
-            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o; do
+            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o .zig-cache-upload/native-driver-core/o; do
               test ! -d "$objects" || find "$objects" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0'
             done | sort -zn
           )
@@ -174,7 +185,7 @@ jobs:
             zig build check-storage check-semantics check-zig17 \
               --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
           else
-            zig build check-semantic-driver \
+            zig build check-installed-semantic-driver --prefix "$RUNNER_TEMP/driver-core" \
               --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
           fi
       - name: Check specialization
