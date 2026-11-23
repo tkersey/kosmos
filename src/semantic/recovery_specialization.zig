@@ -27,9 +27,13 @@ pub const Derivation = struct {
 };
 
 pub fn identity() artifact.Digest {
+    return identityFromCore(@import("source_identity.zig").digest());
+}
+
+fn identityFromCore(core: artifact.Digest) artifact.Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(policy);
-    hash.update(&@import("source_identity.zig").digest());
+    hash.update(&core);
     hash.update(@import("../semantic_packaged.zig").horos_package);
     hash.update(@import("recovery_options").horos_package);
     inline for (.{
@@ -51,7 +55,7 @@ pub fn identity() artifact.Digest {
 pub fn context(guest: artifact.Digest, hooks: Hooks) source.specialize.Context {
     const prior = legacy.contextWithHooks(guest, hooks);
     return .{
-        .core = identity(),
+        .core = identityFromCore(prior.core),
         .guest = guest,
         .observation = prior.observation,
         .base_profile = prior.base_profile,
@@ -62,21 +66,19 @@ pub fn context(guest: artifact.Digest, hooks: Hooks) source.specialize.Context {
 
 pub fn select(
     a: Allocator,
-    scratch: Allocator,
     definition: *const legacy.SourceDefinition,
     original: source.Module,
     opts: legacy.Options,
 ) !?source.specialize.Output {
     const guest = opts.guest orelse return null;
+    const bytes = try projection.programBytes(a, guest);
+    defer a.free(bytes);
     return try source.specialize.specialize(a, original, .{
         .function = definition.service.entry,
-        .arguments = try scratch.dupe(source.specialize.Knowledge, &.{
-            .{ .known = .{
-                .schema = definition.machine.program,
-                .bytes = try projection.programBytes(scratch, guest),
-            } },
+        .arguments = &.{
+            .{ .known = .{ .schema = definition.machine.program, .bytes = bytes } },
             .dynamic,
-        }),
+        },
         .context = context(guest.identity(), opts.hooks),
         .policy = .{
             .work = opts.policy.work,

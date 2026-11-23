@@ -105,7 +105,7 @@ fn emit(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const mem = arena.allocator();
-    var out = try spec.select(a, mem, definition, original, options);
+    var out = try spec.select(a, definition, original, options);
     defer if (out) |*o| o.deinit();
     const derivation = if (out) |*o| Derivation.from(o) else null;
     const selected = try Selection.init(mem, definition, original, derivation);
