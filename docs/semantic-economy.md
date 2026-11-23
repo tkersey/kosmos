@@ -589,46 +589,51 @@ control. Negative percentages indicate faster opt-in execution.
 
 | Paired observations | Run 1 median | Run 2 median | All individual pairs |
 | --- | ---: | ---: | ---: |
-| Generic execution | +0.68% | +0.81% | −9.65% to +41.70% |
-| Generic checkpoint-inclusive wall time | +0.64% | +0.87% | −9.20% to +40.58% |
-| Specialized execution | −0.73% | +1.36% | −15.62% to +3.78% |
-| Specialized checkpoint-inclusive wall time | −0.64% | +1.48% | −15.71% to +3.99% |
+| Generic execution | +0.59% | −0.57% | −11.22% to +1.55% |
+| Generic checkpoint-inclusive wall time | +0.53% | −0.45% | −10.99% to +1.56% |
+| Specialized execution | +1.52% | −0.08% | −4.27% to +2.55% |
+| Specialized checkpoint-inclusive wall time | +1.18% | −0.19% | −4.21% to +2.50% |
 
 Elapsed times used the ordinary allocator with statistics off. Each median covers
 six alternating pairs. The full range shows the observed spread on this shared
 host. Separate instrumented sessions counted the same calls to advance, including
-the terminal observation exchange. Resident peaks also include session start and
-checkpoint checks.
+the terminal observation exchange. The session allocation meter spans session
+start through the final checkpoint check. Retained bytes are sampled there,
+before session teardown. The meter excludes the prepared runtime and caller-owned
+buffers.
 
 Each row below contains 12 ordinary executions pooled across the two runs. Times
 are medians with the minimum and maximum in parentheses.
 
 | Realization and policy | Advance, ms | Checkpoint-inclusive wall time, ms |
 | --- | ---: | ---: |
-| Generic structural | 94.71 (93.21–108.27) | 97.56 (95.91–110.95) |
-| Generic opt-in | 96.00 (92.54–132.88) | 98.77 (95.34–135.58) |
-| Specialized structural | 103.52 (101.66–122.45) | 106.95 (105.11–126.79) |
-| Specialized opt-in | 104.06 (101.30–109.42) | 107.60 (104.73–113.95) |
+| Generic structural | 89.72 (88.71–100.41) | 92.36 (91.29–103.07) |
+| Generic opt-in | 89.76 (88.54–90.99) | 92.36 (91.25–93.61) |
+| Specialized structural | 96.41 (93.61–98.87) | 99.78 (96.79–102.08) |
+| Specialized opt-in | 97.22 (92.70–99.14) | 100.50 (95.95–102.38) |
 
-| Cold observation across two runs | Generic structural → opt-in | Specialized structural → opt-in |
+| Construction across two runs | Generic structural → opt-in | Specialized structural → opt-in |
 | --- | --- | --- |
-| Compile seconds | 0.340–0.348 → 0.372–0.385 | 7.474–8.288 → 8.740–9.014 |
-| Admission seconds | 0.017–0.020 → 0.017–0.018 | 0.285–0.306 → 0.291–0.311 |
-| Independent validation seconds | 0.253–0.268 → 0.312–0.320 | 4.022–4.088 → 3.740–4.052 |
+| Compile seconds | 0.300–0.320 → 0.348–0.354 | 6.557–6.626 → 7.782–7.900 |
+| Admission seconds | 0.016–0.017 → 0.016–0.017 | 0.266–0.272 → 0.263–0.268 |
+| Independent validation seconds | 0.213–0.222 → 0.291–0.297 | 3.573–3.638 → 3.190–3.311 |
 | Metered compile peak bytes | 849,867,734 → 44,773,904 | 10,149,649,259 → 1,814,393,812 |
 | Metered validation peak bytes | 465,653,726 → 43,055,058 | 4,271,034,052 → 1,188,291,964 |
 
-Compile and independent validation times include allocation metering. Admission
-starts with the expected digest in hand. Allocation peaks count requested bytes
-through each phase allocator.
+The timing ranges cover four ordinary-allocator builds per policy and realization.
+Each process built the two policies in both orders, releasing each timed artifact
+before starting the next. Admission began with the expected digest in hand.
+Separate builds of the same checked artifact identities measured peak requested
+bytes during compilation and independent validation.
 
 Keep the option experimental and disabled by default. The generic evaluator saved
-1,752 field evaluations per execution. Its paired median execution time rose by
-0.68% and 0.81% in the two runs. Peak and retained session storage were identical.
-Host load varied, and even the byte-identical specialization had individual pairs
-ranging from 15.62% faster to 3.78% slower. Both opt-in builds took longer to
-compile and used less peak allocator storage. These measurements do not establish
-a repeatable runtime gain on the nominated workload.
+1,752 field evaluations per execution. Its paired median time rose 0.59% in the
+first run and fell 0.57% in the second. The largest generic difference paired a
+100.41 ms structural execution with an 89.14 ms opt-in execution. The byte-identical
+specialization also varied across pairs. Peak and retained session storage were
+identical within each realization. Both checked builds took longer to compile
+and used less peak allocator storage. These measurements do not establish a
+repeatable runtime gain on the nominated workload.
 
 Reproduce the diamond and both runtime comparisons with
 `zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large`.
