@@ -246,8 +246,11 @@ the artifact. Exhausting the producer budget returns `Capacity`.
 On the pinned Horos producer, the requested work allowance covers partial
 evaluation. Original source admission and producer-side validation each start
 with a fresh work counter. A caller-selected ceiling across those passes
-requires Horos to accept and debit the caller's remaining work. Kosmos runs
-its own bounded derivation checks after the producer returns.
+requires Horos to accept and debit the caller's remaining work. Kosmos reserves
+work for the trusted source comparisons in the derivation envelope. Within
+individual proofs, Horos also compares term and value records and function
+effect and region lists. Full accounting for these comparisons requires
+charging their widths in the Horos checker.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected
