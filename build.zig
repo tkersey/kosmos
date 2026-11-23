@@ -185,6 +185,7 @@ const Dependencies = struct {
     recovery_source: std.Build.LazyPath,
     data: *std.Build.Module,
     host_data: *std.Build.Module,
+    public_runtime_sources: *std.Build.Module,
     public_kosmos: *std.Build.Module,
     recovery_kosmos: *std.Build.Module,
 };
@@ -216,22 +217,37 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .target = b.graph.host,
         .optimize = options.optimize,
     });
-    const module: std.Build.Module.CreateOptions = .{
-        .root_source_file = b.path("src/root.zig"),
+    const runtime_sources = b.createModule(.{
+        .root_source_file = b.path("src/runtime_sources.zig"),
         .target = options.target,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
-    };
-    const public_kosmos = b.addModule("kosmos", module);
-    public_kosmos.addOptions("recovery_options", b.addOptions());
+    });
+    const public_kosmos = b.addModule("kosmos", .{
+        .root_source_file = b.path("src/ordinary.zig"),
+        .target = options.target,
+        .optimize = options.optimize,
+        .imports = &.{.{ .name = "runtime_sources.zig", .module = runtime_sources }},
+    });
+    const recovery_kosmos = b.addModule("kosmos_recovery", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = options.target,
+        .optimize = options.optimize,
+        .imports = &.{
+            .{ .name = "ordinary.zig", .module = public_kosmos },
+            .{ .name = "../runtime_sources.zig", .module = runtime_sources },
+            .{ .name = "horos_data", .module = data },
+        },
+    });
 
     return .{
         .source = source,
         .recovery_source = recoverySource(b, options),
         .data = data,
         .host_data = host_data,
+        .public_runtime_sources = runtime_sources,
         .public_kosmos = public_kosmos,
-        .recovery_kosmos = b.addModule("kosmos_recovery", module),
+        .recovery_kosmos = recovery_kosmos,
     };
 }
 
@@ -355,7 +371,7 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         options.optimize,
         dependencies.data,
     );
-    dependencies.public_kosmos.addImport("horos", public_horos);
+    dependencies.public_runtime_sources.addImport("horos", public_horos);
     dependencies.recovery_kosmos.addImport("horos", public_horos);
     const recovery = horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
     const recovery_options = b.addOptions();
@@ -506,8 +522,7 @@ fn configureRuntimeModules(
             .target = options.target,
             .optimize = options.optimize,
         });
-    dependencies.public_kosmos.addImport("packaged_runtime", public_runtime);
-    dependencies.recovery_kosmos.addImport("packaged_runtime", public_runtime);
+    dependencies.public_runtime_sources.addImport("packaged_runtime", public_runtime);
     b.step("semantic-artifact", "Compile and admit the reproducible portable evaluator bundle")
         .dependOn(&b.addInstallFile(artifact_images.semantic_artifact, "semantic-core.kar").step);
 
@@ -532,7 +547,7 @@ fn configurePublication(
     const host_kosmos = if (options.target.query.isNative() and
         host_modules.host_mode == options.optimize) dependencies.public_kosmos else b.createModule(
         .{
-            .root_source_file = b.path("src/root.zig"),
+            .root_source_file = b.path("src/ordinary.zig"),
             .target = b.graph.host,
             .optimize = host_modules.host_mode,
             .imports = &.{.{
@@ -544,7 +559,6 @@ fn configurePublication(
     if (host_kosmos != dependencies.public_kosmos) {
         host_kosmos.addImport("packaged_runtime", runtime_modules.packaged_runtime);
         host_kosmos.addImport("horos", host_modules.horos);
-        host_kosmos.addOptions("recovery_options", b.addOptions());
     }
     const publication_bench = b.addExecutable(
         .{
@@ -646,9 +660,13 @@ fn configureEconomy(
             ),
         },
     );
-    host_modules.bindRecovery(economy_bench.root_module);
     const run_economy_bench = b.addRunArtifact(economy_bench);
-    if (options.economy_workload) |name| run_economy_bench.addArg(name);
+    if (std.mem.eql(u8, options.economy_workload orelse "", "recovery_scalar_chain_large")) {
+        host_modules.bindRecovery(economy_bench.root_module);
+    } else {
+        economy_bench.root_module.addOptions("recovery_options", b.addOptions());
+        if (options.economy_workload) |name| run_economy_bench.addArg(name);
+    }
     run_economy_bench.addPassthruArgs();
     run_economy_bench.has_side_effects = true;
     b.step(
@@ -810,6 +828,20 @@ fn configureRecoveryDriver(
         .filters = &.{ "src.semantic_recovery_tests.", "src.semantic.recovery_" },
     });
     host.bindRecovery(tests.root_module);
+    const ordinary = b.modules.get("kosmos").?;
+    const module_types = b.addObject(.{
+        .name = "kosmos-module-types",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/native_consumer/module_types.zig"),
+            .target = ordinary.resolved_target,
+            .optimize = ordinary.optimize,
+            .imports = &.{
+                .{ .name = "kosmos", .module = ordinary },
+                .{ .name = "kosmos_recovery", .module = b.modules.get("kosmos_recovery").? },
+            },
+        }),
+    });
+    tests.step.dependOn(&module_types.step);
     const run = b.addRunArtifact(tests);
     run.has_side_effects = true;
     b.step("build-semantic-recovery-driver", "Build the checked recovery driver tests")
@@ -972,7 +1004,7 @@ fn configureWasmModules(
         .optimize = options.kernel_mode,
     });
     const current_runtime = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/ordinary.zig"),
         .target = wasm_target,
         .optimize = options.kernel_mode,
         .imports = &.{.{ .name = "horos_data", .module = wasm_data }},

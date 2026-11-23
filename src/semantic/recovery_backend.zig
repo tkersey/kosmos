@@ -1,21 +1,22 @@
 const std = @import("std");
+const runtime = @import("../runtime_sources.zig");
 const current = @import("horos_recovery");
 const source = current.source;
 const data = current.data;
 const old = @import("horos_data");
-const legacy = @import("compiler.zig");
-const art = @import("artifact.zig");
+const legacy = runtime.compiler;
+const art = runtime.artifact;
 const records = @import("recovery_records.zig");
 const roles = @import("recovery_roles.zig");
 const spec = @import("recovery_specialization.zig");
-const profile = @import("../base/profile.zig");
-const service = @import("service.zig");
+const profile = runtime.profile;
+const service = runtime.service;
 const opt = source.recovery_optimization;
 const Allocator = std.mem.Allocator;
 pub const Derivation = spec.Derivation;
 pub const policy = spec.policy;
 pub const context = spec.context;
-pub const limits: opt.Limits = .{};
+pub const limits = spec.limits;
 pub const Evidence = records.Evidence;
 
 const Selection = struct {
@@ -29,9 +30,10 @@ const Selection = struct {
         definition: *const legacy.SourceDefinition,
         original: source.Module,
         derivation: ?Derivation,
+        work: *u64,
     ) !Selection {
         const functions = if (derivation) |d| d.functions else &.{};
-        const selected = try roles.selected(a, definition, functions);
+        const selected = try roles.selected(a, definition, functions, work);
         return .{
             .module = if (derivation) |d| d.residual else original,
             .functions = functions,
@@ -39,7 +41,7 @@ const Selection = struct {
             .options = .{
                 .rule = .scalar_field_reuse_v1,
                 .limits = limits,
-                .formals = try roles.formals(a, selected),
+                .formals = try roles.formals(a, selected, work),
             },
         };
     }
@@ -49,16 +51,29 @@ const Selection = struct {
         a: Allocator,
         definition: *const legacy.SourceDefinition,
         parameters: []const source.RecoveryBinding,
+        target_count: usize,
+        work: *u64,
     ) !Interfaces {
         return .{
-            .anchors = try roles.anchors(a, self.roles, self.module, parameters),
+            .anchors = try roles.anchors(a, self.roles, self.module, parameters, work),
             .branches = try roles.functionMap(
                 a,
                 definition.clone.instantiate,
                 self.functions,
                 parameters,
+                self.module.functions.len,
+                target_count,
+                work,
             ),
-            .templates = try roles.functionMap(a, definition.template, self.functions, parameters),
+            .templates = try roles.functionMap(
+                a,
+                definition.template,
+                self.functions,
+                parameters,
+                self.module.functions.len,
+                target_count,
+                work,
+            ),
         };
     }
 };
@@ -102,20 +117,41 @@ fn emit(
     definition: *const legacy.SourceDefinition,
     original: source.Module,
 ) ![]u8 {
-    var arena = std.heap.ArenaAllocator.init(a);
+    var physical = limits.lowering_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    var arena = std.heap.ArenaAllocator.init(cap.allocator());
     defer arena.deinit();
-    const mem = arena.allocator();
+    return emitDefined(a, arena.allocator(), options, definition, original) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+}
+
+fn emitDefined(
+    a: Allocator,
+    mem: Allocator,
+    options: legacy.Options,
+    definition: *const legacy.SourceDefinition,
+    original: source.Module,
+) ![]u8 {
     var out = try spec.select(a, definition, original, options);
     defer if (out) |*o| o.deinit();
     const derivation = if (out) |*o| Derivation.from(o) else null;
-    const selected = try Selection.init(mem, definition, original, derivation);
+    var work = limits.source_work;
+    const selected = try Selection.init(mem, definition, original, derivation, &work);
     var result = try source.lowerRecoveryOptimized(a, selected.module, selected.options);
     defer result.deinit();
     const image = try records.image(a, a, result.program);
     defer a.free(image);
     const target = try old.program_image.Admitted.decode(a, image);
     defer target.deinit();
-    const entries = try selected.interfaces(mem, definition, result.parameters);
+    const entries = try selected.interfaces(
+        mem,
+        definition,
+        result.parameters,
+        result.program.functions.len,
+        &work,
+    );
     const helpers = try buildHelpers(a, mem, original, definition.helpers);
     return art.encode(a, .{
         .manifest = try manifest(mem, target),
@@ -195,15 +231,13 @@ fn buildHelpers(
 
 pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
     try checkManifest(admitted);
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const mem = arena.allocator();
     const bundle = admitted.content.value;
     var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
     defer definition.deinit();
     var remaining = limits.source_work;
-    var validated = try validateDefined(a, mem, &remaining, admitted, &definition);
-    defer validated.deinit(a);
+    var validated = try validateDefined(a, &remaining, admitted, &definition);
+    defer validated.proof.deinit();
+    defer a.free(validated.parameters);
 }
 
 pub fn checkManifest(admitted: *const art.Admitted) !void {
@@ -218,19 +252,28 @@ pub fn checkManifest(admitted: *const art.Admitted) !void {
 }
 
 pub const Validated = struct {
-    envelope: records.DecodedEvidence,
-    derivation: ?Derivation,
-    proof: opt.Decoded,
     parameters: []const source.RecoveryBinding,
-
-    pub fn deinit(self: *Validated, a: Allocator) void {
-        a.free(self.parameters);
-        self.proof.deinit();
-        self.envelope.deinit();
-    }
+    proof: opt.Decoded,
 };
 
 pub fn validateDefined(
+    a: Allocator,
+    remaining: *u64,
+    admitted: *const art.Admitted,
+    definition: *const legacy.SourceDefinition,
+) !Validated {
+    if (admitted.content.value.image.len > limits.lowering_bytes) return error.Capacity;
+    var physical = limits.lowering_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    var arena = std.heap.ArenaAllocator.init(cap.allocator());
+    defer arena.deinit();
+    return checkDefined(a, arena.allocator(), remaining, admitted, definition) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+}
+
+fn checkDefined(
     a: Allocator,
     scratch: Allocator,
     remaining: *u64,
@@ -239,7 +282,7 @@ pub fn validateDefined(
 ) !Validated {
     const bundle = admitted.content.value;
     var envelope = try openEvidence(a, bundle, remaining);
-    errdefer envelope.deinit();
+    defer envelope.deinit();
     const evidence = envelope.value;
     var proof = try opt.decode(a, evidence.recovery, limits);
     errdefer proof.deinit();
@@ -253,7 +296,13 @@ pub fn validateDefined(
         limits.lowering_bytes,
         remaining,
     );
-    const selected = try Selection.init(scratch, definition, original, evidence.derivation);
+    const selected = try Selection.init(
+        scratch,
+        definition,
+        original,
+        evidence.derivation,
+        remaining,
+    );
     const parameters = try validateSelected(
         a,
         scratch,
@@ -262,13 +311,9 @@ pub fn validateDefined(
         original,
         selected,
         proof.evidence,
+        remaining,
     );
-    return .{
-        .envelope = envelope,
-        .derivation = evidence.derivation,
-        .proof = proof,
-        .parameters = parameters,
-    };
+    return .{ .parameters = parameters, .proof = proof };
 }
 
 fn openEvidence(
@@ -288,23 +333,24 @@ fn validateSelected(
     original: source.Module,
     selected: Selection,
     proof: opt.Evidence,
+    work: *u64,
 ) ![]const source.RecoveryBinding {
     const bundle = admitted.content.value;
-    const target = try data.program_image.Admitted.decode(a, bundle.image);
-    defer target.deinit();
-    try records.checkProgram(admitted.program, target.program());
+    const target = try records.targetProgram(mem, admitted.program, limits.lowering_bytes, work);
     const parameters = try opt.parameters(
         a,
         selected.module,
-        target.program(),
+        target,
         proof,
         selected.options,
     );
     errdefer a.free(parameters);
-    const mapped = try selected.interfaces(mem, definition, parameters);
-    if (!old.record.equal([]const art.Anchor, mapped.anchors, bundle.recovery.anchors) or
-        !std.mem.eql(u64, mapped.branches, bundle.branch_returns) or
-        !std.mem.eql(u64, mapped.templates, bundle.template_entries)) return error.InvalidRecovery;
+    const mapped = try selected.interfaces(mem, definition, parameters, target.functions.len, work);
+    const equal = data.record.equalWithWork;
+    if (!try equal([]const art.Anchor, mapped.anchors, bundle.recovery.anchors, work) or
+        !try equal([]const u64, mapped.branches, bundle.branch_returns, work) or
+        !try equal([]const u64, mapped.templates, bundle.template_entries, work))
+        return error.InvalidRecovery;
     const helpers = [_]art.Helper{
         bundle.recovery.projector,     bundle.recovery.storage,
         bundle.recovery.clone_context, bundle.recovery.clone_rebase,
@@ -314,9 +360,11 @@ fn validateSelected(
         selected_helper.entry = entry;
         var compiled = try source.lower(a, selected_helper);
         defer compiled.deinit();
-        try records.checkProgram(owner, compiled.program);
+        try records.checkProgramWithWork(owner, compiled.program, work);
         const bytes = try records.image(a, a, compiled.program);
         defer a.free(bytes);
+        if (bytes.len != helper.image.len) return error.InvalidRecovery;
+        try data.admission.spend(work, bytes.len);
         if (!std.mem.eql(u8, bytes, helper.image)) return error.InvalidRecovery;
     }
     return parameters;

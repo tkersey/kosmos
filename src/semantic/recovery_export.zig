@@ -1,10 +1,12 @@
 const std = @import("std");
+const runtime = @import("../runtime_sources.zig");
 const old = @import("horos");
 const current = @import("horos_recovery");
-const artifact = @import("artifact.zig");
+const artifact = runtime.artifact;
 const backend = @import("recovery_backend.zig");
-const legacy = @import("compiler.zig");
+const legacy = runtime.compiler;
 const roles = @import("recovery_roles.zig");
+const records = @import("recovery_records.zig");
 const opt = current.source.recovery_optimization;
 const Allocator = std.mem.Allocator;
 const Arena = std.heap.ArenaAllocator;
@@ -57,23 +59,39 @@ pub fn exportRecoverySource(
     var owned = try candidate.clone();
     defer owned.deinit();
     try backend.checkManifest(&owned);
-    var temporary = Arena.init(a);
-    defer temporary.deinit();
-    const scratch = temporary.allocator();
-    var arena = Arena.init(a);
-    errdefer arena.deinit();
-    const storage = arena.allocator();
-    var retained = try artifact.Admitted.init(a, try owned.encode(scratch), owned.identity);
-    errdefer retained.deinit();
-    const bundle = retained.content.value;
+    const bundle = owned.content.value;
+    _ = try records.evidenceParts(bundle.evidence, bundle.guest != null, backend.limits);
     var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
     errdefer definition.deinit();
     var remaining = backend.limits.source_work;
-    var validated = try backend.validateDefined(a, scratch, &remaining, &retained, &definition);
-    defer validated.envelope.deinit();
+    var validated = try backend.validateDefined(a, &remaining, &owned, &definition);
     defer a.free(validated.parameters);
     errdefer validated.proof.deinit();
-    const value = try sourceBundle(storage, &retained, &definition, validated);
+    var retained = try independentCopy(a, &owned);
+    errdefer retained.deinit();
+    const parts = try records.evidenceParts(
+        retained.content.value.evidence,
+        bundle.guest != null,
+        backend.limits,
+    );
+    var physical = backend.limits.lowering_bytes;
+    var cap: current.data.AllocationBudget =
+        .{ .parent = a, .remaining = &physical, .accounting = .live };
+    var arena = Arena.init(cap.allocator());
+    errdefer arena.deinit();
+    const value = sourceBundle(
+        arena.allocator(),
+        &retained,
+        &definition,
+        validated.parameters,
+        parts.derivation,
+        validated.proof.evidence,
+        &remaining,
+    ) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+    arena.child_allocator = a;
     return .{
         .arena = arena,
         .value = value,
@@ -83,23 +101,33 @@ pub fn exportRecoverySource(
     };
 }
 
+fn independentCopy(a: Allocator, owned: *const artifact.Admitted) !artifact.Admitted {
+    const bytes = try owned.encode(a);
+    defer a.free(bytes);
+    return artifact.Admitted.init(a, bytes, owned.identity);
+}
+
 fn sourceBundle(
     storage: Allocator,
     retained: *const artifact.Admitted,
     definition: *legacy.SourceDefinition,
-    validated: backend.Validated,
+    bindings: []const current.source.RecoveryBinding,
+    derivation_bytes: ?[]const u8,
+    recovery: opt.Evidence,
+    work: *u64,
 ) !RecoverySourceBundle {
-    const derivation: ?legacy.Derivation = if (validated.envelope.derivation_bytes) |bytes|
+    const derivation: ?legacy.Derivation = if (derivation_bytes) |bytes|
         try readDerivation(storage, bytes)
     else
         null;
-    const functions = if (validated.derivation) |d| d.functions else &.{};
+    const functions: []const Function = if (derivation) |d| d.functions else &.{};
     const bundle = retained.content.value;
     const pure = try pureEntries(definition);
     const original = definition.module();
     const selected = if (derivation) |d| d.residual else original;
-    const parameters = try storage.alloc(old.source.RecoveryBinding, validated.parameters.len);
-    for (parameters, validated.parameters) |*binding, checked| binding.* = .{
+    try current.data.admission.spend(work, bindings.len);
+    const parameters = try storage.alloc(old.source.RecoveryBinding, bindings.len);
+    for (parameters, bindings) |*binding, checked| binding.* = .{
         .source_function = checked.source_function,
         .variable = checked.variable,
         .source_schema = checked.source_schema,
@@ -107,7 +135,12 @@ fn sourceBundle(
         .slot = checked.slot,
         .schema = checked.schema,
     };
-    const generic_roles = try roles.selected(storage, definition, &.{});
+    const generic_roles = try roles.selected(
+        storage,
+        definition,
+        @as([]const Function, &.{}),
+        work,
+    );
     std.debug.assert(generic_roles.len == 9);
     return .{
         .realization = retained.identity,
@@ -119,10 +152,10 @@ fn sourceBundle(
         .generic = try legacy.sourceModule(original),
         .selected = try legacy.sourceModule(selected),
         .helpers = try helperSources(definition, retained),
-        .generic_entries = try entries(storage, definition, original.entry, &.{}),
-        .selected_entries = try entries(storage, definition, selected.entry, functions),
+        .generic_entries = try entries(storage, definition, original.entry, &.{}, work),
+        .selected_entries = try entries(storage, definition, selected.entry, functions, work),
         .generic_roles = generic_roles[0..9].*,
-        .selected_roles = try roles.selected(storage, definition, functions),
+        .selected_roles = try roles.selected(storage, definition, functions, work),
         .generic_pure_entries = pure,
         .parameters = parameters,
         .anchors = bundle.recovery.anchors,
@@ -130,7 +163,7 @@ fn sourceBundle(
         .template_entries = bundle.template_entries,
         .evidence = .{
             .derivation = derivation,
-            .recovery = validated.proof.evidence,
+            .recovery = recovery,
         },
     };
 }
@@ -158,22 +191,29 @@ fn helperSources(
     return helpers;
 }
 
-const Function = current.source.specialize.FunctionProof;
+const Function = old.source.specialize.FunctionProof;
 
 fn entries(
     a: Allocator,
     definition: *const legacy.SourceDefinition,
     service: u64,
     functions: []const Function,
+    work: *u64,
 ) !legacy.SourceEntries {
     return .{
         .service = service,
-        .branch_returns = try sourceFunctions(a, definition.clone.instantiate, functions),
-        .templates = try sourceFunctions(a, definition.template, functions),
+        .branch_returns = try sourceFunctions(a, definition.clone.instantiate, functions, work),
+        .templates = try sourceFunctions(a, definition.template, functions, work),
     };
 }
 
-fn sourceFunctions(a: Allocator, original: u64, functions: []const Function) ![]const u64 {
+fn sourceFunctions(
+    a: Allocator,
+    original: u64,
+    functions: []const Function,
+    work: *u64,
+) ![]const u64 {
+    try current.data.admission.spend(work, functions.len);
     var selected: std.ArrayList(u64) = .empty;
     try selected.append(a, original);
     for (functions) |f| if (f.before == original) try selected.append(a, f.after);
@@ -183,9 +223,9 @@ fn sourceFunctions(a: Allocator, original: u64, functions: []const Function) ![]
 fn pureEntries(definition: *legacy.SourceDefinition) ![6]legacy.PureEntry {
     const b = &definition.builder;
     const m = definition.machine;
-    const life = try @import("lifecycle.zig").define(b, m);
-    const step = try @import("step.zig").define(b, m);
-    const observe = try @import("observe.zig").define(b, m);
+    const life = try runtime.lifecycle.define(b, m);
+    const step = try runtime.step.define(b, m);
+    const observe = try runtime.observe.define(b, m);
     const functions = [_]u64{
         life.initialize, step.active, life.respond, observe, m.hydrate, m.project,
     };

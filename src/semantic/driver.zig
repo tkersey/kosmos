@@ -112,13 +112,13 @@ pub const Driver = struct {
         errdefer lease.release();
         const runtime = try selected.acquire();
         errdefer runtime.release();
-        if (selected.content.value.guest) |identity| if (!std.mem.eql(
+        if (runtime.content.value.guest) |identity| if (!std.mem.eql(
             u8,
             &identity,
             &lease.admitted().identity(),
         )) return error.GuestIdentityMismatch;
         try admitInitial(a, lease.admitted(), initial);
-        const program = if (artifact.hasProgramArgument(selected.content.value))
+        const program = if (artifact.hasProgramArgument(runtime.content.value))
             try projection.programBytes(
                 a,
                 lease.admitted(),
@@ -138,9 +138,11 @@ pub const Driver = struct {
             .guest = lease,
             .selected = runtime,
             .initial = input,
-            .outer = try base.Session.start(a, &runtime.executable, arguments, selected.bridge()),
-            .artifact_identity = selected.identity,
-            .core_identity = selected.program.identity(),
+            .outer = try base.Session.start(a, &runtime.executable, arguments, .{
+                .effects = runtime.program.program().effects,
+            }),
+            .artifact_identity = runtime.identity,
+            .core_identity = runtime.program.identity(),
         };
     }
     pub fn deinit(self: *Driver) void {

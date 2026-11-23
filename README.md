@@ -107,14 +107,17 @@ local import name.
 app.root_module.addImport("kosmos", dependency.module("kosmos_recovery"));
 ```
 
+Both modules share the same public session and artifact types, so an application
+can use the checked compiler with libraries that import ordinary `kosmos`.
 The recovery module adds the authenticated `horos_recovery` pin. With
 `zig build --system`, supply both pinned packages in the system directory.
-The compiler defaults to ordinary lowering. Select checked lowering for an
-individual compilation.
+The compiler defaults to ordinary lowering and its original package identity.
+Set `scalar_field_reuse` to select checked lowering for one compilation. The
+checked compiler records its authenticated recovery package identity. An explicit
+`horos_package` value supplies the ordinary compiler label on the legacy path.
 
 ```zig
 const bytes = try kosmos.RuntimeCompiler.compile(a, .{
-    .horos_package = package_hash,
     .scalar_field_reuse = true,
 });
 defer a.free(bytes);

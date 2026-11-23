@@ -29,16 +29,46 @@ pub fn image(a: Allocator, storage: Allocator, program: data.activation.Program)
     return bytes;
 }
 
+pub fn targetProgram(
+    arena: Allocator,
+    owner: *const old.data.program_image.Admitted,
+    storage_bytes: usize,
+    work: *u64,
+) !data.activation.Program {
+    const program = owner.program();
+    var measure: data.wire.Writer = .{ .remaining = work };
+    try data.record.write(@TypeOf(program), program, &measure);
+    if (measure.position > storage_bytes) return error.Capacity;
+    try data.admission.spend(work, measure.position);
+    const bytes = try arena.alloc(u8, measure.position);
+    var out: data.wire.Writer = .{ .output = bytes, .remaining = work };
+    try data.record.write(@TypeOf(program), program, &out);
+    var reader: data.wire.Reader = .{ .input = bytes };
+    var capacity = storage_bytes - bytes.len;
+    const target = try data.record.readBounded(data.activation.Program, &reader, arena, &capacity);
+    try reader.finish();
+    try checkProgramWithWork(owner, target, work);
+    return target;
+}
+
 pub fn checkProgram(
     owner: *const old.data.program_image.Admitted,
     checked: data.activation.Program,
 ) !void {
-    @setEvalBranchQuota(100_000);
-    if (!sameRecords(owner.program(), checked)) return error.InvalidRecovery;
+    return checkProgramWithWork(owner, checked, null);
 }
 
-fn sameRecords(before: anytype, after: anytype) bool {
-    return RecordPair(@TypeOf(before), @TypeOf(after)).equal(before, after);
+pub fn checkProgramWithWork(
+    owner: *const old.data.program_image.Admitted,
+    checked: data.activation.Program,
+    work: ?*u64,
+) !void {
+    @setEvalBranchQuota(100_000);
+    if (!try sameRecords(owner.program(), checked, work)) return error.InvalidRecovery;
+}
+
+fn sameRecords(before: anytype, after: anytype, work: ?*u64) error{RelationLimit}!bool {
+    return RecordPair(@TypeOf(before), @TypeOf(after)).equal(before, after, work);
 }
 
 fn RecordPair(comptime Before: type, comptime After: type) type {
@@ -46,7 +76,8 @@ fn RecordPair(comptime Before: type, comptime After: type) type {
     const other_layout = @typeInfo(After);
     std.debug.assert(std.meta.activeTag(layout) == std.meta.activeTag(other_layout));
     return struct {
-        fn equal(before: Before, after: After) bool {
+        fn equal(before: Before, after: After, work: ?*u64) error{RelationLimit}!bool {
+            try data.admission.spend(work, 1);
             return switch (layout) {
                 .void => true,
                 .int, .bool => before == after,
@@ -56,7 +87,11 @@ fn RecordPair(comptime Before: type, comptime After: type) type {
                     comptime std.debug.assert(info.field_names.len == names.len);
                     inline for (info.field_names, names) |old_name, new_name| {
                         comptime std.debug.assert(std.mem.eql(u8, old_name, new_name));
-                        if (!sameRecords(@field(before, old_name), @field(after, new_name)))
+                        if (!try sameRecords(
+                            @field(before, old_name),
+                            @field(after, new_name),
+                            work,
+                        ))
                             break :blk false;
                     }
                     break :blk true;
@@ -66,19 +101,21 @@ fn RecordPair(comptime Before: type, comptime After: type) type {
                         const other = @field(other_layout.@"union".tag_type.?, @tagName(tag));
                         comptime std.debug.assert(@backingInt(tag) == @backingInt(other));
                         if (after != other) break :blk false;
-                        break :blk sameRecords(value, @field(after, @tagName(tag)));
+                        break :blk try sameRecords(value, @field(after, @tagName(tag)), work);
                     },
                 },
                 .optional => if (before) |value|
-                    if (after) |other| sameRecords(value, other) else false
+                    if (after) |other| try sameRecords(value, other, work) else false
                 else
                     after == null,
                 inline .pointer, .array => |info| blk: {
                     if (before.len != after.len) break :blk false;
-                    if (info.child == u8 and other_layout == .pointer)
+                    if (info.child == u8 and other_layout == .pointer) {
+                        try data.admission.spend(work, before.len);
                         break :blk std.mem.eql(u8, before, after);
+                    }
                     for (before, after) |left, right| {
-                        if (!sameRecords(left, right)) break :blk false;
+                        if (!try sameRecords(left, right, work)) break :blk false;
                     }
                     break :blk true;
                 },
@@ -95,7 +132,6 @@ pub const Evidence = struct { recovery: []const u8, derivation: ?Derivation };
 pub const DecodedEvidence = struct {
     arena: std.heap.ArenaAllocator,
     value: Evidence,
-    derivation_bytes: ?[]const u8,
 
     pub fn deinit(self: *DecodedEvidence) void {
         self.arena.deinit();
@@ -103,13 +139,9 @@ pub const DecodedEvidence = struct {
     }
 };
 
-pub fn decodeEvidence(
-    a: Allocator,
-    bytes: []const u8,
-    specialized: bool,
-    limits: opt.Limits,
-    work: *u64,
-) !DecodedEvidence {
+pub const EvidenceParts = struct { recovery: []const u8, derivation: ?[]const u8 };
+
+pub fn evidenceParts(bytes: []const u8, specialized: bool, limits: opt.Limits) !EvidenceParts {
     if (bytes.len > limits.lowering_bytes) return error.Capacity;
     var reader: data.wire.Reader = .{ .input = bytes };
     const inner = try reader.bytes();
@@ -121,26 +153,38 @@ pub fn decodeEvidence(
         else => return error.InvalidTag,
     };
     if (present != specialized) return error.InvalidRealization;
-    const start = reader.position;
+    if (!present) try reader.finish();
+    return .{ .recovery = inner, .derivation = if (present) bytes[reader.position..] else null };
+}
+
+pub fn decodeEvidence(
+    a: Allocator,
+    bytes: []const u8,
+    specialized: bool,
+    limits: opt.Limits,
+    work: *u64,
+) !DecodedEvidence {
+    const parts = try evidenceParts(bytes, specialized, limits);
     try data.admission.spend(work, bytes.len);
     var logical = limits.lowering_bytes;
     var physical = limits.lowering_bytes;
     var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
     var arena = std.heap.ArenaAllocator.init(cap.allocator());
     errdefer arena.deinit();
-    const derivation = if (present) blk: {
+    const derivation = if (parts.derivation) |raw| blk: {
+        var reader: data.wire.Reader = .{ .input = raw };
         const result = data.record.readBounded(Derivation, &reader, arena.allocator(), &logical);
-        break :blk result catch |err| {
+        const parsed = result catch |err| {
             if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
             return err;
         };
+        try reader.finish();
+        break :blk parsed;
     } else null;
-    try reader.finish();
     arena.child_allocator = a;
     return .{
         .arena = arena,
-        .value = .{ .recovery = inner, .derivation = derivation },
-        .derivation_bytes = if (present) bytes[start..reader.position] else null,
+        .value = .{ .recovery = parts.recovery, .derivation = derivation },
     };
 }
 

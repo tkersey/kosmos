@@ -1,7 +1,8 @@
 const std = @import("std");
-const legacy = @import("compiler.zig");
+const runtime = @import("../runtime_sources.zig");
+const legacy = runtime.compiler;
 const backend = @import("recovery_backend.zig");
-const artifact = @import("artifact.zig");
+const artifact = runtime.artifact;
 
 const export_source = @import("recovery_export.zig");
 
@@ -12,7 +13,7 @@ pub const RecoveryEvidence = backend.Evidence;
 pub const RecoveryDerivation = backend.Derivation;
 
 pub const Options = struct {
-    horos_package: []const u8,
+    horos_package: []const u8 = runtime.packaged.horos_package,
     guest: @FieldType(legacy.Options, "guest") = null,
     hooks: @FieldType(legacy.Options, "hooks") = .{},
     policy: @FieldType(legacy.Options, "policy") = (legacy.Options{ .horos_package = "" }).policy,

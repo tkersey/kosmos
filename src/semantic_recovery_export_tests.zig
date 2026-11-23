@@ -65,6 +65,11 @@ fn checkRecoveryExport(candidate: *const artifact.Admitted) !void {
         ));
     }
     const proof = exported.value.evidence.recovery;
+    try std.testing.expect(!@import("horos_recovery").data.record.overlaps(
+        @TypeOf(proof),
+        proof,
+        candidate.content.value.evidence,
+    ));
     try std.testing.expectEqual(proof.rule == .structural_fallback, proof.witnesses.len == 0);
 }
 
@@ -86,6 +91,22 @@ fn checkBindings(
 fn checkLegacyExport(exported: *const compiler.ExportedSource) !void {
     const bundle: compiler.SourceBundle = exported.value;
     const evidence: compiler.Evidence = bundle.evidence;
+    const roles = @import("semantic/recovery_roles.zig");
+    const Function = @import("horos_recovery").source.specialize.FunctionProof;
+    var work = compiler.recovery_limits.source_work;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const protected = try roles.selected(
+        arena.allocator(),
+        &exported.definition,
+        @as([]const Function, &.{}),
+        &work,
+    );
+    try std.testing.expect(data.record.equal(
+        []const legacy.SourceRole,
+        &bundle.generic_roles,
+        protected,
+    ));
     const bindings = try horos.source.recovery.parameters(
         a,
         bundle.selected.module,
@@ -143,4 +164,56 @@ test "public checked source export retains builtin and specialized recovery sour
         ));
         try checkRecoveryExport(&candidate);
     }
+}
+
+test "admitted guest program records transfer within explicit work and storage allowances" {
+    const records = @import("semantic/recovery_records.zig");
+    const image = try @import("semantic/test_support.zig").guestImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const storage = arena.allocator();
+    const limits = compiler.recovery_limits;
+    var work = limits.source_work;
+    const program = try records.targetProgram(storage, guest, limits.lowering_bytes, &work);
+    try records.checkProgram(guest, program);
+    var exact = limits.source_work - work;
+    _ = try records.targetProgram(storage, guest, limits.lowering_bytes, &exact);
+    try std.testing.expectEqual(0, exact);
+    work = limits.source_work;
+    try std.testing.expectError(error.Capacity, records.targetProgram(storage, guest, 0, &work));
+    try std.testing.expectError(error.RelationLimit, records.targetProgram(
+        storage,
+        guest,
+        limits.lowering_bytes,
+        &exact,
+    ));
+}
+
+test "recovery function map preserves the first binding order of specialized functions" {
+    const source = @import("horos_recovery").source;
+    const roles = @import("semantic/recovery_roles.zig");
+    const functions = [_]source.specialize.FunctionProof{
+        .{ .before = 1, .after = 3, .arguments = &.{} },
+        .{ .before = 0, .after = 4, .arguments = &.{} },
+    };
+    var bindings: [4]source.RecoveryBinding = undefined;
+    for (&bindings, [_]u64{ 3, 4, 1, 3 }, [_]u64{ 2, 0, 1, 2 }) |*binding, before, after| {
+        binding.* = .{
+            .source_function = before,
+            .function = after,
+            .variable = 0,
+            .source_schema = 0,
+            .slot = 0,
+            .schema = 0,
+        };
+    }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var work: u64 = 5 + 3 + functions.len + bindings.len;
+    const map = try roles.functionMap(arena.allocator(), 1, &functions, &bindings, 5, 3, &work);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 1 }, map);
+    try std.testing.expectEqual(0, work);
 }

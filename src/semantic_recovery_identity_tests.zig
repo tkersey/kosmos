@@ -1,6 +1,7 @@
 const std = @import("std");
 const data = @import("horos_data");
 const checked = @import("horos_recovery").data;
+const spec = @import("semantic/recovery_specialization.zig");
 const compiler = @import("root.zig").RuntimeCompiler;
 const artifact = @import("semantic/artifact.zig");
 const records = @import("semantic/recovery_records.zig");
@@ -60,7 +61,6 @@ fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation
     var definition = try compiler.SourceDefinition.init(a, true, bundle.hooks);
     defer definition.deinit();
     const original = try records.module(scratch.allocator(), definition.module());
-    const spec = @import("semantic/recovery_specialization.zig");
     const limits = compiler.recovery_limits;
     const guest = bundle.guest.?;
     const known = proof.request.arguments[0].known.bytes;
@@ -77,22 +77,21 @@ fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation
     ));
     budget = guest_cost;
     try std.testing.expectError(error.Capacity, spec.validateGuest(a, guest, known, 1, &budget));
+    const scratch_bytes = 1024 * 1024;
+    budget = limits.source_work;
+    try spec.validateGuest(a, guest, known, scratch_bytes, &budget);
+    budget = limits.source_work;
+    try std.testing.expectError(
+        error.Capacity,
+        spec.validate(a, &definition, original, proof, bundle, scratch_bytes, &budget),
+    );
     var work: u64 = original.functions.len + proof.functions.len + guest_cost;
-    inline for (.{ "schemas", "constants", "effects", "handlers", "resources" }) |name|
-        work += @field(proof.residual, name).len;
-    inline for (.{ "variables", "values", "terms", "functions" }) |name|
-        work += @field(proof.residual, name).len;
+    work += proof.functions.len + proof.values.len + proof.terms.len;
+    for (proof.terms) |term| work += term.children.len + term.values.len;
+    for (proof.values) |value| work += value.children.len;
     try std.testing.expectError(
         error.RelationLimit,
-        @import("semantic/recovery_specialization.zig").validate(
-            a,
-            &definition,
-            original,
-            proof,
-            bundle,
-            compiler.recovery_limits.lowering_bytes,
-            &work,
-        ),
+        spec.validate(a, &definition, original, proof, bundle, limits.lowering_bytes, &work),
     );
     try std.testing.expectEqual(0, work);
 }
@@ -128,6 +127,12 @@ test "specialized scalar recovery binds the guest compiler package and residual 
     defer a.free(image);
     const guest = try data.program_image.Admitted.decode(a, image);
     defer guest.deinit();
+    try std.testing.expectError(error.Capacity, spec.projectGuest(a, guest, 1));
+    const projected = try spec.projectGuest(a, guest, compiler.recovery_limits.lowering_bytes);
+    defer a.free(projected);
+    const expected = try @import("semantic/projection.zig").programBytes(a, guest);
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, projected);
     const same = try checked.program_image.Admitted.decode(a, image);
     defer same.deinit();
     try records.checkProgram(guest, same.program());

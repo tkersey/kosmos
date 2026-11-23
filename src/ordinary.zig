@@ -1,0 +1,23 @@
+// Copyright (c) 2026 World contributors. MIT license.
+const runtime = @import("runtime_sources.zig");
+pub const package_version = "9.2.0";
+const current = runtime.session;
+pub const Session = current.Session;
+pub const Prepared = current.Prepared;
+pub const Resident = current.Resident;
+pub const Checkpoint = current.resident_types.Checkpoint;
+pub const Publication = current.resident_types.Publication;
+pub const RuntimeObservation = current.resident_types.RuntimeObservation;
+pub const CapsuleReceipt = current.resident_types.CapsuleReceipt;
+pub const RuntimeArtifact = runtime.artifact.Admitted;
+pub const RuntimeCapsule = runtime.capsule;
+pub const RuntimeCompiler = runtime.compiler;
+pub const RuntimeViews = runtime.views;
+pub const RuntimeAnalysis = runtime.analysis;
+pub const RuntimeInstrumentation = runtime.instrumentation;
+pub const RuntimeExperiment = runtime.experiment;
+pub const RuntimeTransformation = runtime.transformation;
+pub const invocation = current.invocation;
+pub const Workspace = current.Workspace;
+pub const AllocationBudget = current.AllocationBudget;
+pub const Statistics = runtime.runtime_types.Statistics;

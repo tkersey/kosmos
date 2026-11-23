@@ -222,7 +222,13 @@ scalar field reuse. For scalar field reuse, the witnesses describe the
 field-to-move substitutions and the
 correspondence maps their result through final coalescing. Both source bundle
 types expose the checked specialization in `value.evidence.derivation` when
-one was used.
+one was used. The proof records the selected lowering rule. Horos reports the
+reason for a structural fallback during lowering.
+
+The `work` field of `RuntimeCompiler.ValidationPolicy` bounds validation of
+`kosmos.source-relation/1` lineage. Source roots use the limits of their
+compiler policy. The checked module exposes its root limits as
+`RuntimeCompiler.recovery_limits`.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected

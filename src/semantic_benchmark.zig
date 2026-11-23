@@ -319,13 +319,14 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
-    var arguments_arena = std.heap.ArenaAllocator.init(a);
-    defer arguments_arena.deinit();
-    const args = try init.minimal.args.toSlice(arguments_arena.allocator());
-    const filter = if (args.len > 1) args[1] else null;
-    if (filter != null and std.mem.eql(u8, filter.?, "recovery_scalar_chain_large")) {
-        const opt_in_first = args.len == 3 and std.mem.eql(u8, args[2], "--opt-in-first");
-        if (args.len > 2 and !opt_in_first) return error.InvalidBenchmarkArgument;
+    var args = try init.minimal.args.iterateAllocator(a);
+    defer args.deinit();
+    _ = args.skip();
+    const argument = args.next();
+    if (args.skip()) return error.InvalidBenchmarkArgument;
+    if (@hasDecl(@import("recovery_options"), "horos_package")) {
+        const opt_in_first = std.mem.eql(u8, argument orelse "", "--opt-in-first");
+        if (argument != null and !opt_in_first) return error.InvalidBenchmarkArgument;
         const guest = try image(a, .scalar_chain_large);
         defer a.free(guest);
         const input = try arguments(a, .scalar_chain_large, 0);
@@ -339,6 +340,11 @@ pub fn main(init: std.process.Init) !void {
             opt_in_first,
         );
     }
+    const diagnostics = std.mem.eql(u8, argument orelse "", "diagnostics");
+    const filter = if (argument == null or diagnostics)
+        null
+    else
+        std.meta.stringToEnum(Workload, argument.?) orelse return error.InvalidBenchmarkArgument;
     var generic_meter = meter(a);
     const start = now(init.io);
     var generic = try kosmos.RuntimeArtifact.init(
@@ -358,7 +364,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer instrumented_meter.allocator().free(instrumented.bytes);
     defer instrumented.artifact.deinit();
-    if (filter != null and std.mem.eql(u8, filter.?, "diagnostics")) {
+    if (diagnostics) {
         try @import("semantic_benchmark_diagnostics.zig").measure(.{
             .a = a,
             .io = init.io,
@@ -377,7 +383,7 @@ fn measureSelected(
     output: *std.Io.Writer,
     generic: *kosmos.RuntimeArtifact,
     instrumented: *kosmos.RuntimeArtifact,
-    filter: ?[]const u8,
+    filter: ?Workload,
 ) !void {
     var bootstrap_prepared = try native.Prepared.init(a, generic.content.value.image);
     defer bootstrap_prepared.deinit();
@@ -394,8 +400,7 @@ fn measureSelected(
         .proposal = &proposed.value,
     };
     for (std.meta.tags(Workload)) |kind| {
-        if (filter == null or std.mem.eql(u8, filter.?, @tagName(kind)))
-            try measureWorkload(context, kind);
+        if (filter == null or filter.? == kind) try measureWorkload(context, kind);
     }
 }
 

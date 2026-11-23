@@ -1,12 +1,14 @@
 const std = @import("std");
+const runtime = @import("../runtime_sources.zig");
 const current = @import("horos_recovery");
 const source = current.source;
 const data = current.data;
-const legacy = @import("compiler.zig");
-const projection = @import("projection.zig");
-const artifact = @import("artifact.zig");
+const legacy = runtime.compiler;
+const projection = runtime.projection;
+const artifact = runtime.artifact;
 const Allocator = std.mem.Allocator;
-const Hooks = @import("instrumentation.zig").Hooks;
+const Hooks = runtime.instrumentation.Hooks;
+pub const limits: source.recovery_optimization.Limits = .{};
 pub const policy = "kosmos.source-lower/3";
 pub const Derivation = struct {
     residual: source.Module,
@@ -27,16 +29,17 @@ pub const Derivation = struct {
 };
 
 pub fn identity() artifact.Digest {
-    return identityFromCore(@import("source_identity.zig").digest());
+    return identityFromCore(runtime.source_identity.digest());
 }
 
 fn identityFromCore(core: artifact.Digest) artifact.Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(policy);
     hash.update(&core);
-    hash.update(@import("../semantic_packaged.zig").horos_package);
+    hash.update(runtime.packaged.horos_package);
     hash.update(@import("recovery_options").horos_package);
     inline for (.{
+        @embedFile("../runtime_sources.zig"),
         @embedFile("recovery_compiler.zig"),
         @embedFile("recovery_backend.zig"),
         @embedFile("recovery_export.zig"),
@@ -71,7 +74,7 @@ pub fn select(
     opts: legacy.Options,
 ) !?source.specialize.Output {
     const guest = opts.guest orelse return null;
-    const bytes = try projection.programBytes(a, guest);
+    const bytes = try projectGuest(a, guest, limits.lowering_bytes);
     defer a.free(bytes);
     return try source.specialize.specialize(a, original, .{
         .function = definition.service.entry,
@@ -88,19 +91,81 @@ pub fn select(
     });
 }
 
+pub fn projectGuest(
+    a: Allocator,
+    guest: *const @import("horos_data").program_image.Admitted,
+    storage_bytes: usize,
+) ![]u8 {
+    var physical = storage_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    return projectedBytes(cap.allocator(), guest, storage_bytes) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+}
+
+fn projectedBytes(
+    a: Allocator,
+    guest: *const @import("horos_data").program_image.Admitted,
+    storage_bytes: usize,
+) ![]u8 {
+    const prefix: projection.Program = .{
+        .identity = guest.identity(),
+        .code = guest.program(),
+        .schemas = guest.schemaFacts(),
+        .uses = guest.traits(),
+        .live = &.{},
+    };
+    var work = limits.source_work;
+    var traversal: @import("horos_data").wire.Writer = .{ .remaining = &work };
+    try @import("horos_data").record.write(projection.Program, prefix, &traversal);
+    {
+        var analysis = try guest.analysis(a);
+        defer analysis.deinit();
+        var available = storage_bytes;
+        try data.admission.spend(&work, analysis.facts.live.len);
+        for (analysis.facts.live) |positions| {
+            try data.admission.spend(&work, positions.len);
+            for (positions) |root| {
+                const count = analysis.facts.pool.count(root);
+                if (count > available / @sizeOf(u64)) return error.Capacity;
+                available -= @as(usize, @intCast(count)) * @sizeOf(u64);
+                try data.admission.spend(&work, count);
+            }
+        }
+    }
+    return projection.programBytes(a, guest);
+}
+
 pub fn validate(
     a: Allocator,
     definition: *const legacy.SourceDefinition,
     original: source.Module,
     derivation: ?Derivation,
     bundle: artifact.Bundle,
-    guest_storage_bytes: usize,
+    storage_bytes: usize,
     work: *u64,
 ) !void {
     const d = derivation orelse {
         if (bundle.guest != null or bundle.specialization != null) return error.InvalidRealization;
         return;
     };
+    var physical = storage_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    checkDerivation(cap.allocator(), definition, original, d, bundle, work) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+}
+
+fn checkDerivation(
+    a: Allocator,
+    definition: *const legacy.SourceDefinition,
+    original: source.Module,
+    d: Derivation,
+    bundle: artifact.Bundle,
+    work: *u64,
+) !void {
     const guest = bundle.guest orelse return error.InvalidRealization;
     const key = bundle.specialization orelse return error.InvalidRealization;
     if (!std.meta.eql(d.request.context, context(guest, bundle.hooks)) or
@@ -111,7 +176,8 @@ pub fn validate(
         return error.InvalidRealization;
     try checkKeys(a, original.functions.len, d.functions, d.request.policy.keys_per_function, work);
     const known = d.request.arguments[0].known.bytes;
-    try validateGuest(a, guest, known, guest_storage_bytes, work);
+    try checkGuest(a, guest, known, work);
+    try checkProofCoverage(a, d, work);
     var out: source.specialize.Output = .{
         .builder = source.Builder.init(a),
         .original = original,
@@ -128,11 +194,48 @@ pub fn validate(
         "variables", "values",    "terms",   "functions",
     }) |name| {
         const rows = @field(d.residual, name);
-        try current.data.admission.spend(work, rows.len);
-        try @field(out.builder, name).appendSlice(out.builder.allocator(), rows);
+        @field(out.builder, name) = .fromOwnedSlice(@constCast(rows));
     }
     out.builder.region_count = d.residual.region_count;
     try source.specialize.validateWithWork(a, original, d.request, &out, work);
+}
+
+fn checkProofCoverage(a: Allocator, d: Derivation, work: *u64) !void {
+    try data.admission.spend(work, d.terms.len);
+    const terms = try a.alloc(bool, d.terms.len);
+    defer a.free(terms);
+    @memset(terms, false);
+    try data.admission.spend(work, d.values.len);
+    const values = try a.alloc(bool, d.values.len);
+    defer a.free(values);
+    @memset(values, false);
+    try data.admission.spend(work, d.functions.len);
+    for (d.functions) |function| {
+        const root = function.body orelse return error.InvalidSpecialization;
+        if (root >= terms.len) return error.InvalidSpecialization;
+        terms[root] = true;
+    }
+    var term = terms.len;
+    while (term > 0) {
+        term -= 1;
+        if (!terms[term]) return error.InvalidSpecialization;
+        try markProofs(terms[0..term], d.terms[term].children, work);
+        try markProofs(values, d.terms[term].values, work);
+    }
+    var value = values.len;
+    while (value > 0) {
+        value -= 1;
+        if (!values[value]) return error.InvalidSpecialization;
+        try markProofs(values[0..value], d.values[value].children, work);
+    }
+}
+
+fn markProofs(reachable: []bool, children: []const usize, work: *u64) !void {
+    try data.admission.spend(work, children.len);
+    for (children) |child| {
+        if (child >= reachable.len) return error.InvalidSpecialization;
+        reachable[child] = true;
+    }
 }
 
 fn checkKeys(
@@ -170,7 +273,6 @@ pub fn validateGuest(
     storage_bytes: usize,
     work: *u64,
 ) !void {
-    try data.admission.spend(work, bytes.len);
     var physical = storage_bytes;
     var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
     checkGuest(cap.allocator(), guest, bytes, work) catch |err| {
@@ -180,6 +282,7 @@ pub fn validateGuest(
 }
 
 fn checkGuest(a: Allocator, guest: artifact.Digest, bytes: []const u8, work: *u64) !void {
+    try data.admission.spend(work, bytes.len);
     var known = try projection.decode(GuestProjection, a, bytes);
     defer known.deinit();
     const value = known.value;
@@ -237,6 +340,17 @@ test "specialization key allowance counts distinct emitted records for each orig
         &functions,
         1,
         &short,
+    ));
+    const siblings = [_]Function{ functions[0], .{ .before = 1, .after = 3, .arguments = &.{} } };
+    exact = 4;
+    try checkKeys(std.testing.allocator, 2, &siblings, 2, &exact);
+    exact = 4;
+    try std.testing.expectError(error.InvalidSpecialization, checkKeys(
+        std.testing.allocator,
+        2,
+        &siblings,
+        1,
+        &exact,
     ));
     exact = 4;
     try std.testing.expectError(error.InvalidSpecialization, checkKeys(
