@@ -564,7 +564,7 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 ## Checked scalar field reuse
 
 Two runs on an Apple M2 Pro with Zig 0.17.1 in safe mode compared the structural
-compiler at Horos `1f53200` with the opt-in compiler at `ca7a139`. The nominated
+compiler at Horos `1f53200` with the opt-in compiler at `7e159d1`. The nominated
 workload was `scalar_chain_large` with input 41. Each run alternated six
 structural/opt-in pairs per realization. All 48 timed executions and eight
 separate instrumented executions returned 7,337. Each matched the native oracle’s
@@ -583,16 +583,16 @@ and finished in eight base transitions.
 | Evidence bytes | 52,628 → 52,931 | 31,405,942 → 31,405,947 |
 | Complete artifact bytes | 276,698 → 276,932 | 35,052,051 → 35,052,056 |
 
-The generic image carried 50 witnesses. The specialized search exhausted its
-optional budget and returned the byte-identical ordinary executable, providing a
-timing control. Negative percentages indicate faster opt-in execution.
+The generic image carried 50 witnesses. Specialized lowering returned the
+byte-identical ordinary executable as a structural fallback, providing a timing
+control. Negative percentages indicate faster opt-in execution.
 
 | Paired observations | Run 1 median | Run 2 median | All individual pairs |
 | --- | ---: | ---: | ---: |
-| Generic execution | −1.10% | +0.61% | −9.63% to +12.46% |
-| Generic checkpoint-inclusive wall time | −0.97% | +1.32% | −9.04% to +12.65% |
-| Specialized execution | −0.76% | −2.45% | −20.06% to +40.82% |
-| Specialized checkpoint-inclusive wall time | −0.84% | −2.50% | −19.67% to +40.22% |
+| Generic execution | +0.68% | +0.81% | −9.65% to +41.70% |
+| Generic checkpoint-inclusive wall time | +0.64% | +0.87% | −9.20% to +40.58% |
+| Specialized execution | −0.73% | +1.36% | −15.62% to +3.78% |
+| Specialized checkpoint-inclusive wall time | −0.64% | +1.48% | −15.71% to +3.99% |
 
 Elapsed times used the ordinary allocator with statistics off. Each median covers
 six alternating pairs. The full range shows the observed spread on this shared
@@ -605,17 +605,17 @@ are medians with the minimum and maximum in parentheses.
 
 | Realization and policy | Advance, ms | Checkpoint-inclusive wall time, ms |
 | --- | ---: | ---: |
-| Generic structural | 104.83 (90.48–122.04) | 107.86 (93.12–126.21) |
-| Generic opt-in | 103.97 (90.56–123.98) | 108.25 (93.18–128.08) |
-| Specialized structural | 100.73 (98.21–148.56) | 104.13 (101.70–152.62) |
-| Specialized opt-in | 99.83 (97.52–140.07) | 103.30 (100.84–144.30) |
+| Generic structural | 94.71 (93.21–108.27) | 97.56 (95.91–110.95) |
+| Generic opt-in | 96.00 (92.54–132.88) | 98.77 (95.34–135.58) |
+| Specialized structural | 103.52 (101.66–122.45) | 106.95 (105.11–126.79) |
+| Specialized opt-in | 104.06 (101.30–109.42) | 107.60 (104.73–113.95) |
 
 | Cold observation across two runs | Generic structural → opt-in | Specialized structural → opt-in |
 | --- | --- | --- |
-| Compile seconds | 0.333–0.363 → 0.407–0.447 | 7.648–7.798 → 8.909–9.476 |
-| Admission seconds | 0.017 → 0.017–0.019 | 0.278–0.285 → 0.283–0.358 |
-| Independent validation seconds | 0.261–0.268 → 0.332–0.401 | 4.151–4.158 → 3.773–3.976 |
-| Metered compile peak bytes | 849,867,734 → 53,692,180 | 10,149,649,259 → 2,098,157,069 |
+| Compile seconds | 0.340–0.348 → 0.372–0.385 | 7.474–8.288 → 8.740–9.014 |
+| Admission seconds | 0.017–0.020 → 0.017–0.018 | 0.285–0.306 → 0.291–0.311 |
+| Independent validation seconds | 0.253–0.268 → 0.312–0.320 | 4.022–4.088 → 3.740–4.052 |
+| Metered compile peak bytes | 849,867,734 → 44,773,904 | 10,149,649,259 → 1,814,393,812 |
 | Metered validation peak bytes | 465,653,726 → 43,055,058 | 4,271,034,052 → 1,188,291,964 |
 
 Compile and independent validation times include allocation metering. Admission
@@ -623,12 +623,12 @@ starts with the expected digest in hand. Allocation peaks count requested bytes
 through each phase allocator.
 
 Keep the option experimental and disabled by default. The generic evaluator saved
-1,752 field evaluations per execution, with median elapsed time falling 1.10% in
-one series and rising 0.61% in the other. The byte-identical specialization showed
-the widest paired swings. Host load varied during measurement, so the tails cannot
-be attributed to scalar reuse. Both opt-in builds took longer to compile and used
-less peak allocator storage. Specialized independent validation was faster in both
-runs.
+1,752 field evaluations per execution. Its paired median execution time rose by
+0.68% and 0.81% in the two runs. Peak and retained session storage were identical.
+Host load varied, and even the byte-identical specialization had individual pairs
+ranging from 15.62% faster to 3.78% slower. Both opt-in builds took longer to
+compile and used less peak allocator storage. These measurements do not establish
+a repeatable runtime gain on the nominated workload.
 
 Reproduce the diamond and both runtime comparisons with
 `zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large`.
