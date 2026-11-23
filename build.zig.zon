@@ -3,12 +3,11 @@
     .version = "9.2.0",
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0xda7fbe49074dc2bd,
+    .horos_recovery = .{
+        .url = "git+https://github.com/tkersey/horos#4a93f3d9c6560972a49b639846a0cee8f0f5c38f",
+        .hash = "horos-8.0.1-flclaDzdWgCaahGkrvu9IPKR4Cw02-3nUUK80R8sk-5G",
+    },
     .dependencies = .{
-        .horos_recovery = .{
-            .url = "git+https://github.com/tkersey/horos#4a93f3d9c6560972a49b639846a0cee8f0f5c38f",
-            .hash = "horos-8.0.1-flclaDzdWgCaahGkrvu9IPKR4Cw02-3nUUK80R8sk-5G",
-            .lazy = true,
-        },
         .horos = .{
             .url = "git+https://github.com/tkersey/horos#1f5320038f45ae00050450edbc08afbb8a97a030",
             .hash = "horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI",

@@ -109,8 +109,10 @@ app.root_module.addImport("kosmos", dependency.module("kosmos_recovery"));
 
 Both modules share the same public session and artifact types, so an application
 can use the checked compiler with libraries that import ordinary `kosmos`.
-The recovery module adds the authenticated `horos_recovery` pin. With
-`zig build --system`, supply both pinned packages in the system directory.
+The recovery module authenticates the `horos_recovery` pin in `build.zig.zon`.
+With `zig build --system`, install both pinned packages in the system directory.
+If `-Dhoros-source` supplies the ordinary compiler outside that directory, you
+can supply the checked compiler with `-Dhoros-recovery-source=/absolute/source`.
 The compiler defaults to ordinary lowering and its original package identity.
 Set `scalar_field_reuse` to select checked lowering for one compilation. The
 checked compiler records its authenticated recovery package identity. An explicit

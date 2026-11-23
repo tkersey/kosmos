@@ -191,6 +191,11 @@ const Dependencies = struct {
 };
 
 fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
+    const recovery_override = b.option(
+        std.Build.LazyPath,
+        "horos-recovery-source",
+        "Override the pinned recovery compiler source",
+    );
     const supplied_source = b.option(
         std.Build.LazyPath,
         "horos-source",
@@ -224,17 +229,17 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .imports = &.{.{ .name = "horos_data", .module = data }},
     });
     const public_kosmos = b.addModule("kosmos", .{
-        .root_source_file = b.path("src/ordinary.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = options.target,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "runtime_sources.zig", .module = runtime_sources }},
     });
     const recovery_kosmos = b.addModule("kosmos_recovery", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/recovery_root.zig"),
         .target = options.target,
         .optimize = options.optimize,
         .imports = &.{
-            .{ .name = "ordinary.zig", .module = public_kosmos },
+            .{ .name = "root.zig", .module = public_kosmos },
             .{ .name = "../runtime_sources.zig", .module = runtime_sources },
             .{ .name = "horos_data", .module = data },
         },
@@ -242,7 +247,7 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
 
     return .{
         .source = source,
-        .recovery_source = recoverySource(b, options),
+        .recovery_source = recoverySource(b, options, recovery_override),
         .data = data,
         .host_data = host_data,
         .public_runtime_sources = runtime_sources,
@@ -251,18 +256,32 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
     };
 }
 
-fn recoverySource(b: *std.Build, options: Options) std.Build.LazyPath {
-    const package = options.package.dependencies.horos_recovery;
-    const entry = std.Build.package_map.get(package.hash).?;
-    if (entry.available)
-        return authenticatedSource(b, b.graph.cwdRelativePath(entry.build_root), package);
-    if (b.graph.system_package_mode) {
-        const missing = b.addFail("Missing recovery compiler package " ++ package.hash);
-        const unavailable = b.addWriteFiles();
-        unavailable.step.dependOn(&missing.step);
-        return unavailable.getDirectory();
+fn recoverySource(
+    b: *std.Build,
+    options: Options,
+    supplied: ?std.Build.LazyPath,
+) std.Build.LazyPath {
+    const package = options.package.horos_recovery;
+    if (supplied) |source| return authenticatedSource(b, source, package);
+    const original = std.Build.package_map.get(options.package.dependencies.horos.hash).?;
+    if (original.available) {
+        const store = std.fs.path.dirname(original.build_root) orelse ".";
+        const path = b.pathJoin(&.{ store, package.hash });
+        const installed = b.graph.cwdRelativePath(path);
+        b.dependOnDirectoryMetadata(b.graph.cwdRelativePath(store));
+        if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
+            return authenticatedSource(b, installed, package);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return authenticatedSource(b, installed, package),
+        }
     }
-    return authenticatedSource(b, null, package);
+    if (!b.graph.system_package_mode) return authenticatedSource(b, null, package);
+    const missing = b.addFail("Missing recovery compiler package " ++ package.hash ++
+        ". Install it beside the ordinary Horos package or supply -Dhoros-recovery-source.");
+    const unavailable = b.addWriteFiles();
+    unavailable.step.dependOn(&missing.step);
+    return unavailable.getDirectory();
 }
 
 fn authenticatedSource(
@@ -378,7 +397,7 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
     recovery_options.addOption(
         []const u8,
         "horos_package",
-        options.package.dependencies.horos_recovery.hash,
+        options.package.horos_recovery.hash,
     );
     dependencies.recovery_kosmos.addOptions("recovery_options", recovery_options);
     dependencies.recovery_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
@@ -547,7 +566,7 @@ fn configurePublication(
     const host_kosmos = if (options.target.query.isNative() and
         host_modules.host_mode == options.optimize) dependencies.public_kosmos else b.createModule(
         .{
-            .root_source_file = b.path("src/ordinary.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = b.graph.host,
             .optimize = host_modules.host_mode,
             .imports = &.{.{
@@ -775,7 +794,6 @@ fn configureDriver(
             .module = retained_runtime,
         } },
     }) });
-    driver_tests.root_module.addOptions("recovery_options", b.addOptions());
     const run_driver_tests = b.addRunArtifact(driver_tests);
     driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
     b.step("build-semantic-driver-executable", "Build the ordinary native driver test executable")
@@ -829,27 +847,37 @@ fn configureRecoveryDriver(
     });
     host.bindRecovery(tests.root_module);
     const ordinary = b.modules.get("kosmos").?;
-    const module_types = b.addObject(.{
-        .name = "kosmos-module-types",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/native_consumer/module_types.zig"),
-            .target = ordinary.resolved_target,
-            .optimize = ordinary.optimize,
-            .imports = &.{
-                .{ .name = "kosmos", .module = ordinary },
-                .{ .name = "kosmos_recovery", .module = b.modules.get("kosmos_recovery").? },
-            },
-        }),
+    const public_module = b.createModule(.{
+        .root_source_file = b.path("test/native_consumer/module_types.zig"),
+        .target = ordinary.resolved_target,
+        .optimize = ordinary.optimize,
+        .imports = &.{
+            .{ .name = "kosmos", .module = ordinary },
+            .{ .name = "kosmos_recovery", .module = b.modules.get("kosmos_recovery").? },
+        },
     });
-    tests.step.dependOn(&module_types.step);
+    const native = ordinary.resolved_target.?.query.isNative();
+    const module_types = if (native)
+        b.addTest(.{ .name = "kosmos-public-compiler", .root_module = public_module })
+    else
+        b.addObject(.{ .name = "kosmos-module-types", .root_module = public_module });
     const run = b.addRunArtifact(tests);
     run.has_side_effects = true;
-    b.step("build-semantic-recovery-driver", "Build the checked recovery driver tests")
-        .dependOn(&tests.step);
-    b.step("check-semantic-recovery-driver", "Run the checked recovery driver tests")
-        .dependOn(&run.step);
-    build_driver.dependOn(&tests.step);
-    check_driver.dependOn(&run.step);
+    const checked_build = b.step(
+        "build-semantic-recovery-driver",
+        "Build the checked recovery driver tests",
+    );
+    checked_build.dependOn(&tests.step);
+    checked_build.dependOn(&module_types.step);
+    const check = b.step("check-semantic-recovery-driver", "Run the checked recovery driver tests");
+    check.dependOn(&run.step);
+    if (native) {
+        const consumer = b.addRunArtifact(module_types);
+        consumer.has_side_effects = true;
+        check.dependOn(&consumer.step);
+    } else check.dependOn(&module_types.step);
+    build_driver.dependOn(checked_build);
+    check_driver.dependOn(check);
 }
 
 fn configureDiagnosticExample(
@@ -868,7 +896,6 @@ fn configureDiagnosticExample(
             .{ .name = "diagnostic_fixture", .module = host_modules.diagnostic_fixture },
         },
     });
-    example.addOptions("recovery_options", b.addOptions());
     const executable = b.addExecutable(.{
         .name = "diagnostic-replay",
         .root_module = b.createModule(.{
@@ -1004,7 +1031,7 @@ fn configureWasmModules(
         .optimize = options.kernel_mode,
     });
     const current_runtime = b.createModule(.{
-        .root_source_file = b.path("src/ordinary.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = wasm_target,
         .optimize = options.kernel_mode,
         .imports = &.{.{ .name = "horos_data", .module = wasm_data }},

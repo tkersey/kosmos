@@ -1,6 +1,6 @@
 const std = @import("std");
 const data = @import("horos_data");
-const compiler = @import("root.zig").RuntimeCompiler;
+const compiler = @import("recovery_root.zig").RuntimeCompiler;
 const transport = @import("horos_recovery");
 const base = @import("base/session.zig");
 const driver = @import("semantic/driver.zig");

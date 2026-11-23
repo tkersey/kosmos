@@ -1,27 +1,23 @@
 // Copyright (c) 2026 World contributors. MIT license.
-const ordinary = @import("ordinary.zig");
-pub const package_version = ordinary.package_version;
-pub const Session = ordinary.Session;
-pub const Prepared = ordinary.Prepared;
-pub const Resident = ordinary.Resident;
-pub const Checkpoint = ordinary.Checkpoint;
-pub const Publication = ordinary.Publication;
-pub const RuntimeObservation = ordinary.RuntimeObservation;
-pub const CapsuleReceipt = ordinary.CapsuleReceipt;
-pub const RuntimeArtifact = ordinary.RuntimeArtifact;
-pub const RuntimeCapsule = ordinary.RuntimeCapsule;
-/// Host-side source construction and independent derivation validation. This
-/// namespace is not part of the restricted base's execution closure.
-pub const RuntimeCompiler = if (@hasDecl(@import("recovery_options"), "horos_package"))
-    @import("semantic/recovery_compiler.zig")
-else
-    ordinary.RuntimeCompiler;
-pub const RuntimeViews = ordinary.RuntimeViews;
-pub const RuntimeAnalysis = ordinary.RuntimeAnalysis;
-pub const RuntimeInstrumentation = ordinary.RuntimeInstrumentation;
-pub const RuntimeExperiment = ordinary.RuntimeExperiment;
-pub const RuntimeTransformation = ordinary.RuntimeTransformation;
-pub const invocation = ordinary.invocation;
-pub const Workspace = ordinary.Workspace;
-pub const AllocationBudget = ordinary.AllocationBudget;
-pub const Statistics = ordinary.Statistics;
+const runtime = @import("runtime_sources.zig");
+pub const package_version = "9.2.0";
+const current = runtime.session;
+pub const Session = current.Session;
+pub const Prepared = current.Prepared;
+pub const Resident = current.Resident;
+pub const Checkpoint = current.resident_types.Checkpoint;
+pub const Publication = current.resident_types.Publication;
+pub const RuntimeObservation = current.resident_types.RuntimeObservation;
+pub const CapsuleReceipt = current.resident_types.CapsuleReceipt;
+pub const RuntimeArtifact = runtime.artifact.Admitted;
+pub const RuntimeCapsule = runtime.capsule;
+pub const RuntimeCompiler = runtime.compiler;
+pub const RuntimeViews = runtime.views;
+pub const RuntimeAnalysis = runtime.analysis;
+pub const RuntimeInstrumentation = runtime.instrumentation;
+pub const RuntimeExperiment = runtime.experiment;
+pub const RuntimeTransformation = runtime.transformation;
+pub const invocation = current.invocation;
+pub const Workspace = current.Workspace;
+pub const AllocationBudget = current.AllocationBudget;
+pub const Statistics = runtime.runtime_types.Statistics;
