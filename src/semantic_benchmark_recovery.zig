@@ -20,6 +20,7 @@ const Context = struct {
 };
 const Realization = enum { generic, specialized };
 const repetitions = 6;
+const construction_order = [2][2]bool{ .{ false, true }, .{ true, false } };
 
 pub fn measure(
     a: Allocator,
@@ -61,7 +62,10 @@ pub fn measure(
         .structural_horos_package = packaged.horos_package,
         .opt_in_horos_package = @import("recovery_options").horos_package,
         .execute_interval = "invocation.advance sum, ordinary allocator, statistics off",
-        .construction_interval = "compile and validation times include allocator metering",
+        .construction_interval = "ordinary allocator, compile, admit with digest, validate",
+        .construction_replicates = construction_order.len,
+        .construction_process = "same process, each timed artifact released before the next build",
+        .construction_peak_interval = "separately metered compile and independent validation calls",
         .wall_interval = "session start through final outcome and checkpoint checks",
         .counter_interval = "sum of invocation.advance calls on a separate instrumented session",
         .reference_guest_work = reference.guest_work,
@@ -87,25 +91,57 @@ pub fn measure(
 
 const Built = struct { prepared: kosmos.Prepared, effective_rule: []const u8 };
 
-fn build(context: Context, kind: Realization, optimized: bool) !Built {
-    var construction = bench.meter(context.a);
-    var start = bench.now(context.io);
-    const bytes = try kosmos.RuntimeCompiler.compile(construction.allocator(), .{
+fn compileOptions(
+    context: Context,
+    kind: Realization,
+    optimized: bool,
+) kosmos.RuntimeCompiler.Options {
+    return .{
         .guest = if (kind == .specialized) context.guest else null,
         .horos_package = packaged.horos_package,
         .scalar_field_reuse = optimized,
-    });
+    };
+}
+
+const ConstructionTiming = struct {
+    artifact: Digest,
+    compile_ns: i96,
+    admission_ns: i96,
+    independent_validation_ns: i96,
+};
+
+fn timeConstruction(context: Context, options: kosmos.RuntimeCompiler.Options) !ConstructionTiming {
+    const a = context.a;
+    var start = bench.now(context.io);
+    const bytes = try kosmos.RuntimeCompiler.compile(a, options);
     const compile_ns = bench.elapsed(context.io, start);
-    defer construction.allocator().free(bytes);
+    defer a.free(bytes);
     const expected = artifact.digest(bytes);
     start = bench.now(context.io);
-    var admitted = try kosmos.RuntimeArtifact.init(context.a, bytes, expected);
-    defer admitted.deinit();
+    var admitted = try kosmos.RuntimeArtifact.init(a, bytes, expected);
     const admission_ns = bench.elapsed(context.io, start);
-    var validation = bench.meter(context.a);
+    defer admitted.deinit();
     start = bench.now(context.io);
+    try kosmos.RuntimeCompiler.validate(a, &admitted);
+    return .{
+        .artifact = admitted.identity,
+        .compile_ns = compile_ns,
+        .admission_ns = admission_ns,
+        .independent_validation_ns = bench.elapsed(context.io, start),
+    };
+}
+
+fn buildMetered(context: Context, kind: Realization, optimized: bool) !Built {
+    var construction = bench.meter(context.a);
+    const bytes = try kosmos.RuntimeCompiler.compile(
+        construction.allocator(),
+        compileOptions(context, kind, optimized),
+    );
+    defer construction.allocator().free(bytes);
+    var admitted = try kosmos.RuntimeArtifact.init(context.a, bytes, artifact.digest(bytes));
+    defer admitted.deinit();
+    var validation = bench.meter(context.a);
     try kosmos.RuntimeCompiler.validate(validation.allocator(), &admitted);
-    const validation_ns = bench.elapsed(context.io, start);
     if (validation.live != 0) return error.LeakedValidation;
     const bundle = admitted.content.value;
     const proof = if (optimized) try recoveryShape(context.a, bundle.evidence) else null;
@@ -123,9 +159,6 @@ fn build(context: Context, kind: Realization, optimized: bool) !Built {
         .image_bytes = bundle.image.len,
         .evidence_bytes = bundle.evidence.len,
         .recovery_proof = proof,
-        .compile_ns = compile_ns,
-        .admission_ns = admission_ns,
-        .independent_validation_ns = validation_ns,
         .compile_peak_bytes = construction.peak,
         .validation_peak_bytes = validation.peak,
     });
@@ -133,6 +166,40 @@ fn build(context: Context, kind: Realization, optimized: bool) !Built {
         .prepared = try kosmos.Prepared.initWithRuntime(context.a, context.image, &admitted),
         .effective_rule = rule,
     };
+}
+
+fn measureConstruction(context: Context, kind: Realization) ![2]Built {
+    var samples: [construction_order.len][2]ConstructionTiming = undefined;
+    for (construction_order, &samples) |pair, *timings| {
+        for (pair, timings) |optimized, *sample| {
+            sample.* = try timeConstruction(context, compileOptions(context, kind, optimized));
+        }
+    }
+    var structural = try buildMetered(context, kind, false);
+    errdefer structural.prepared.deinit();
+    var optimized = try buildMetered(context, kind, true);
+    errdefer optimized.prepared.deinit();
+    const built = [2]Built{ structural, optimized };
+    for (construction_order, samples, 0..) |pair, timings, replicate| {
+        for (pair, timings, 0..) |selected, sample, order| {
+            const runtime = &built[@intFromBool(selected)].prepared.runtime;
+            if (!std.mem.eql(u8, &runtime.identity, &sample.artifact))
+                return error.ConstructionArtifactChanged;
+            try bench.emit(context.output, .{
+                .phase = "recovery-construction-timing",
+                .realization = @tagName(kind),
+                .optimized = selected,
+                .replicate = replicate,
+                .order = order,
+                .artifact = std.fmt.bytesToHex(sample.artifact, .lower),
+                .horos_package = runtime.content.value.manifest.compiler.horos_package,
+                .compile_ns = sample.compile_ns,
+                .admission_ns = sample.admission_ns,
+                .independent_validation_ns = sample.independent_validation_ns,
+            });
+        }
+    }
+    return built;
 }
 
 const ProofShape = struct { rule: []const u8, evidence_bytes: usize, field_witnesses: usize };
@@ -170,14 +237,12 @@ const Counters = struct {
 };
 
 fn measurePair(context: Context, kind: Realization) !void {
-    var structural = try build(context, kind, false);
-    defer structural.prepared.deinit();
-    var optimized = try build(context, kind, true);
-    defer optimized.prepared.deinit();
+    var builds = try measureConstruction(context, kind);
+    defer for (&builds) |*built| built.prepared.deinit();
     for (0..repetitions) |replicate| {
         for (0..2) |order| {
             const selected = (replicate + order) % 2 == 1;
-            const built = if (selected) &optimized else &structural;
+            const built = &builds[@intFromBool(selected)];
             const sample = try timed(context, &built.prepared);
             const observed = sample.observed;
             const manifest = built.prepared.runtime.content.value.manifest;
@@ -200,7 +265,7 @@ fn measurePair(context: Context, kind: Realization) !void {
             });
         }
     }
-    for ([_]*const Built{ &structural, &optimized }, 0..) |built, index| {
+    for (&builds, 0..) |*built, index| {
         const measured = try counted(context, &built.prepared);
         const observed = measured.observed;
         const manifest = built.prepared.runtime.content.value.manifest;
@@ -218,6 +283,10 @@ fn measurePair(context: Context, kind: Realization) !void {
             .base_work = measured.cost.base_work,
             .field_evaluations = measured.cost.field_evaluations,
             .move_slot_reads = measured.cost.move_slot_reads,
+            .resident_memory_allocator = "session allocations only",
+            .resident_memory_excludes = "prepared runtime and caller-owned buffers",
+            .resident_peak_interval = "Session.start through the final checkpoint check",
+            .resident_retained_at = "after the final checkpoint check, before Session.deinit",
             .resident_peak_bytes = measured.cost.resident_peak_bytes,
             .resident_retained_bytes = measured.cost.resident_retained_bytes,
         });
