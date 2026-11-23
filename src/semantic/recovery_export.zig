@@ -58,17 +58,17 @@ pub fn exportRecoverySource(
 ) !ExportedRecoverySource {
     var owned = try candidate.clone();
     defer owned.deinit();
-    try backend.checkManifest(&owned);
-    const bundle = owned.content.value;
-    _ = try records.evidenceParts(bundle.evidence, bundle.guest != null, backend.limits);
+    var retained = try backend.independentCopy(a, &owned);
+    errdefer retained.deinit();
+    const bundle = retained.content.value;
     var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
     errdefer definition.deinit();
+    var inputs = try backend.Inputs.init(a, &definition);
+    defer inputs.arena.deinit();
     var remaining = backend.limits.source_work;
-    var validated = try backend.validateDefined(a, &remaining, &owned, &definition);
+    var validated = try backend.validateDefined(a, &remaining, &retained, &definition, &inputs);
     defer a.free(validated.parameters);
     errdefer validated.proof.deinit();
-    var retained = try independentCopy(a, &owned);
-    errdefer retained.deinit();
     const parts = try records.evidenceParts(
         retained.content.value.evidence,
         bundle.guest != null,
@@ -79,14 +79,16 @@ pub fn exportRecoverySource(
         .{ .parent = a, .remaining = &physical, .accounting = .live };
     var arena = Arena.init(cap.allocator());
     errdefer arena.deinit();
+    var export_work = backend.limits.source_work;
     const value = sourceBundle(
         arena.allocator(),
         &retained,
         &definition,
+        inputs.roots,
         validated.parameters,
         parts.derivation,
         validated.proof.evidence,
-        &remaining,
+        &export_work,
     ) catch |err| {
         if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
         return err;
@@ -101,30 +103,26 @@ pub fn exportRecoverySource(
     };
 }
 
-fn independentCopy(a: Allocator, owned: *const artifact.Admitted) !artifact.Admitted {
-    const bytes = try owned.encode(a);
-    defer a.free(bytes);
-    return artifact.Admitted.init(a, bytes, owned.identity);
-}
-
 fn sourceBundle(
     storage: Allocator,
     retained: *const artifact.Admitted,
     definition: *legacy.SourceDefinition,
+    roots: roles.Roots,
     bindings: []const current.source.RecoveryBinding,
     derivation_bytes: ?[]const u8,
     recovery: opt.Evidence,
     work: *u64,
 ) !RecoverySourceBundle {
     const derivation: ?legacy.Derivation = if (derivation_bytes) |bytes|
-        try readDerivation(storage, bytes)
+        try readDerivation(storage, bytes, work)
     else
         null;
     const functions: []const Function = if (derivation) |d| d.functions else &.{};
     const bundle = retained.content.value;
     const pure = try pureEntries(definition);
     const original = definition.module();
-    const selected = if (derivation) |d| d.residual else original;
+    const generic = try legacy.sourceModule(original);
+    const selected = if (derivation) |d| try residualSource(d.residual, work) else generic;
     try current.data.admission.spend(work, bindings.len);
     const parameters = try storage.alloc(old.source.RecoveryBinding, bindings.len);
     for (parameters, bindings) |*binding, checked| binding.* = .{
@@ -135,13 +133,7 @@ fn sourceBundle(
         .slot = checked.slot,
         .schema = checked.schema,
     };
-    const generic_roles = try roles.selected(
-        storage,
-        definition,
-        @as([]const Function, &.{}),
-        work,
-    );
-    std.debug.assert(generic_roles.len == 9);
+    const generic_roles = try roles.copyRoots(storage, roots);
     return .{
         .realization = retained.identity,
         .image = bundle.manifest.image,
@@ -149,13 +141,19 @@ fn sourceBundle(
         .guest = bundle.guest,
         .requirements = bundle.manifest.requirements,
         .bridge = bundle.manifest.bridge,
-        .generic = try legacy.sourceModule(original),
-        .selected = try legacy.sourceModule(selected),
+        .generic = generic,
+        .selected = selected,
         .helpers = try helperSources(definition, retained),
         .generic_entries = try entries(storage, definition, original.entry, &.{}, work),
-        .selected_entries = try entries(storage, definition, selected.entry, functions, work),
-        .generic_roles = generic_roles[0..9].*,
-        .selected_roles = try roles.selected(storage, definition, functions, work),
+        .selected_entries = try entries(
+            storage,
+            definition,
+            selected.module.entry,
+            functions,
+            work,
+        ),
+        .generic_roles = generic_roles,
+        .selected_roles = try roles.selected(storage, generic_roles, functions, work),
         .generic_pure_entries = pure,
         .parameters = parameters,
         .anchors = bundle.recovery.anchors,
@@ -168,7 +166,15 @@ fn sourceBundle(
     };
 }
 
-fn readDerivation(storage: Allocator, bytes: []const u8) !legacy.Derivation {
+fn residualSource(module: old.source.Module, work: *u64) !legacy.SourceModule {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var writer: old.data.wire.Writer = .{ .hasher = &hash, .remaining = work };
+    try old.data.record.write(old.source.Module, module, &writer);
+    return .{ .module = module, .digest = hash.finalResult() };
+}
+
+fn readDerivation(storage: Allocator, bytes: []const u8, work: *u64) !legacy.Derivation {
+    try current.data.admission.spend(work, bytes.len);
     var reader: old.data.wire.Reader = .{ .input = bytes };
     var capacity = backend.limits.lowering_bytes;
     const result = try old.data.record.readBounded(legacy.Derivation, &reader, storage, &capacity);

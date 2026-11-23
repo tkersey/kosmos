@@ -222,13 +222,24 @@ scalar field reuse. For scalar field reuse, the witnesses describe the
 field-to-move substitutions and the
 correspondence maps their result through final coalescing. Both source bundle
 types expose the checked specialization in `value.evidence.derivation` when
-one was used. The proof records the selected lowering rule. Horos reports the
-reason for a structural fallback during lowering.
+one was used. The benchmark records Horos's lowering decision as
+`producer_outcome` alongside the rule from the checked proof.
+
+When validating a checked root, Kosmos admits a private copy of its canonical
+bytes against the retained digest. For a separately owned ancestor,
+`validateAgainst` also checks that the ancestor's canonical bytes have that
+digest. Independently admitted copies of the same root can be compared.
 
 The `work` field of `RuntimeCompiler.ValidationPolicy` bounds validation of
 `kosmos.source-relation/1` lineage. Source roots use the limits of their
 compiler policy. The checked module exposes its root limits as
 `RuntimeCompiler.recovery_limits`.
+
+The pinned Horos specializer at `4a93f3d` retains its construction scratch
+during final lowering. On the default specialized export, that call exceeds
+the checked compiler’s 1 GiB storage limit when the caller enforces it.
+The checked consumer bounds its own validation stages. Bounding the Horos
+producer while preserving that export requires an upstream change.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected

@@ -27,7 +27,7 @@ pub fn compile(a: std.mem.Allocator, options: Options) ![]u8 {
         .hooks = options.hooks,
         .policy = options.policy,
     };
-    if (options.scalar_field_reuse) return backend.compile(a, original);
+    if (options.scalar_field_reuse) return (try backend.compile(a, original)).bytes;
     return legacy.compile(a, original);
 }
 
@@ -42,9 +42,11 @@ pub fn validateWithPolicy(
 ) !void {
     var owned = try admitted.clone();
     defer owned.deinit();
-    if (std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
-        return backend.validate(a, &owned);
-    return legacy.validateWithPolicy(a, &owned, policy);
+    if (!std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
+        return legacy.validateWithPolicy(a, &owned, policy);
+    var checked = try backend.independentCopy(a, &owned);
+    defer checked.deinit();
+    return backend.validate(a, &checked);
 }
 
 pub fn validateAgainst(
@@ -59,7 +61,18 @@ pub fn validateAgainst(
     if (!std.mem.eql(u8, owned.content.value.manifest.compiler.policy, recovery_policy))
         return legacy.validateAgainst(a, &owned, &parent);
     if (!std.mem.eql(u8, &owned.identity, &parent.identity)) return error.InvalidAncestor;
-    return backend.validate(a, &owned);
+    var checked = try backend.independentCopy(a, &owned);
+    defer checked.deinit();
+    if (owned.core != parent.core) {
+        var work = recovery_limits.source_work;
+        if (!try @import("horos_recovery").data.record.equalWithWork(
+            artifact.Bundle,
+            checked.content.value,
+            parent.content.value,
+            &work,
+        )) return error.InvalidAncestor;
+    }
+    return backend.validate(a, &checked);
 }
 
 pub const checker_identity = legacy.checker_identity;

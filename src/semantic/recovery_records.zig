@@ -29,6 +29,26 @@ pub fn image(a: Allocator, storage: Allocator, program: data.activation.Program)
     return bytes;
 }
 
+pub fn limitedImage(
+    a: Allocator,
+    program: data.activation.Program,
+    storage_bytes: usize,
+    work: *u64,
+) ![]u8 {
+    const size = try data.program_image.encodedLengthWithWork(program, work);
+    if (size > storage_bytes) return error.Capacity;
+    try data.admission.spend(work, size);
+    var physical = storage_bytes;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    const bytes = try a.alloc(u8, size);
+    errdefer a.free(bytes);
+    _ = data.program_image.encode(cap.allocator(), program, bytes) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+        return err;
+    };
+    return bytes;
+}
+
 pub fn targetProgram(
     arena: Allocator,
     owner: *const old.data.program_image.Admitted,
@@ -186,6 +206,22 @@ pub fn decodeEvidence(
         .arena = arena,
         .value = .{ .recovery = parts.recovery, .derivation = derivation },
     };
+}
+
+pub fn transportBytes(a: Allocator, proof: opt.Evidence, limits: opt.Limits, work: *u64) ![]u8 {
+    const maximum = switch (proof.rule) {
+        .structural_fallback => limits.structural_evidence_bytes,
+        .scalar_field_reuse_v1 => limits.evidence_bytes,
+        else => return error.UnsupportedVersion,
+    };
+    var measure: data.wire.Writer = .{ .remaining = work };
+    try data.record.write(opt.Evidence, proof, &measure);
+    if (measure.position > maximum) return error.ScalarFieldLimit;
+    const bytes = try a.alloc(u8, measure.position);
+    errdefer a.free(bytes);
+    var writer: data.wire.Writer = .{ .output = bytes, .remaining = work };
+    try data.record.write(opt.Evidence, proof, &writer);
+    return bytes;
 }
 
 pub fn encodeEvidence(

@@ -148,9 +148,19 @@ fn timeConstruction(context: Context, options: kosmos.RuntimeCompiler.Options) !
 
 fn buildMetered(context: Context, kind: Realization, optimized: bool) !Built {
     var construction = bench.meter(context.a);
-    const bytes = try kosmos.RuntimeCompiler.compile(
+    const options = compileOptions(context, kind, optimized);
+    const built = if (optimized) try @import("semantic/recovery_backend.zig").compile(
         construction.allocator(),
-        compileOptions(context, kind, optimized),
+        .{
+            .horos_package = options.horos_package,
+            .guest = options.guest,
+            .hooks = options.hooks,
+            .policy = options.policy,
+        },
+    ) else null;
+    const bytes = if (built) |checked| checked.bytes else try kosmos.RuntimeCompiler.compile(
+        construction.allocator(),
+        options,
     );
     defer construction.allocator().free(bytes);
     var admitted = try kosmos.RuntimeArtifact.init(context.a, bytes, artifact.digest(bytes));
@@ -164,6 +174,7 @@ fn buildMetered(context: Context, kind: Realization, optimized: bool) !Built {
     try bench.emit(context.output, .{
         .phase = "recovery-construction",
         .effective_rule = rule,
+        .producer_outcome = if (built) |checked| @tagName(checked.outcome) else null,
         .realization = @tagName(kind),
         .optimized = optimized,
         .compiler_policy = bundle.manifest.compiler.policy,

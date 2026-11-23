@@ -534,7 +534,7 @@ fn expectIdentity(legacy: *const artifact.Admitted, optimized: *const artifact.A
     try std.testing.expectError(error.UnsupportedSource, compiler.validate(a, &unknown));
     var wrong = try altered(optimized, compiler.recovery_policy, original.evidence);
     defer wrong.deinit();
-    if (compiler.validate(a, &wrong)) return error.AcceptedStructuralProof else |_| {}
+    try std.testing.expectError(error.InvalidTag, compiler.validate(a, &wrong));
 }
 
 test "checked scalar recovery executes both paths and restores interrupted phases" {

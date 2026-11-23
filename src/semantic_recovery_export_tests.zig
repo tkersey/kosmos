@@ -98,7 +98,7 @@ fn checkLegacyExport(exported: *const compiler.ExportedSource) !void {
     defer arena.deinit();
     const protected = try roles.selected(
         arena.allocator(),
-        &exported.definition,
+        try roles.roots(a, arena.allocator(), &exported.definition),
         @as([]const Function, &.{}),
         &work,
     );
@@ -164,6 +164,31 @@ test "public checked source export retains builtin and specialized recovery sour
         ));
         try checkRecoveryExport(&candidate);
     }
+}
+
+test "protected roots follow the staged ordinary exporter with instrumented cuts" {
+    const image = try @import("semantic/test_support.zig").guestImage();
+    defer a.free(image);
+    const guest = try data.program_image.Admitted.decode(a, image);
+    defer guest.deinit();
+    const bytes = try legacy.compile(a, .{
+        .horos_package = packaged.horos_package,
+        .guest = guest,
+        .hooks = .{ .control = true, .storage = true },
+    });
+    defer a.free(bytes);
+    var admitted = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));
+    defer admitted.deinit();
+    var ordinary = try legacy.exportBuiltinSource(a, &admitted);
+    defer ordinary.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const roots = try @import("semantic/recovery_roles.zig").roots(
+        a,
+        arena.allocator(),
+        &ordinary.definition,
+    );
+    try std.testing.expect(data.record.equal(@TypeOf(roots), ordinary.value.generic_roles, roots));
 }
 
 test "admitted guest program records transfer within explicit work and storage allowances" {

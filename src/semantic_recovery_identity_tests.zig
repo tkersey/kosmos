@@ -85,10 +85,7 @@ fn checkVerifierWork(bundle: artifact.Bundle, proof: compiler.RecoveryDerivation
         error.Capacity,
         spec.validate(a, &definition, original, proof, bundle, scratch_bytes, &budget),
     );
-    var work: u64 = original.functions.len + proof.functions.len + guest_cost;
-    work += proof.functions.len + proof.values.len + proof.terms.len;
-    for (proof.terms) |term| work += term.children.len + term.values.len;
-    for (proof.values) |value| work += value.children.len;
+    var work = guest_cost;
     try std.testing.expectError(
         error.RelationLimit,
         spec.validate(a, &definition, original, proof, bundle, limits.lowering_bytes, &work),
@@ -102,7 +99,10 @@ fn checkEvidenceLimits(bundle: artifact.Bundle) !void {
     var decoded = try records.decodeEvidence(a, bundle.evidence, true, limits, &exact);
     defer decoded.deinit();
     try std.testing.expectEqual(0, exact);
-    try checkVerifierWork(bundle, decoded.value.derivation.?);
+    const proof = decoded.value.derivation.?;
+    try std.testing.expectEqual(1, proof.request.policy.keys_per_function);
+    try std.testing.expectEqual(limits.source_work + 1, proof.request.policy.work);
+    try checkVerifierWork(bundle, proof);
     const encoded = try records.encodeEvidence(a, a, decoded.value, limits);
     defer a.free(encoded);
     try std.testing.expectEqualSlices(u8, bundle.evidence, encoded);
@@ -143,10 +143,16 @@ test "specialized scalar recovery binds the guest compiler package and residual 
     different.constants = constants;
     _ = try checked.program_image.identity(a, different);
     try std.testing.expectError(error.InvalidRecovery, records.checkProgram(guest, different));
+    const policy = @import("horos").source.specialize.Policy{
+        .work = compiler.recovery_limits.source_work + 1,
+        .keys_per_function = 1,
+        .depth = 1024,
+    };
     const bytes = try compiler.compile(a, .{
         .horos_package = packaged.horos_package,
         .guest = guest,
         .scalar_field_reuse = true,
+        .policy = policy,
     });
     defer a.free(bytes);
     var candidate = try artifact.Admitted.init(a, bytes, artifact.digest(bytes));

@@ -10,28 +10,67 @@ const Function = source.specialize.FunctionProof;
 const Binding = source.RecoveryBinding;
 const spend = @import("horos_recovery").data.admission.spend;
 
+pub const Roots = @FieldType(compiler.SourceBundle, "generic_roles");
+
+pub fn roots(
+    a: Allocator,
+    storage: Allocator,
+    definition: *const compiler.SourceDefinition,
+) !Roots {
+    const packaged = runtime.packaged;
+    var identity: artifact.Digest = undefined;
+    _ = try std.fmt.hexToBytes(&identity, packaged.artifact_sha256);
+    var retained = try artifact.Admitted.init(a, packaged.bytes, identity);
+    defer retained.deinit();
+    var ordinary = try compiler.exportBuiltinSource(a, &retained);
+    defer ordinary.deinit();
+    var result = try copyRoots(storage, ordinary.value.generic_roles);
+    for (&result) |*entry| entry.function = try reboundFunction(
+        &ordinary.definition,
+        definition,
+        entry.function,
+    );
+    return result;
+}
+
+pub fn copyRoots(storage: Allocator, original: Roots) !Roots {
+    var result = original;
+    for (&result) |*entry| entry.ordinals = try storage.dupe(u32, entry.ordinals);
+    return result;
+}
+
+fn reboundFunction(
+    ordinary: *const compiler.SourceDefinition,
+    selected_definition: *const compiler.SourceDefinition,
+    original: Id,
+) !Id {
+    var rebound: ?Id = null;
+    inline for (.{
+        .{ "service", .{
+            "entry", "loop", "dispatch", "advance", "commit", "control_commit", "publish", "cut",
+        } },
+        .{ "clone", .{ "instantiate", "run", "rebase" } },
+    }) |group| {
+        inline for (group[1]) |name| {
+            if (@field(@field(ordinary, group[0]), name) == original) {
+                const mapped = @field(@field(selected_definition, group[0]), name);
+                if (rebound != null and rebound.? != mapped) return error.InvalidRecovery;
+                rebound = mapped;
+            }
+        }
+    }
+    return rebound orelse error.InvalidRecovery;
+}
+
 pub fn selected(
     a: Allocator,
-    definition: *const compiler.SourceDefinition,
+    root_roles: Roots,
     functions: anytype,
     work: *u64,
 ) ![]const role {
-    const s = definition.service;
-    const clone = definition.clone;
-    const roots = [_]role{
-        .{ .function = s.loop, .role = .published_service, .ordinals = &.{1} },
-        .{ .function = s.dispatch, .role = .committed_service, .ordinals = &.{1} },
-        .{ .function = s.publish, .role = .committed_service, .ordinals = &.{1} },
-        .{ .function = s.publish, .role = .committed_service, .ordinals = &.{2} },
-        .{ .function = s.commit, .role = .committed_machine, .ordinals = &.{0} },
-        .{ .function = s.control_commit, .role = .committed_machine, .ordinals = &.{0} },
-        .{ .function = s.cut, .role = .committed_machine, .ordinals = &.{0} },
-        .{ .function = clone.run, .role = .clone_context, .ordinals = &.{ 0, 1 } },
-        .{ .function = clone.rebase, .role = .clone_rebase, .ordinals = &.{ 0, 1, 2, 3 } },
-    };
     var result: std.ArrayList(role) = .empty;
-    try spend(work, roots.len);
-    for (roots) |root| {
+    try spend(work, root_roles.len);
+    for (root_roles) |root| {
         try spend(work, functions.len);
         try result.append(a, root);
         for (functions) |f| if (f.before == root.function) {

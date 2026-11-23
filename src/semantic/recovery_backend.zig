@@ -13,11 +13,35 @@ const profile = runtime.profile;
 const service = runtime.service;
 const opt = source.recovery_optimization;
 const Allocator = std.mem.Allocator;
+const Arena = std.heap.ArenaAllocator;
 pub const Derivation = spec.Derivation;
 pub const policy = spec.policy;
 pub const context = spec.context;
 pub const limits = spec.limits;
 pub const Evidence = records.Evidence;
+
+pub const Inputs = struct {
+    arena: Arena,
+    original: source.Module,
+    roots: roles.Roots,
+
+    pub fn init(a: Allocator, definition: *const legacy.SourceDefinition) !Inputs {
+        var physical = limits.lowering_bytes;
+        var cap: data.AllocationBudget =
+            .{ .parent = a, .remaining = &physical, .accounting = .live };
+        var arena = Arena.init(cap.allocator());
+        errdefer arena.deinit();
+        const original = records.module(arena.allocator(), definition.module()) catch |err| {
+            if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
+            return err;
+        };
+        const roots = try roles.roots(a, arena.allocator(), definition);
+        arena.child_allocator = a;
+        return .{ .arena = arena, .original = original, .roots = roots };
+    }
+};
+
+pub const Compiled = struct { bytes: []u8, outcome: opt.Outcome };
 
 const Selection = struct {
     module: source.Module,
@@ -27,15 +51,14 @@ const Selection = struct {
 
     fn init(
         a: Allocator,
-        definition: *const legacy.SourceDefinition,
-        original: source.Module,
+        inputs: *const Inputs,
         derivation: ?Derivation,
         work: *u64,
     ) !Selection {
         const functions = if (derivation) |d| d.functions else &.{};
-        const selected = try roles.selected(a, definition, functions, work);
+        const selected = try roles.selected(a, inputs.roots, functions, work);
         return .{
-            .module = if (derivation) |d| d.residual else original,
+            .module = if (derivation) |d| d.residual else inputs.original,
             .functions = functions,
             .roles = selected,
             .options = .{
@@ -84,44 +107,31 @@ const Interfaces = struct {
     templates: []const u64,
 };
 
-pub fn compile(a: Allocator, options: legacy.Options) ![]u8 {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const mem = arena.allocator();
+pub fn compile(a: Allocator, options: legacy.Options) !Compiled {
     var definition = try legacy.SourceDefinition.init(a, options.guest != null, options.hooks);
     defer definition.deinit();
-    const original = try records.module(mem, definition.module());
-    const bundle = try emit(a, options, &definition, original);
-    errdefer a.free(bundle);
-    var admitted = try art.Admitted.init(a, bundle, art.digest(bundle));
+    var inputs = try Inputs.init(a, &definition);
+    defer inputs.arena.deinit();
+    const result = try emit(a, options, &definition, &inputs);
+    errdefer a.free(result.bytes);
+    var admitted = try art.Admitted.init(a, result.bytes, art.digest(result.bytes));
     defer admitted.deinit();
-    var work = limits.source_work;
-    const content = admitted.content.value;
-    var envelope = try openEvidence(a, content, &work);
-    defer envelope.deinit();
-    try spec.validate(
-        a,
-        &definition,
-        original,
-        envelope.value.derivation,
-        content,
-        limits.lowering_bytes,
-        &work,
-    );
-    return bundle;
+    try preflight(&admitted);
+    try validatePrepared(a, &admitted, &definition, &inputs);
+    return result;
 }
 
 fn emit(
     a: Allocator,
     options: legacy.Options,
     definition: *const legacy.SourceDefinition,
-    original: source.Module,
-) ![]u8 {
+    inputs: *const Inputs,
+) !Compiled {
     var physical = limits.lowering_bytes;
     var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
     var arena = std.heap.ArenaAllocator.init(cap.allocator());
     defer arena.deinit();
-    return emitDefined(a, arena.allocator(), options, definition, original) catch |err| {
+    return emitDefined(a, arena.allocator(), options, definition, inputs) catch |err| {
         if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
         return err;
     };
@@ -132,18 +142,27 @@ fn emitDefined(
     mem: Allocator,
     options: legacy.Options,
     definition: *const legacy.SourceDefinition,
-    original: source.Module,
-) ![]u8 {
-    var out = try spec.select(a, definition, original, options);
+    inputs: *const Inputs,
+) !Compiled {
+    var out = try spec.select(a, definition, inputs.original, options);
     defer if (out) |*o| o.deinit();
     const derivation = if (out) |*o| Derivation.from(o) else null;
     var work = limits.source_work;
-    const selected = try Selection.init(mem, definition, original, derivation, &work);
+    const selected = try Selection.init(mem, inputs, derivation, &work);
     var result = try source.lowerRecoveryOptimized(a, selected.module, selected.options);
     defer result.deinit();
-    const image = try records.image(a, a, result.program);
+    const image = try records.limitedImage(a, result.program, limits.lowering_bytes, &work);
     defer a.free(image);
-    const target = try old.program_image.Admitted.decode(a, image);
+    var target_bytes = limits.lowering_bytes;
+    var target_storage: data.AllocationBudget =
+        .{ .parent = a, .remaining = &target_bytes, .accounting = .live };
+    const target = old.program_image.Admitted.decode(
+        target_storage.allocator(),
+        image,
+    ) catch |err| {
+        if (err == error.OutOfMemory and target_storage.exhausted) return error.Capacity;
+        return err;
+    };
     defer target.deinit();
     const entries = try selected.interfaces(
         mem,
@@ -152,8 +171,8 @@ fn emitDefined(
         result.program.functions.len,
         &work,
     );
-    const helpers = try buildHelpers(a, mem, original, definition.helpers);
-    return art.encode(a, .{
+    const helpers = try buildHelpers(a, mem, inputs.original, definition.helpers);
+    const bytes = try art.encode(a, .{
         .manifest = try manifest(mem, target),
         .image = image,
         .guest = if (options.guest) |g| g.identity() else null,
@@ -169,10 +188,11 @@ fn emitDefined(
         .branch_returns = entries.branches,
         .template_entries = entries.templates,
         .evidence = try records.encodeEvidence(a, mem, .{
-            .recovery = try records.encode(mem, result.evidence),
+            .recovery = try records.transportBytes(mem, result.evidence, limits, &work),
             .derivation = derivation,
         }, limits),
     });
+    return .{ .bytes = bytes, .outcome = result.outcome };
 }
 
 fn manifest(a: Allocator, admitted: *const old.program_image.Admitted) !art.Manifest {
@@ -230,17 +250,42 @@ fn buildHelpers(
 }
 
 pub fn validate(a: Allocator, admitted: *const art.Admitted) !void {
-    try checkManifest(admitted);
+    try preflight(admitted);
     const bundle = admitted.content.value;
     var definition = try legacy.SourceDefinition.init(a, bundle.guest != null, bundle.hooks);
     defer definition.deinit();
+    var inputs = try Inputs.init(a, &definition);
+    defer inputs.arena.deinit();
+    try validatePrepared(a, admitted, &definition, &inputs);
+}
+
+fn validatePrepared(
+    a: Allocator,
+    admitted: *const art.Admitted,
+    definition: *const legacy.SourceDefinition,
+    inputs: *const Inputs,
+) !void {
     var remaining = limits.source_work;
-    var validated = try validateDefined(a, &remaining, admitted, &definition);
+    var validated = try validateDefined(a, &remaining, admitted, definition, inputs);
     defer validated.proof.deinit();
     defer a.free(validated.parameters);
 }
 
-pub fn checkManifest(admitted: *const art.Admitted) !void {
+pub fn independentCopy(a: Allocator, owned: *const art.Admitted) !art.Admitted {
+    try preflight(owned);
+    const core = owned.core orelse return error.InvalidState;
+    var physical = core.encoded_length;
+    var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
+    const bytes = owned.encode(cap.allocator()) catch |err| {
+        if (err == error.OutOfMemory and cap.exhausted) return error.ArtifactIdentityMismatch;
+        return err;
+    };
+    defer cap.allocator().free(bytes);
+    if (bytes.len != core.encoded_length) return error.ArtifactIdentityMismatch;
+    return art.Admitted.init(a, bytes, owned.identity);
+}
+
+pub fn preflight(admitted: *const art.Admitted) !void {
     const bundle = admitted.content.value;
     const m = bundle.manifest;
     if (bundle.lineage != null or !std.mem.eql(u8, m.contract, art.identity) or
@@ -249,6 +294,12 @@ pub fn checkManifest(admitted: *const art.Admitted) !void {
         !std.mem.eql(u8, m.compiler.horos_package, @import("recovery_options").horos_package) or
         !std.mem.eql(u8, m.compiler.zig, @import("builtin").zig_version_string))
         return error.UnsupportedSource;
+    if (bundle.image.len > limits.lowering_bytes) return error.Capacity;
+    if ((bundle.guest != null) != (bundle.specialization != null)) return error.InvalidRealization;
+    _ = try records.evidenceParts(bundle.evidence, bundle.guest != null, limits);
+    var work = limits.source_work;
+    var sizing: data.wire.Writer = .{ .remaining = &work };
+    try data.record.write(art.Bundle, bundle, &sizing);
 }
 
 pub const Validated = struct {
@@ -261,13 +312,13 @@ pub fn validateDefined(
     remaining: *u64,
     admitted: *const art.Admitted,
     definition: *const legacy.SourceDefinition,
+    inputs: *const Inputs,
 ) !Validated {
-    if (admitted.content.value.image.len > limits.lowering_bytes) return error.Capacity;
     var physical = limits.lowering_bytes;
     var cap: data.AllocationBudget = .{ .parent = a, .remaining = &physical, .accounting = .live };
     var arena = std.heap.ArenaAllocator.init(cap.allocator());
     defer arena.deinit();
-    return checkDefined(a, arena.allocator(), remaining, admitted, definition) catch |err| {
+    return checkDefined(a, arena.allocator(), remaining, admitted, definition, inputs) catch |err| {
         if (err == error.OutOfMemory and cap.exhausted) return error.Capacity;
         return err;
     };
@@ -279,50 +330,41 @@ fn checkDefined(
     remaining: *u64,
     admitted: *const art.Admitted,
     definition: *const legacy.SourceDefinition,
+    inputs: *const Inputs,
 ) !Validated {
     const bundle = admitted.content.value;
-    var envelope = try openEvidence(a, bundle, remaining);
+    var envelope = try records.decodeEvidence(
+        a,
+        bundle.evidence,
+        bundle.guest != null,
+        limits,
+        remaining,
+    );
     defer envelope.deinit();
     const evidence = envelope.value;
     var proof = try opt.decode(a, evidence.recovery, limits);
     errdefer proof.deinit();
-    const original = try records.module(scratch, definition.module());
     try spec.validate(
         a,
         definition,
-        original,
+        inputs.original,
         evidence.derivation,
         bundle,
         limits.lowering_bytes,
         remaining,
     );
-    const selected = try Selection.init(
-        scratch,
-        definition,
-        original,
-        evidence.derivation,
-        remaining,
-    );
+    const selected = try Selection.init(scratch, inputs, evidence.derivation, remaining);
     const parameters = try validateSelected(
         a,
         scratch,
         admitted,
         definition,
-        original,
+        inputs.original,
         selected,
         proof.evidence,
         remaining,
     );
     return .{ .parameters = parameters, .proof = proof };
-}
-
-fn openEvidence(
-    a: Allocator,
-    bundle: art.Bundle,
-    remaining: *u64,
-) !records.DecodedEvidence {
-    if ((bundle.guest != null) != (bundle.specialization != null)) return error.InvalidRealization;
-    return records.decodeEvidence(a, bundle.evidence, bundle.guest != null, limits, remaining);
 }
 
 fn validateSelected(
