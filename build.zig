@@ -278,7 +278,11 @@ fn recoverySource(
     supplied: ?std.Build.LazyPath,
 ) std.Build.LazyPath {
     const package = options.package.horos_recovery;
-    if (supplied) |source| return authenticatedSource(b, source, package);
+    if (supplied) |source| {
+        if (source == .cwd_relative and !std.Io.Dir.path.isAbsolute(source.cwd_relative))
+            @panic("Horos recovery source path must be absolute");
+        return authenticatedSource(b, source, package);
+    }
     const original = std.Build.package_map.get(options.package.dependencies.horos.hash).?;
     if (original.available) {
         const store = std.fs.path.dirname(original.build_root) orelse ".";

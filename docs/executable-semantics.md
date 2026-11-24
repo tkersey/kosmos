@@ -246,10 +246,13 @@ the artifact. Exhausting the producer budget returns `Capacity`.
 The producer's work is bounded too. Horos `specializeWithWork` charges source
 admission, partial evaluation, the specialization identity and producer-side
 validation to one caller allowance, including the record comparisons in the
-derivation envelope and in each proof. Kosmos grants one source-work limit for
-each of the three mandatory passes, admission, derivation and self-validation.
-Exhausting the allowance returns `RelationLimit` or `SpecializationLimit`
-without an output.
+derivation envelope and in each proof. Kosmos sets that allowance to three
+source-work limits, one for each mandatory pass: admission, derivation and
+self-validation. The passes draw on the shared allowance in order, so no single
+pass is capped at one limit. Exhausting it returns `RelationLimit` or
+`SpecializationLimit` without an output. Kosmos then validates the result
+under its own source-work limit, and compilation fails if that check exceeds
+the limit.
 
 The selected source is ordinary editable Horos data. Horos
 `source.slice.extract` admits the complete module, extracts a selected

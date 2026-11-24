@@ -117,6 +117,7 @@ const Coverage = struct {
     walk: bool = false,
     rebase: bool = false,
     cuts: u64 = 0,
+    replaced: u64 = 0,
 };
 
 const Run = struct {
@@ -199,15 +200,15 @@ const Run = struct {
                 try std.testing.expectEqual(site.position + 1, frame.position);
                 self.awaiting = null;
                 coverage.after = true;
+                coverage.replaced += 1;
                 restore = true;
-            } else if (!coverage.before) {
-                for (self.sites) |site| {
-                    if (control.block != site.block or frame.position != site.position) continue;
-                    self.awaiting = site;
-                    coverage.before = true;
-                    restore = true;
-                    break;
-                }
+            }
+            for (self.sites) |site| {
+                if (control.block != site.block or frame.position != site.position) continue;
+                self.awaiting = site;
+                coverage.before = true;
+                restore = true;
+                break;
             }
             if (operation == .advance and !coverage.publish and
                 try self.publishing(frame))
@@ -447,9 +448,10 @@ fn expectBranchPaths(
     }
     try std.testing.expect(before.init and before.publish and before.parked and before.finish);
     try std.testing.expect(after.init and after.publish and after.parked and after.finish);
+    try std.testing.expect(after.before and after.after and !before.before);
     try std.testing.expect(before.cuts > 0 and after.cuts > 0);
-    std.debug.print("branch suspensions structural={d} optimized={d}\n", .{
-        before.cuts, after.cuts,
+    std.debug.print("branch suspensions structural={d} optimized={d} replaced={d}\n", .{
+        before.cuts, after.cuts, after.replaced,
     });
     for ([_]u8{ 0, 1 }) |condition| {
         const input = [1]u8{condition} ++ scalarBytes(2) ++ scalarBytes(5);
@@ -477,8 +479,8 @@ fn expectClone(
     try execute(optimized, legacy, fixture, sites, &after);
     try std.testing.expect(before.walk and before.rebase);
     try std.testing.expect(after.walk and after.rebase and after.before and after.after);
-    std.debug.print("multi-shot suspensions structural={d} optimized={d}\n", .{
-        before.cuts, after.cuts,
+    std.debug.print("multi-shot suspensions structural={d} optimized={d} replaced={d}\n", .{
+        before.cuts, after.cuts, after.replaced,
     });
 }
 
