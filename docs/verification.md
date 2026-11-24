@@ -228,8 +228,9 @@ node test/current/browser-tools/node_modules/playwright-core/cli.js install chro
 zig build check -Doptimize=safe
 ```
 
-CI installs both browsers' Linux system dependencies with Playwright's
-`--with-deps` option. Python/Wasmtime is not part of the current checks.
+CI runs the same commands on the hosted Ubuntu image, whose preinstalled
+libraries satisfy both browsers, so the lane needs no package mirror.
+Python/Wasmtime is not part of the current checks.
 
 ## Request-checked diagnostic replay
 
