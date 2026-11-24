@@ -121,10 +121,10 @@ pub fn anchors(
         if (r.function >= heads.len) return error.InvalidRecovery;
         try spend(work, r.ordinals.len);
         const vars = module.functions[@intCast(r.function)].parameters;
+        for (r.ordinals) |ordinal| if (ordinal >= vars.len) return error.InvalidRecovery;
         const fields = try a.alloc(artifact.Parameter, r.ordinals.len);
         var final: ?Id = null;
         for (r.ordinals, fields, 0..) |ordinal, *field, index| {
-            if (ordinal >= vars.len) return error.InvalidRecovery;
             var cursor = heads[@intCast(r.function)];
             while (cursor) |i| : (cursor = next[i]) {
                 try spend(work, 1);

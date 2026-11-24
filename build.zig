@@ -321,13 +321,15 @@ fn authenticatedSource(
         const fetch = b.addSystemCommand(&.{
             "sh",
             "-c",
-            "if test -f \"p/$1.tar.gz\"; then printf '%s\\n' \"$1\"; " ++
+            "if test -f \"p/$1.tar.gz\"; then " ++
+                "ZIG_GLOBAL_CACHE_DIR=\"$4\" exec \"$2\" fetch \"$PWD/p/$1.tar.gz\"; " ++
                 "else exec \"$2\" fetch \"$3\"; fi",
             "fetch-pinned",
             package.hash,
         });
         fetch.addFileArg2(.zig_exe, .{ .make_absolute = true });
         fetch.addArg(package.url);
+        _ = fetch.addOutputDirectoryArg2("verified", .{ .make_absolute = true });
         break :pinned fetch;
     };
     admission.setCwd(b.graph.path(.global_cache, ""));
