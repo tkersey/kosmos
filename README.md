@@ -92,6 +92,43 @@ Native consumers use the public `kosmos` module and the package selected by
 captured by Zig and admitted against the selected package hash; the native build
 uses `tar` to unpack that authenticated snapshot for compilation. No interpreter,
 JS/WASM archive or script-generated metadata is a native prerequisite.
+The ordinary `kosmos` module, `check-storage`, and `build-runtime` require only
+the original Horos package. Add the public module to the application's root
+module in the consuming build.
+
+```zig
+app.root_module.addImport("kosmos", dependency.module("kosmos"));
+```
+
+To include the checked recovery compiler, select its sibling under the same
+local import name.
+
+```zig
+app.root_module.addImport("kosmos", dependency.module("kosmos_recovery"));
+```
+
+Both modules share the same public session and artifact types, so an application
+can use the checked compiler with libraries that import ordinary `kosmos`.
+The recovery module authenticates the `horos_recovery` pin in `build.zig.zon`.
+For an offline checked build, run `zig build prefetch-recovery -p /path/to/packages`
+from the Kosmos source directory while online. This populates the directory with
+both authenticated Horos packages for `zig build --system /path/to/packages`.
+Zig's `--fetch=all` covers ordinary manifest dependencies. The optional
+recovery compiler has its own pin. After the first fetch, builds re-authenticate
+the copy in Zig's global package cache against that hash without network access.
+If `-Dhoros-source` supplies the ordinary compiler outside that directory, you
+can supply the checked compiler with `-Dhoros-recovery-source=/absolute/source`.
+The compiler defaults to ordinary lowering and its original package identity.
+Set `scalar_field_reuse` to select checked lowering for one compilation. The
+checked compiler records its authenticated recovery package identity. An explicit
+`horos_package` value supplies the ordinary compiler label on the legacy path.
+
+```zig
+const bytes = try kosmos.RuntimeCompiler.compile(a, .{
+    .scalar_field_reuse = true,
+});
+defer a.free(bytes);
+```
 
 `check-native` and `check-storage` use shared native build roots. `check-source`
 compares 44 source examples with the independent higher-order oracle and actual

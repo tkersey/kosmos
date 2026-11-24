@@ -1270,7 +1270,7 @@ fn checkRestoredOutput(restored: *@import("session.zig").Resident, expected: dri
     } else return error.PumpBoundExhausted;
 }
 
-fn rawCloneGuest() ![]u8 {
+pub fn rawCloneGuest() ![]u8 {
     var b = source.Builder.init(a);
     defer b.deinit();
     const e = try @import("author.zig").Author.init(&b);

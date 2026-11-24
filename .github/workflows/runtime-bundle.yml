@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, native-driver, specialization, source, source-second, portable, browser, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, recovery-specialization, publication, source, source-second, portable, browser, consumer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -64,10 +64,10 @@ jobs:
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-driver' && 'native' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-
-            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || matrix.lane }}-
+            kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane == 'browser' && 'portable' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ matrix.lane }}-
             kosmos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -80,7 +80,7 @@ jobs:
           fi
           mkdir -p .zig-cache/tmp
       - name: Record native compiler and restored target identities
-        if: matrix.lane == 'native' || matrix.lane == 'native-driver' || matrix.lane == 'source'
+        if: startsWith(matrix.lane, 'native') || matrix.lane == 'source'
         run: |
           builtin_target() {
             awk '
@@ -112,7 +112,7 @@ jobs:
             builtin_target < "$builtin_file"
           done
       - name: Compile native qualification and independently rebuild the core
-        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
+        if: startsWith(matrix.lane, 'native')
         run: |
           nproc
           free -m
@@ -123,18 +123,33 @@ jobs:
             /usr/bin/time -v zig build build-storage-check build-semantics-check \
               build-zig17-check --cache-dir .zig-cache/native-owners \
               -Doptimize=safe --summary all --verbose
-          else
-            /usr/bin/time -v zig build build-semantic-driver-check \
+          elif [ "${{ matrix.lane }}" = native-recovery ]; then
+            /usr/bin/time -v zig build build-semantic-recovery-driver \
               --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all --verbose
+          else
+            ZIG_LOCAL_PKG_DIR="$PWD/.zig-cache/native-driver-core/zig-pkg" \
+              ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache/native-driver-core" \
+              /usr/bin/time -v zig build semantic-artifact --prefix "$RUNNER_TEMP/driver-core" \
+              --cache-dir .zig-cache/native-driver-core \
+              -Doptimize=safe --summary all --verbose &
+            core_pid=$!
+            /usr/bin/time -v zig build build-semantic-driver-executable \
+              --cache-dir .zig-cache/native-driver \
+              -Doptimize=safe --summary all --verbose &
+            driver_pid=$!
+            status=0
+            wait "$core_pid" || status=1
+            wait "$driver_pid" || status=1
+            exit "$status"
           fi
       - name: Admit completed native compilation before execution
         id: native_cache_size
-        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
+        if: startsWith(matrix.lane, 'native')
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
           native_objects=.zig-cache-upload/native-owners/o
-          if [ "${{ matrix.lane }}" = native-driver ]; then
+          if [ "${{ matrix.lane }}" != native ]; then
             native_objects=.zig-cache-upload/native-driver/o
           fi
           test -d "${native_objects/.zig-cache-upload/.zig-cache}" || exit 0
@@ -151,7 +166,7 @@ jobs:
             rm -rf -- "$object"
             bytes=$((bytes - removed))
           done < <(
-            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o; do
+            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o .zig-cache-upload/native-driver-core/o; do
               test ! -d "$objects" || find "$objects" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0'
             done | sort -zn
           )
@@ -168,19 +183,32 @@ jobs:
           path: .zig-cache-upload
           key: kosmos-native-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Check native owners and independently rebuild the core
-        if: matrix.lane == 'native' || matrix.lane == 'native-driver'
+        if: startsWith(matrix.lane, 'native')
         run: |
           if [ "${{ matrix.lane }}" = native ]; then
             zig build check-storage check-semantics check-zig17 \
               --cache-dir .zig-cache/native-owners -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = native-recovery ]; then
+            zig build check-semantic-recovery-driver \
+              --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
           else
-            zig build check-semantic-driver \
+            zig build check-installed-semantic-driver --prefix "$RUNNER_TEMP/driver-core" \
               --cache-dir .zig-cache/native-driver -Doptimize=safe --summary all
           fi
-      - name: Check specialization and public receipt owners
+      - name: Check specialization
         if: matrix.lane == 'specialization'
         run: >-
-          zig build check-semantic-specialization check-publication
+          zig build check-ordinary-specialization
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check recovery specialization
+        if: matrix.lane == 'recovery-specialization'
+        run: >-
+          zig build check-recovery-specialization
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check public receipt owners
+        if: matrix.lane == 'publication'
+        run: >-
+          zig build check-publication
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check every selected current session fixture
         if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
@@ -208,13 +236,18 @@ jobs:
           zig build emit-native-input -Doptimize=safe -Dpackaged-runtime=true --summary all
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer"
+          mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer" "$scratch/system"
           git --no-replace-objects archive --format=tar HEAD > "$scratch/source.tar"
           tar -xf "$scratch/source.tar" -C "$scratch/source"
           package_hash=$(ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig fetch "$scratch/source")
           tar -xzf "$scratch/cache/p/$package_hash.tar.gz" --strip-components=1 -C "$scratch/kosmos"
           cp test/native_consumer/build.zig test/native_consumer/build.zig.zon test/native_consumer/main.zig "$scratch/consumer/"
-          zig build --build-file "$scratch/consumer/build.zig" -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
+          legacy_hash=$(awk -F'"' '/^[[:space:]]*\.horos = / { legacy=1 } legacy && /\.hash = / { print $2; exit }' build.zig.zon)
+          test -n "$legacy_hash"
+          cp -R "zig-pkg/$legacy_hash" "$scratch/system/$legacy_hash"
+          ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig build --build-file "$scratch/consumer/build.zig" \
+            --system "$scratch/system" --cache-dir "$PWD/.zig-cache/native-consumer" \
+            -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second'
         with:
@@ -260,7 +293,7 @@ jobs:
           compression-level: 0
       - name: Admit complete bounded compiler cache
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane != 'native' && matrix.lane != 'native-driver' }}
+        if: ${{ !cancelled() && !startsWith(matrix.lane, 'native') }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

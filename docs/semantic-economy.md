@@ -560,3 +560,110 @@ Raw JSONL outputs each contain 62 records; filenames and SHA-256:
 - `kosmos-terminator-new-loop-v2.jsonl`: `bc47cb9cb5a828c62e20b110045b108bef0d4ffbf82fd2fe06828e83c92a511b`
 - `kosmos-terminator-old-handlers-v2.jsonl`: `69385df26213a5a54ac377399d5754d12261566fb4000dc43638b398e418859f`
 - `kosmos-terminator-new-handlers-v2.jsonl`: `cb9fb5d77123b49ff3f6fd6fc653ad99b29368114381628c840b4f6ad1fe96dc`
+
+## Checked scalar field reuse
+
+Two runs on an Apple M2 Pro with Zig 0.17.1 in safe mode compared the structural
+compiler at Horos `1f53200` with the opt-in compiler at `fc884e6` on Kosmos
+`7820371`. Zig reported the compilation target CPU model as `apple_a15`.
+The nominated workload was `scalar_chain_large` with input 41. Each run alternated six
+structural/opt-in pairs per realization. The first process began with the
+structural policy and the second began with the opt-in policy. Each used that
+order for the initial timed compilation, retained-runtime preparation, timed
+execution and separate counter measurements. All 48 timed executions and eight
+separate instrumented executions returned 7,337. Each matched the native oracle’s
+outcome, canonical checkpoint and guest work of 256 and 129 transitions at the two
+cuts. Each diamond branch replaced one of two field evaluations with a slot read
+and finished in eight base transitions.
+
+| Per execution or artifact | Generic structural → opt-in | Specialized structural → opt-in |
+| --- | --- | --- |
+| Field evaluations | 82,947 → 81,195 | 87,360 for both |
+| Move slot reads | 0 → 1,752 | 0 for both |
+| Base transitions | 360,843 for both | 377,199 for both |
+| Peak session bytes | 1,900,525 for both | 1,845,722 for both |
+| Retained session bytes | 1,455,475 for both | 1,478,618 for both |
+| Image bytes | 97,067 → 96,994 | 3,518,839 for both |
+| Evidence bytes | 52,628 → 52,931 | 31,405,942 → 31,405,947 |
+| Complete artifact bytes | 276,698 → 276,932 | 35,052,051 → 35,052,056 |
+
+Horos reported `applied` for the generic evaluator. Its checked lowering
+proof carried 50 witnesses. It reported `budget` for specialized lowering and returned the
+byte-identical ordinary executable as a structural fallback, providing a timing
+control. Negative percentages indicate faster opt-in execution.
+
+| Paired observations | Run 1 median | Run 2 median | All individual pairs |
+| --- | ---: | ---: | ---: |
+| Generic execution | −0.24% | −0.02% | −1.12% to +0.87% |
+| Generic checkpoint-inclusive wall time | −0.30% | −0.03% | −1.00% to +1.03% |
+| Specialized execution | −0.39% | +0.10% | −1.35% to +2.22% |
+| Specialized checkpoint-inclusive wall time | −0.45% | +0.21% | −1.33% to +2.14% |
+
+For each pair, the percentage change is 100 × (opt-in time / structural time − 1).
+The run medians summarize six such changes. The last column below compares
+the two policies’ separate median execution times within a run. The first
+pair used each retained runtime for the first time. The five later pairs ran
+new sessions on those same runtimes.
+
+| Realization | Run | First pair | Median of the five later pairs | Change between policy medians, all six pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Generic | 1 | +0.07% | −0.54% | −0.23% |
+| Generic | 2 | +0.07% | −0.10% | +0.02% |
+| Specialized | 1 | −0.53% | −0.38% | −0.26% |
+| Specialized | 2 | −0.99% | +0.32% | +0.02% |
+
+Elapsed times used the ordinary allocator with statistics off. Separate instrumented sessions counted the same calls to advance, including
+the terminal observation exchange. The session allocation meter spans session
+start through the final checkpoint check. Retained bytes are sampled there,
+before session teardown. The meter excludes the prepared runtime and caller-owned
+buffers.
+
+Each row below contains 12 ordinary executions pooled across the two runs. Times
+are medians with the minimum and maximum in parentheses.
+
+| Realization and policy | Advance, ms | Checkpoint-inclusive wall time, ms |
+| --- | ---: | ---: |
+| Generic structural | 89.28 (85.32–91.81) | 91.84 (87.78–94.46) |
+| Generic opt-in | 89.26 (85.24–91.88) | 91.88 (87.63–94.50) |
+| Specialized structural | 98.09 (96.58–100.22) | 101.43 (100.00–103.82) |
+| Specialized opt-in | 98.79 (96.22–101.03) | 102.12 (99.60–104.73) |
+
+| Construction across two runs | Generic structural → opt-in | Specialized structural → opt-in |
+| --- | --- | --- |
+| Compile seconds | 0.286–0.305 → 0.592–0.628 | 6.397–6.935 → 8.133–8.952 |
+| Admission seconds | 0.016–0.017 → 0.016–0.017 | 0.262–0.291 → 0.263–0.293 |
+| Independent validation seconds | 0.206–0.222 → 0.273–0.294 | 3.520–3.889 → 2.981–3.289 |
+| Metered compile peak bytes | 849,867,734 → 49,675,098 | 10,149,649,259 → 1,075,510,110 |
+| Metered validation peak bytes | 465,653,726 → 41,520,756 | 4,271,034,052 → 789,366,560 |
+
+The timing ranges cover four ordinary-allocator builds per policy and realization.
+Each process built the two policies in both orders, releasing each timed artifact
+before starting the next. Admission began with the expected digest in hand.
+Separate builds of the same artifact identities measured peak live requested
+bytes during compilation and independent validation. The session and construction
+meters use `AllocationBudget`, which disables resize and remap. Growing a buffer
+can therefore count both its old and new allocation at once. Peak storage for
+the ordinary allocator was unmeasured.
+
+Scalar field reuse remains experimental and disabled by default. The generic evaluator saved
+1,752 field evaluations per execution. Opt-in execution was faster in
+6 of 12 generic pairs. The median within-pair change was −0.24% in the
+structural-first run and −0.02% in the opt-in-first run. Across the five later
+pairs the respective medians were −0.54% and −0.10%. The byte-identical
+specialized control ranged from −1.35% to +2.22%.
+The one-minute host load averages before, between and after the commands
+were 3.50, 4.48 and 7.07.
+
+Session peak and retained bytes were equal across policies within each
+realization. Both opt-in artifacts used fewer peak bytes during compilation
+and validation. Opt-in compilation took longer in both cases. Independent
+validation took longer for the generic artifact and less time for the
+specialized artifact. Relative to Kosmos `8909ce4`, the checked generic
+artifact's validation peak fell from 612,240,534 to 41,520,756 bytes.
+
+Reproduce the comparison in two separate processes on the same host.
+
+```sh
+zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large
+zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large -- --opt-in-first
+```

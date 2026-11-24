@@ -137,14 +137,14 @@ The source comparison overlaps the independent native child and WASM execution
 for each identical immutable command. It awaits both before the next observation,
 retaining every restore, transfer checkpoint, byte comparison and source assertion.
 
-CI runs session behavior, session ownership/failure, source regression, native
-owners, native semantic driver, specialization/publication, two source-agreement
-and portable groups independently; their union is
-exactly the aggregate `check` dependency set. The session partitions retain all
-86 named cases (54 behavior, 16 ownership/failure, 16 source regressions) and
-the anonymous import sentinel. Standalone test executables show each case and
-require the complete selected count; the ordinary `check-sessions` target still
-runs all 87 cases together. Source-agreement partitions select disjoint fixture
+CI distributes the aggregate `check` dependencies across session behavior,
+session ownership/failure, source regression, native owners, ordinary and checked
+drivers, ordinary and recovery specialization, publication, source agreement and
+portable qualification. The session partitions retain all 90 named cases
+(58 behavior, 16 ownership/failure and 16 source regressions) and the anonymous
+import sentinel. Standalone test executables show each case and require the
+complete selected count. The ordinary `check-sessions` target runs all 91 cases
+together. Source-agreement partitions select disjoint fixture
 sets while retaining every mode, instruction frontier, cancellation and comparison;
 together they execute all 70 fixtures and report their actual observation counts. The native semantic
 group rebuilds the source artifact, while specialization and publication use the
@@ -156,11 +156,17 @@ ABI fixture peer. Compiler caches may reuse content across dependency-lock chang
 Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
-The native owners and semantic-driver lanes compile on separate native runners
-before retaining their bounded compiler caches. The driver lane independently
-rebuilds the core. Each then executes its original check roots, so neither lane
-waits for the other's compilation or tests, and a later test timeout does not
-discard completed compilation.
+The native owners, ordinary driver and checked recovery driver each compile on
+a separate runner and retain their bounded compiler caches before execution.
+The ordinary driver uses the legacy compiler and compares the shipped artifact
+byte for byte with the independently regenerated core. The checked recovery
+driver uses the optional compiler and the authenticated packaged core to exercise
+both branch paths and restore interrupted phases. The local `check-semantic-driver`
+and `check-native` targets include both suites.
+The ordinary specialization lane compares the legacy compiler's transitions to the
+frozen native baseline. The recovery specialization lane checks compiler identity and
+source export with the optional compiler. Both belong to `check-semantic-specialization`
+and `check-native`. The ordinary specialization suite runs their shared runtime tests.
 The Zig installation uses a stable tool-cache path because dependency extraction
 includes `PATH` in its input identity. Neither cache restoration nor successful
 compilation substitutes for completed tests.

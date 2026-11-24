@@ -22,7 +22,12 @@ const Workload = enum {
     long_cleanup,
     retained_bytes,
 };
-pub const Step = struct { control: protocol.Control, checkpoint: []const u8, outcome: []const u8 };
+pub const Step = struct {
+    control: protocol.Control,
+    checkpoint: []const u8,
+    outcome: []const u8,
+    guest_work: u64,
+};
 pub const Costs = struct {
     start_ns: i96 = 0,
     execute_ns: i96 = 0,
@@ -83,19 +88,24 @@ fn image(a: std.mem.Allocator, kind: Workload) ![]u8 {
     _ = try compiled.encode(a, bytes);
     return bytes;
 }
+fn integerBytes(value: u64) [8]u8 {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    return bytes;
+}
 fn arguments(a: std.mem.Allocator, kind: Workload, sample: usize) ![]u8 {
     const seed: u64 = 41 + @as(u64, @intCast(sample)) * 19;
     return switch (kind) {
         .scalar, .scalar_chain, .scalar_chain_large, .higher_order => a.dupe(
             u8,
-            &std.mem.toBytes(seed),
+            &integerBytes(seed),
         ),
-        .dynamic_loop, .repeated_calls => a.dupe(u8, &(@as(
-            [16]u8,
-            std.mem.toBytes(@as(u64, 16 + sample * 16)) ++ std.mem.toBytes(seed),
-        ))),
-        .structured => a.dupe(u8, &(std.mem.toBytes(seed) ++ std.mem.toBytes(seed + 9))),
-        .long_cleanup => a.dupe(u8, &std.mem.toBytes(@as(u64, 8 + sample * 8))),
+        .dynamic_loop, .repeated_calls => a.dupe(
+            u8,
+            &(integerBytes(16 + sample * 16) ++ integerBytes(seed)),
+        ),
+        .structured => a.dupe(u8, &(integerBytes(seed) ++ integerBytes(seed + 9))),
+        .long_cleanup => a.dupe(u8, &integerBytes(8 + sample * 8)),
         .retained_bytes => blk: {
             const length = @as(usize, 1024) << @intCast(sample * 3);
             var size: data.wire.Writer = .{};
@@ -116,7 +126,7 @@ fn reply(a: std.mem.Allocator, request_bytes: []const u8, sample: usize) ![]u8 {
         u8,
         request.value.binding.semantic_identity,
         "local/producer",
-    )) &std.mem.toBytes(@as(u64, 41 + sample * 19)) else &.{};
+    )) &integerBytes(41 + sample * 19) else &.{};
     return protocol.encodeOwned(protocol.Result, a, .{
         .request_identity = request.value.request_identity,
         .value = body,
@@ -309,10 +319,32 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
-    var arguments_arena = std.heap.ArenaAllocator.init(a);
-    defer arguments_arena.deinit();
-    const args = try init.minimal.args.toSlice(arguments_arena.allocator());
-    const filter = if (args.len > 1) args[1] else null;
+    var args = try init.minimal.args.iterateAllocator(a);
+    defer args.deinit();
+    _ = args.skip();
+    const argument = args.next();
+    if (args.skip()) return error.InvalidBenchmarkArgument;
+    if (@hasDecl(@import("recovery_options"), "horos_package")) {
+        const opt_in_first = std.mem.eql(u8, argument orelse "", "--opt-in-first");
+        if (argument != null and !opt_in_first) return error.InvalidBenchmarkArgument;
+        const guest = try image(a, .scalar_chain_large);
+        defer a.free(guest);
+        const input = try arguments(a, .scalar_chain_large, 0);
+        defer a.free(input);
+        return @import("semantic_benchmark_recovery.zig").measure(
+            a,
+            init.io,
+            &output.interface,
+            guest,
+            input,
+            opt_in_first,
+        );
+    }
+    const diagnostics = std.mem.eql(u8, argument orelse "", "diagnostics");
+    const filter = if (argument == null or diagnostics)
+        null
+    else
+        std.meta.stringToEnum(Workload, argument.?) orelse return error.InvalidBenchmarkArgument;
     var generic_meter = meter(a);
     const start = now(init.io);
     var generic = try kosmos.RuntimeArtifact.init(
@@ -332,7 +364,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer instrumented_meter.allocator().free(instrumented.bytes);
     defer instrumented.artifact.deinit();
-    if (filter != null and std.mem.eql(u8, filter.?, "diagnostics")) {
+    if (diagnostics) {
         try @import("semantic_benchmark_diagnostics.zig").measure(.{
             .a = a,
             .io = init.io,
@@ -351,7 +383,7 @@ fn measureSelected(
     output: *std.Io.Writer,
     generic: *kosmos.RuntimeArtifact,
     instrumented: *kosmos.RuntimeArtifact,
-    filter: ?[]const u8,
+    filter: ?Workload,
 ) !void {
     var bootstrap_prepared = try native.Prepared.init(a, generic.content.value.image);
     defer bootstrap_prepared.deinit();
@@ -368,8 +400,7 @@ fn measureSelected(
         .proposal = &proposed.value,
     };
     for (std.meta.tags(Workload)) |kind| {
-        if (filter == null or std.mem.eql(u8, filter.?, @tagName(kind)))
-            try measureWorkload(context, kind);
+        if (filter == null or filter.? == kind) try measureWorkload(context, kind);
     }
 }
 
@@ -851,9 +882,13 @@ fn runCut(
         if (index == trace.items.len) return error.ExtraGuestCut;
         control.* = trace.items[index].control;
     }
+    const before = session.transitions;
     start = now(io);
     _ = try runtime.invocation.advance(session, control.*, 256);
     costs.execute_ns += elapsed(io, start);
+    const guest_work = session.transitions -% before;
+    if (!recording and guest_work != trace.items[index].guest_work)
+        return error.GuestWorkChanged;
     start = now(io);
     var outcome = try runtime.invocation.finish(a, session, false);
     defer outcome.deinit();
@@ -870,7 +905,11 @@ fn runCut(
         } else if (prepared.runtime.content.value.hooks.control or
             prepared.runtime.content.value.hooks.storage) return error.MissingInstrumentation;
     }
-    try measureCheckpoint(runtime, prepared, session, context, costs, index, control, encoded);
+    try measureCheckpoint(runtime, prepared, session, context, costs, index, .{
+        .control = control.*,
+        .outcome = encoded,
+        .guest_work = guest_work,
+    });
     costs.cuts += 1;
     switch (outcome.record) {
         .progressed => control.* = .none,
@@ -896,8 +935,7 @@ fn measureCheckpoint(
     context: RunContext,
     costs: *Costs,
     index: usize,
-    control: *protocol.Control,
-    encoded: []const u8,
+    cut: struct { control: protocol.Control, outcome: []const u8, guest_work: u64 },
 ) !void {
     const a = context.a;
     const io = context.io;
@@ -913,16 +951,17 @@ fn measureCheckpoint(
         const owned_control = try @import("interpreter_v2/store.zig").duplicate(
             protocol.Control,
             trace_allocator,
-            control.*,
+            cut.control,
         );
         try trace.append(trace_allocator, .{
             .control = owned_control,
             .checkpoint = try trace_allocator.dupe(u8, checkpoint),
-            .outcome = try trace_allocator.dupe(u8, encoded),
+            .outcome = try trace_allocator.dupe(u8, cut.outcome),
+            .guest_work = cut.guest_work,
         });
     } else if (!std.mem.eql(u8, checkpoint, trace.items[index].checkpoint) or !std.mem.eql(
         u8,
-        encoded,
+        cut.outcome,
         trace.items[index].outcome,
     )) return error.RealizationChanged;
     if (index == 0)
@@ -1028,6 +1067,7 @@ fn bootstrapCut(
     defer cut.deinit();
     costs.execute_ns += elapsed(io, start);
     if (cut.value != .cut) return error.InvalidServiceEvent;
+    if (cut.value.cut.guest_work != step.guest_work) return error.GuestWorkChanged;
     costs.guest_work += cut.value.cut.guest_work;
     start = now(io);
     try send(a, outer, .project);

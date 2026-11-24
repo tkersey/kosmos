@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     }
     const options = configureOptions(b);
     const dependencies = configureDependencies(b, options) orelse return;
+    configureRecoveryPrefetch(b, options, dependencies);
     const storage_checks = configureStorageChecks(b, options, dependencies);
     const host_modules = configureHostModules(b, options, dependencies);
     const artifact_images = configureArtifactImages(b, options, host_modules);
@@ -182,12 +183,35 @@ fn configureCapacities(b: *std.Build, profile: Profile) Capacities {
 
 const Dependencies = struct {
     source: std.Build.LazyPath,
+    recovery_source: std.Build.LazyPath,
     data: *std.Build.Module,
     host_data: *std.Build.Module,
+    public_runtime_sources: *std.Build.Module,
     public_kosmos: *std.Build.Module,
+    recovery_kosmos: *std.Build.Module,
 };
 
+fn configureRecoveryPrefetch(b: *std.Build, options: Options, deps: Dependencies) void {
+    const prefetch = b.step("prefetch-recovery", "Install both pinned Horos sources for --system");
+    inline for (.{
+        .{ deps.source, options.package.dependencies.horos.hash },
+        .{ deps.recovery_source, options.package.horos_recovery.hash },
+    }) |package| {
+        const install = b.addInstallDirectory(.{
+            .source_dir = package[0],
+            .install_dir = .prefix,
+            .install_subdir = package[1],
+        });
+        prefetch.dependOn(&install.step);
+    }
+}
+
 fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
+    const recovery_override = b.option(
+        std.Build.LazyPath,
+        "horos-recovery-source",
+        "Override the pinned recovery compiler source",
+    );
     const supplied_source = b.option(
         std.Build.LazyPath,
         "horos-source",
@@ -203,28 +227,7 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
     if (supplied_source == .cwd_relative and
         !std.Io.Dir.path.isAbsolute(supplied_source.cwd_relative))
         @panic("Horos source path must be absolute");
-    // Fetch captures the selected package without executing its build code.
-    // Every compiler/emitter consumes the authenticated cache snapshot, never
-    // the caller's mutable source directory after verification.
-    const admission = b.addRunFile(.zig_exe);
-    admission.setCwd(b.graph.path(.global_cache, ""));
-    admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
-    admission.addArg("fetch");
-    admission.addDirectoryArg2(supplied_source, .{ .make_absolute = true });
-    admission.expectStdOutEqual(options.package.dependencies.horos.hash ++ "\n");
-    admission.has_side_effects = true;
-    const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
-    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
-    // PATH still selects tar's decompressor; ambient archive options stay absent.
-    snapshot.clearEnvironment();
-    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
-    snapshot.addFileArg2(b.graph.path(
-        .global_cache,
-        "p/" ++ options.package.dependencies.horos.hash ++ ".tar.gz",
-    ), .{ .make_absolute = true });
-    snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
-    const source = snapshot.addOutputDirectoryArg2("horos", .{});
-    snapshot.step.dependOn(&admission.step);
+    const source = authenticatedSource(b, supplied_source, options.package.dependencies.horos);
     const data = b.createModule(.{
         .root_source_file = source.path(b, "src/data/root.zig"),
         .target = options.target,
@@ -235,19 +238,117 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .target = b.graph.host,
         .optimize = options.optimize,
     });
-    const public_kosmos = b.addModule("kosmos", .{
-        .root_source_file = b.path("src/root.zig"),
+    const runtime_sources = b.createModule(.{
+        .root_source_file = b.path("src/runtime_sources.zig"),
         .target = options.target,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
     });
+    const public_kosmos = b.addModule("kosmos", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = options.target,
+        .optimize = options.optimize,
+        .imports = &.{.{ .name = "runtime_sources.zig", .module = runtime_sources }},
+    });
+    const recovery_kosmos = b.addModule("kosmos_recovery", .{
+        .root_source_file = b.path("src/recovery_root.zig"),
+        .target = options.target,
+        .optimize = options.optimize,
+        .imports = &.{
+            .{ .name = "root.zig", .module = public_kosmos },
+            .{ .name = "../runtime_sources.zig", .module = runtime_sources },
+            .{ .name = "horos_data", .module = data },
+        },
+    });
 
     return .{
         .source = source,
+        .recovery_source = recoverySource(b, options, recovery_override),
         .data = data,
         .host_data = host_data,
+        .public_runtime_sources = runtime_sources,
         .public_kosmos = public_kosmos,
+        .recovery_kosmos = recovery_kosmos,
     };
+}
+
+fn recoverySource(
+    b: *std.Build,
+    options: Options,
+    supplied: ?std.Build.LazyPath,
+) std.Build.LazyPath {
+    const package = options.package.horos_recovery;
+    if (supplied) |source| {
+        if (source == .cwd_relative and !std.Io.Dir.path.isAbsolute(source.cwd_relative))
+            @panic("Horos recovery source path must be absolute");
+        return authenticatedSource(b, source, package);
+    }
+    const original = std.Build.package_map.get(options.package.dependencies.horos.hash).?;
+    if (original.available) {
+        const store = std.fs.path.dirname(original.build_root) orelse ".";
+        const path = b.pathJoin(&.{ store, package.hash });
+        const installed = b.graph.cwdRelativePath(path);
+        b.dependOnDirectoryMetadata(b.graph.cwdRelativePath(store));
+        if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
+            return authenticatedSource(b, installed, package);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return authenticatedSource(b, installed, package),
+        }
+    }
+    if (!b.graph.system_package_mode) return authenticatedSource(b, null, package);
+    const missing = b.addFail("Missing recovery compiler package " ++ package.hash ++
+        ". Install it beside the ordinary Horos package or supply -Dhoros-recovery-source.");
+    const unavailable = b.addWriteFiles();
+    unavailable.step.dependOn(&missing.step);
+    return unavailable.getDirectory();
+}
+
+fn authenticatedSource(
+    b: *std.Build,
+    supplied_source: ?std.Build.LazyPath,
+    comptime package: anytype,
+) std.Build.LazyPath {
+    // Fetch captures the selected package without executing its build code.
+    // Every compiler/emitter consumes the authenticated cache snapshot, never
+    // the caller's mutable source directory after verification.
+    const admission = if (supplied_source) |source| supplied: {
+        const fetch = b.addRunFile(.zig_exe);
+        fetch.addArg("fetch");
+        fetch.addDirectoryArg2(source, .{ .make_absolute = true });
+        break :supplied fetch;
+    } else pinned: {
+        const fetch = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "if test -f \"p/$1.tar.gz\"; then " ++
+                "ZIG_GLOBAL_CACHE_DIR=\"$4\" exec \"$2\" fetch \"$PWD/p/$1.tar.gz\"; " ++
+                "else exec \"$2\" fetch \"$3\"; fi",
+            "fetch-pinned",
+            package.hash,
+        });
+        fetch.addFileArg2(.zig_exe, .{ .make_absolute = true });
+        fetch.addArg(package.url);
+        _ = fetch.addOutputDirectoryArg2("verified", .{ .make_absolute = true });
+        break :pinned fetch;
+    };
+    admission.setCwd(b.graph.path(.global_cache, ""));
+    admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
+    admission.expectStdOutEqual(package.hash ++ "\n");
+    admission.has_side_effects = true;
+    const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });
+    // Hash only extraction inputs, not caller run IDs or unrelated credentials.
+    // PATH still selects tar's decompressor; ambient archive options stay absent.
+    snapshot.clearEnvironment();
+    if (b.graph.environ_map.get("PATH")) |path| snapshot.setEnvironmentVariable("PATH", path);
+    snapshot.addFileArg2(b.graph.path(
+        .global_cache,
+        "p/" ++ package.hash ++ ".tar.gz",
+    ), .{ .make_absolute = true });
+    snapshot.addArgs(&.{ "--strip-components=1", "--no-same-owner", "-C" });
+    const source = snapshot.addOutputDirectoryArg2("horos", .{});
+    snapshot.step.dependOn(&admission.step);
+    return source;
 }
 
 const StorageChecks = struct {
@@ -289,7 +390,14 @@ const HostModules = struct {
     host_mode: std.lang.Optimize,
     source_data: *std.Build.Module,
     horos: *std.Build.Module,
+    recovery: *std.Build.Module,
+    recovery_options: *std.Build.Step.Options,
     diagnostic_fixture: *std.Build.Module,
+
+    fn bindRecovery(self: HostModules, module: *std.Build.Module) void {
+        module.addImport("horos_recovery", self.recovery);
+        module.addOptions("recovery_options", self.recovery_options);
+    }
 };
 
 fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependencies) HostModules {
@@ -307,30 +415,32 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
                 .optimize = host_mode,
             },
         );
-    const horos = b.createModule(
-        .{
-            .root_source_file = dependencies.source.path(b, "src/root.zig"),
-            .target = b.graph.host,
-            .optimize = host_mode,
-            .imports = &.{.{
-                .name = "horos_data",
-                .module = source_data,
-            }},
-        },
+    const native = options.target.query.isNative() and host_mode == options.optimize;
+    const horos = horosModule(b, dependencies.source, b.graph.host, host_mode, source_data);
+    const public_horos = if (native) horos else horosModule(
+        b,
+        dependencies.source,
+        options.target,
+        options.optimize,
+        dependencies.data,
     );
-    dependencies.public_kosmos.addImport("horos", if (options.target.query.isNative() and
-        host_mode == options.optimize) horos else b.createModule(
-        .{
-            .root_source_file = dependencies.source.path(b, "src/root.zig"),
-            .target = options.target,
-            .optimize = options.optimize,
-            .imports = &.{.{
-                .name = "horos_data",
-                .module = dependencies.data,
-            }},
-        },
+    dependencies.public_runtime_sources.addImport("horos", public_horos);
+    dependencies.recovery_kosmos.addImport("horos", public_horos);
+    const recovery = horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
+    const recovery_options = b.addOptions();
+    recovery_options.addOption(
+        []const u8,
+        "horos_package",
+        options.package.horos_recovery.hash,
+    );
+    dependencies.recovery_kosmos.addOptions("recovery_options", recovery_options);
+    dependencies.recovery_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
+        b,
+        dependencies.recovery_source,
+        options.target,
+        options.optimize,
+        null,
     ));
-
     const diagnostic_fixture = b.createModule(.{
         .root_source_file = b.path("src/diagnostic_replay_fixture.zig"),
         .target = b.graph.host,
@@ -341,8 +451,30 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         .host_mode = host_mode,
         .source_data = source_data,
         .horos = horos,
+        .recovery = recovery,
+        .recovery_options = recovery_options,
         .diagnostic_fixture = diagnostic_fixture,
     };
+}
+
+fn horosModule(
+    b: *std.Build,
+    source: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    shared_data: ?*std.Build.Module,
+) *std.Build.Module {
+    const data = shared_data orelse b.createModule(.{
+        .root_source_file = source.path(b, "src/data/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    return b.createModule(.{
+        .root_source_file = source.path(b, "src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "horos_data", .module = data }},
+    });
 }
 
 const ArtifactImages = struct {
@@ -435,16 +567,15 @@ fn configureRuntimeModules(
         _ = files.addCopyFile(artifact_images.semantic_artifact, "semantic-core.kar");
         break :rebuilt files.getDirectory();
     };
-    dependencies.public_kosmos.addImport(
-        "packaged_runtime",
-        if (options.target.query.isNative()) packaged_runtime else b.createModule(
-            .{
-                .root_source_file = runtime_source,
-                .target = options.target,
-                .optimize = options.optimize,
-            },
-        ),
-    );
+    const public_runtime = if (options.target.query.isNative())
+        packaged_runtime
+    else
+        b.createModule(.{
+            .root_source_file = runtime_source,
+            .target = options.target,
+            .optimize = options.optimize,
+        });
+    dependencies.public_runtime_sources.addImport("packaged_runtime", public_runtime);
     b.step("semantic-artifact", "Compile and admit the reproducible portable evaluator bundle")
         .dependOn(&b.addInstallFile(artifact_images.semantic_artifact, "semantic-core.kar").step);
 
@@ -583,7 +714,13 @@ fn configureEconomy(
         },
     );
     const run_economy_bench = b.addRunArtifact(economy_bench);
-    if (options.economy_workload) |name| run_economy_bench.addArg(name);
+    if (std.mem.eql(u8, options.economy_workload orelse "", "recovery_scalar_chain_large")) {
+        host_modules.bindRecovery(economy_bench.root_module);
+    } else {
+        economy_bench.root_module.addOptions("recovery_options", b.addOptions());
+        if (options.economy_workload) |name| run_economy_bench.addArg(name);
+    }
+    run_economy_bench.addPassthruArgs();
     run_economy_bench.has_side_effects = true;
     b.step(
         "bench-semantics",
@@ -693,6 +830,13 @@ fn configureDriver(
     }) });
     const run_driver_tests = b.addRunArtifact(driver_tests);
     driver_tests.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
+    b.step("build-semantic-driver-executable", "Build the ordinary native driver test executable")
+        .dependOn(&driver_tests.step);
+    const installed_core_tests = b.addRunArtifact(driver_tests);
+    installed_core_tests.setCwd(b.graph.path(.install_prefix, ""));
+    installed_core_tests.has_side_effects = true;
+    b.step("check-installed-semantic-driver", "Run the ordinary driver tests on the installed core")
+        .dependOn(&installed_core_tests.step);
     const build_driver = b.step(
         "build-semantic-driver-check",
         "Build the native semantic driver test artifact and independently rebuilt core",
@@ -701,14 +845,73 @@ fn configureDriver(
     runtime_modules.rebuilt_directory.addStepDependencies(build_driver);
     run_driver_tests.setCwd(runtime_modules.rebuilt_directory);
     run_driver_tests.has_side_effects = true;
-    b.step(
+    const check_driver = b.step(
         "check-semantic-driver",
         "Check packaged artifact admission and guest/outer bridge framing",
-    ).dependOn(&run_driver_tests.step);
-    native_checks.dependOn(&run_driver_tests.step);
+    );
+    check_driver.dependOn(&run_driver_tests.step);
+    configureRecoveryDriver(b, host_modules, baseline, runtime_modules, build_driver, check_driver);
+    native_checks.dependOn(check_driver);
     configureDiagnosticExample(b, host_modules, retained_runtime);
 
     return .{ .native_checks = native_checks };
+}
+
+fn configureRecoveryDriver(
+    b: *std.Build,
+    host: HostModules,
+    baseline: Baseline,
+    runtime: RuntimeModules,
+    build_driver: *std.Build.Step,
+    check_driver: *std.Build.Step,
+) void {
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_semantic_recovery.zig"),
+            .target = b.graph.host,
+            .optimize = host.host_mode,
+            .imports = &.{
+                .{ .name = "horos", .module = host.horos },
+                .{ .name = "horos_data", .module = host.source_data },
+                .{ .name = "native_baseline", .module = baseline.native_baseline },
+                .{ .name = "packaged_runtime", .module = runtime.packaged_runtime },
+            },
+        }),
+        .filters = &.{ "src.semantic_recovery_tests.", "src.semantic.recovery_" },
+    });
+    host.bindRecovery(tests.root_module);
+    const ordinary = b.modules.get("kosmos").?;
+    const public_module = b.createModule(.{
+        .root_source_file = b.path("test/native_consumer/module_types.zig"),
+        .target = ordinary.resolved_target,
+        .optimize = ordinary.optimize,
+        .imports = &.{
+            .{ .name = "kosmos", .module = ordinary },
+            .{ .name = "kosmos_recovery", .module = b.modules.get("kosmos_recovery").? },
+        },
+    });
+    const native = ordinary.resolved_target.?.query.isNative();
+    const module_types = if (native)
+        b.addTest(.{ .name = "kosmos-public-compiler", .root_module = public_module })
+    else
+        b.addObject(.{ .name = "kosmos-module-types", .root_module = public_module });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    const checked_build = b.step(
+        "build-semantic-recovery-driver",
+        "Build the checked recovery driver tests",
+    );
+    checked_build.dependOn(&tests.step);
+    checked_build.dependOn(&module_types.step);
+    const check = b.step("check-semantic-recovery-driver", "Run the checked recovery driver tests");
+    check.dependOn(&run.step);
+    if (native) {
+        const consumer = b.addRunArtifact(module_types);
+        consumer.has_side_effects = true;
+        check.dependOn(&consumer.step);
+    } else check.dependOn(&module_types.step);
+    build_driver.dependOn(checked_build);
+    check_driver.dependOn(check);
 }
 
 fn configureDiagnosticExample(
@@ -766,6 +969,17 @@ fn configureSemantics(
     b.step("check-semantics", "Check portable semantics against the immutable historical evaluator")
         .dependOn(&run_semantic_tests.step);
     driver.native_checks.dependOn(&run_semantic_tests.step);
+    configureSpecialization(b, host_modules, baseline, driver);
+    driver.native_checks.dependOn(&sessions.stable_source.step);
+    driver.native_checks.dependOn(&storage_checks.run_native_tests.step);
+}
+
+fn configureSpecialization(
+    b: *std.Build,
+    host_modules: HostModules,
+    baseline: Baseline,
+    driver: Driver,
+) void {
     const specialization_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_specialization.zig"),
         .target = b.graph.host,
@@ -777,14 +991,32 @@ fn configureSemantics(
     }) });
     const run_specialization_tests = b.addRunArtifact(specialization_tests);
     run_specialization_tests.has_side_effects = true;
-    b.step(
+    const ordinary = b.step("check-ordinary-specialization", "Check ordinary specialization");
+    ordinary.dependOn(&run_specialization_tests.step);
+    const recovery_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_semantic_recovery_specialization.zig"),
+            .target = b.graph.host,
+            .optimize = host_modules.host_mode,
+            .imports = &.{
+                .{ .name = "horos_data", .module = host_modules.source_data },
+                .{ .name = "horos", .module = host_modules.horos },
+            },
+        }),
+        .filters = &.{ "src.semantic_recovery_", "src.semantic.recovery_" },
+    });
+    host_modules.bindRecovery(recovery_tests.root_module);
+    const run_recovery = b.addRunArtifact(recovery_tests);
+    run_recovery.has_side_effects = true;
+    const recovery = b.step("check-recovery-specialization", "Check recovery identity and export");
+    recovery.dependOn(&run_recovery.step);
+    const all = b.step(
         "check-semantic-specialization",
         "Check specialized transitions, scalar storage and retained reconstruction",
-    )
-        .dependOn(&run_specialization_tests.step);
-    driver.native_checks.dependOn(&run_specialization_tests.step);
-    driver.native_checks.dependOn(&sessions.stable_source.step);
-    driver.native_checks.dependOn(&storage_checks.run_native_tests.step);
+    );
+    all.dependOn(ordinary);
+    all.dependOn(recovery);
+    driver.native_checks.dependOn(all);
 }
 
 fn configurePublicTests(

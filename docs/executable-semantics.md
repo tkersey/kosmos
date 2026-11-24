@@ -205,20 +205,67 @@ that request; checking active/unknown delivery belongs to the enclosing owner.
 
 ## Semantic source and checked construction
 
-`RuntimeCompiler.exportSource` reconstructs and checks the actual selected
-artifact before returning its source bundle. The bundle distinguishes the
-approved root, selected module, guest scope, recovery interfaces and four helper
-images. It does not substitute the packaged generic module for a selected
-realization. Horos `source.slice.extract` admits the complete module, extracts
-the selected function's dependency closure and can require an effect-free slice.
-The resulting source is ordinary editable Horos data.
+`RuntimeCompiler.exportSource` reconstructs and checks an ordinary
+`kosmos.source-lower/2` root or a `kosmos.source-relation/1` descendant.
+`RuntimeCompiler.exportBuiltinSource` checks an ordinary root. Both return
+`RuntimeCompiler.ExportedSource`. Its source bundle retains the approved root,
+the selected module, guest scope, recovery interfaces and four helper images.
+An ordinary root's direct lowering proof is `value.evidence.recovery`. A
+descendant also carries its checked relation steps and final lowering proof in
+`value.construction`.
 
-`RuntimeCompiler.deriveRecord` packages a proposed module and finite relation
+For a `kosmos.source-lower/3` root, the optional `kosmos_recovery` build
+module exposes `RuntimeCompiler.exportRecoverySource`. Its
+`ExportedRecoverySource` holds the selected module and the complete transport
+proof in `value.evidence.recovery`. The rule identifies structural fallback or
+scalar field reuse. For scalar field reuse, the witnesses describe the
+field-to-move substitutions and the
+correspondence maps their result through final coalescing. Both source bundle
+types expose the checked specialization in `value.evidence.derivation` when
+one was used. The benchmark records Horos's lowering decision as
+`producer_outcome` alongside the rule from the checked proof.
+
+When validating a checked root, Kosmos checks its canonical bytes against the
+retained digest and binds the main image and four helper images to the prepared
+executables used by the driver. For a separately owned ancestor,
+`validateAgainst` also compares the two bundles and checks the ancestor's
+executables. Source export admits its own copy under the same 1 GiB limit so
+the exported artifact can outlive the input.
+
+The `work` field of `RuntimeCompiler.ValidationPolicy` bounds validation of
+`kosmos.source-relation/1` lineage. Source roots use the limits of their
+compiler policy. The checked module exposes its root limits as
+`RuntimeCompiler.recovery_limits`.
+
+The checked compiler gives Horos specialization a 1 GiB live allocation
+budget. Horos releases its construction scratch before validating the
+derivation and releases its checker scratch before admitting the residual.
+Kosmos independently validates the resulting specialization before returning
+the artifact. Exhausting the producer budget returns `Capacity`.
+
+The producer's work is bounded too. Horos `specializeWithWork` charges source
+admission, partial evaluation, the specialization identity and producer-side
+validation to one caller allowance, including the record comparisons in the
+derivation envelope and in each proof. Kosmos sets that allowance to three
+source-work limits, one for each mandatory pass: admission, derivation and
+self-validation. The passes draw on the shared allowance in order, so no single
+pass is capped at one limit. Exhausting it returns `RelationLimit` or
+`SpecializationLimit` without an output. Kosmos then validates the result
+under its own source-work limit, and compilation fails if that check exceeds
+the limit.
+
+The selected source is ordinary editable Horos data. Horos
+`source.slice.extract` admits the complete module, extracts a selected
+function's dependency closure and can require an effect-free slice.
+
+`RuntimeCompiler.derive` and `deriveRecord` accept an ordinary
+`kosmos.source-lower/2` root or a previously derived `kosmos.source-relation/1`
+descendant of that root. They package a proposed module and finite relation
 steps as an admitted candidate. `validateAgainst` separately checks it against
-the owner-selected ancestor. The new artifact and lowering contracts are
-`kosmos.semantic-artifact/3` and `kosmos.source-relation/1`; historical `/2` decoding
-and verification retain their original meaning. A candidate cannot supply its
-own approved root or convert successful compilation into validation.
+the owner-selected ancestor. Derived artifacts use the `kosmos.semantic-artifact/3`
+envelope and the `kosmos.source-relation/1` policy. Historical `/2` artifacts
+retain their original decoding and verification rules. The enclosing owner
+selects the approved root independently of the candidate.
 
 The Horos relation checker reconstructs scalar simplifications, closed pure
 inlining, private product coordinate permutations, catalog relocation and
