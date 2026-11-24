@@ -312,14 +312,26 @@ fn authenticatedSource(
     // Fetch captures the selected package without executing its build code.
     // Every compiler/emitter consumes the authenticated cache snapshot, never
     // the caller's mutable source directory after verification.
-    const admission = b.addRunFile(.zig_exe);
+    const admission = if (supplied_source) |source| supplied: {
+        const fetch = b.addRunFile(.zig_exe);
+        fetch.addArg("fetch");
+        fetch.addDirectoryArg2(source, .{ .make_absolute = true });
+        break :supplied fetch;
+    } else pinned: {
+        const fetch = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "if test -f \"p/$1.tar.gz\"; then printf '%s\\n' \"$1\"; " ++
+                "else exec \"$2\" fetch \"$3\"; fi",
+            "fetch-pinned",
+            package.hash,
+        });
+        fetch.addFileArg2(.zig_exe, .{ .make_absolute = true });
+        fetch.addArg(package.url);
+        break :pinned fetch;
+    };
     admission.setCwd(b.graph.path(.global_cache, ""));
     admission.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".");
-    admission.addArg("fetch");
-    if (supplied_source) |source|
-        admission.addDirectoryArg2(source, .{ .make_absolute = true })
-    else
-        admission.addArg(package.url);
     admission.expectStdOutEqual(package.hash ++ "\n");
     admission.has_side_effects = true;
     const snapshot = b.addSystemCommand(&.{ "tar", "-xzf" });

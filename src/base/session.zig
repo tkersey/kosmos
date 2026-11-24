@@ -198,14 +198,15 @@ pub const Session = struct {
             .traits = self.uses,
             .aggregate_storage = .structured,
         };
+        const outcome = try @import(
+            "../interpreter_v2/data_instruction.zig",
+        ).execute(self, op, layout[@intCast(op.destination)], reader, &values);
         if (self.store.statistics) |stats| switch (op.opcode) {
             .field => stats.base_field_evaluations +|= 1,
             .move => stats.base_move_slot_reads +|= 1,
             else => {},
         };
-        switch (try @import(
-            "../interpreter_v2/data_instruction.zig",
-        ).execute(self, op, layout[@intCast(op.destination)], reader, &values)) {
+        switch (outcome) {
             .failed => |failure| try self.finishTerminal(.{
                 .reason = .{ .failure = failure },
             }),

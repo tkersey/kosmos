@@ -114,7 +114,8 @@ For an offline checked build, run `zig build prefetch-recovery -p /path/to/packa
 from the Kosmos source directory while online. This populates the directory with
 both authenticated Horos packages for `zig build --system /path/to/packages`.
 Zig's `--fetch=all` covers ordinary manifest dependencies. The optional
-recovery compiler has its own pin.
+recovery compiler has its own pin. After the first fetch, builds reuse it from
+Zig's global package cache without network access.
 If `-Dhoros-source` supplies the ordinary compiler outside that directory, you
 can supply the checked compiler with `-Dhoros-recovery-source=/absolute/source`.
 The compiler defaults to ordinary lowering and its original package identity.
