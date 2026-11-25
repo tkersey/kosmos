@@ -426,7 +426,15 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
     );
     dependencies.public_runtime_sources.addImport("horos", public_horos);
     dependencies.recovery_kosmos.addImport("horos", public_horos);
-    const recovery = horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
+    const recovery_shares_horos = comptime std.mem.eql(
+        u8,
+        options.package.horos_recovery.hash,
+        options.package.dependencies.horos.hash,
+    );
+    const recovery = if (recovery_shares_horos)
+        horos
+    else
+        horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
     const recovery_options = b.addOptions();
     recovery_options.addOption(
         []const u8,
@@ -434,7 +442,9 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         options.package.horos_recovery.hash,
     );
     dependencies.recovery_kosmos.addOptions("recovery_options", recovery_options);
-    dependencies.recovery_kosmos.addImport("horos_recovery", if (native) recovery else horosModule(
+    dependencies.recovery_kosmos.addImport("horos_recovery", if (recovery_shares_horos)
+        public_horos
+    else if (native) recovery else horosModule(
         b,
         dependencies.recovery_source,
         options.target,
