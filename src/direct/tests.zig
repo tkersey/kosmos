@@ -231,6 +231,29 @@ fn driveToEnd(resident: *Resident) ![]u8 {
     return error.TooManyCuts;
 }
 
+const fuzz = @import("fuzz.zig");
+const pinned_seeds = 256;
+
+test "generated guest programs and controls agree in lockstep for pinned seeds" {
+    var totals: fuzz.Summary = .{};
+    for (1..pinned_seeds + 1) |seed| {
+        var program = try fuzz.generate(a, seed);
+        defer program.deinit(a);
+        var prepared = try core.Prepared.init(a, program.image);
+        defer prepared.deinit();
+        const summary = try fuzz.drive(a, &prepared, program.arguments, seed);
+        totals.cuts += summary.cuts;
+        totals.requests += summary.requests;
+        totals.rejections += summary.rejections;
+        totals.completed += summary.completed;
+        totals.failed += summary.failed;
+        totals.cancelled += summary.cancelled;
+    }
+    std.debug.print("fuzz totals {any}\n", .{totals});
+    try std.testing.expect(totals.requests != 0);
+    try std.testing.expect(totals.rejections != 0);
+}
+
 fn closeResident(resident: *Resident) void {
     resident.close() catch |err| std.debug.panic("{s}", .{@errorName(err)});
 }
