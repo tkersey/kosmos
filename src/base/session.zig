@@ -164,14 +164,14 @@ pub const Session = struct {
         self.collection_remaining -|= 1;
         if (self.terminal != null or self.status != .active or self.collection_remaining == 0) {
             try self.store.collectWith(self.roots, &self.frames);
-            // Amortize a complete graph/cache scan over its physical extent.
+            // Amortize a complete graph/cache scan over four times its live extent.
             // Quiescent boundaries still reclaim immediately. This private
             // cadence changes neither logical work nor checkpoint contents.
-            self.collection_remaining = @max(
-                256,
-                self.store.nodes.items.len +| self.store.blobs.items.len +|
-                    self.store.data_projections.count(),
-            );
+            const store = &self.store;
+            const live_extent = (store.nodes.items.len - store.free_nodes.items.len) +|
+                (store.blobs.items.len - store.free_blobs.items.len) +|
+                store.data_projections.count();
+            self.collection_remaining = @max(256, live_extent *| 4);
         }
     }
 
