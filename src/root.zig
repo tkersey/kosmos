@@ -1,6 +1,6 @@
 // Copyright (c) 2026 World contributors. MIT license.
 const runtime = @import("runtime_sources.zig");
-pub const package_version = "9.2.0";
+pub const package_version = "9.3.0";
 const current = runtime.session;
 pub const Session = current.Session;
 pub const Prepared = current.Prepared;
