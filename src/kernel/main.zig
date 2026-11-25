@@ -7,6 +7,11 @@ const runtime = @import("runtime");
 const Arena = runtime.Workspace;
 const Budget = runtime.AllocationBudget;
 const options = @import("kernel_options");
+const realization: runtime.Realization = if (@hasDecl(options, "realization"))
+    std.meta.stringToEnum(runtime.Realization, options.realization) orelse
+        @compileError("invalid kernel realization")
+else
+    runtime.default_realization;
 
 // The allowance is a logical limit, not an eager reservation. Larger workloads
 // obtain physical pages through Workspace.grow under the same allocation budget.
@@ -157,10 +162,11 @@ pub fn kosmos_invoke(identity: u64, length: u64) callconv(.c) u32 {
     if (!enter(identity)) return 2;
     defer busy = false;
     const bytes = takeInput(length) catch |err| return failed(err);
-    return publish(runtime.invocation.invokeBytesWith(
+    return publish(runtime.invocation.invokeBytesSelected(
         working_budget.allocator(),
         output_budget.allocator(),
         bytes,
+        realization,
     ) catch |err| return failed(err));
 }
 pub fn kosmos_prepare(identity: u64, length: u64) callconv(.c) u32 {
@@ -169,9 +175,10 @@ pub fn kosmos_prepare(identity: u64, length: u64) callconv(.c) u32 {
     if (prepared != null) return reject("PreparedAlreadyPresent");
     const bytes = takeInput(length) catch |err| return failed(err);
     const handle = issueHandle() catch |err| return failed(err);
-    prepared = runtime.Prepared.init(
+    prepared = runtime.Prepared.initRealization(
         working_budget.allocator(),
         bytes,
+        realization,
     ) catch |err| return failed(err);
     prepared_handle = handle;
     return 0;

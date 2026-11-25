@@ -21,13 +21,7 @@ pub const Pump = union(enum) {
     }
 };
 
-pub const ExpectedReply = struct {
-    identity: [32]u8,
-    effect: data.program.Id,
-    pub fn fromRequest(request: protocol.Request) ExpectedReply {
-        return .{ .identity = request.request_identity, .effect = request.binding.effect };
-    }
-};
+pub const ExpectedReply = @import("../interpreter_v2/runtime_types.zig").ExpectedReply;
 
 pub const Driver = struct {
     allocator: std.mem.Allocator,

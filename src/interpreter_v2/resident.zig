@@ -7,9 +7,10 @@ const heap = @import("store.zig");
 const Statistics = @import("runtime_types.zig").Statistics;
 const capsules = @import("../semantic/capsule.zig");
 const runtime = @import("../semantic/session.zig");
+const Execution = @import("execution.zig").Execution;
 const invocation = runtime.invocation;
 pub const Drive = struct { quantum: ?u64 = null, checkpoint: bool = false };
-pub const Error = runtime.Error || error{
+pub const Error = @import("execution.zig").Error || error{
     Busy,
     UnfinishedSession,
     PublicationUncertain,
@@ -145,7 +146,7 @@ pub const RuntimeObservation = struct {
 };
 
 const State = struct {
-    session: runtime.Session,
+    session: Execution,
     expected: ?runtime.ExpectedReply = null,
     identity: *Identity,
     generation: u64 = 0,
@@ -196,7 +197,7 @@ pub const Resident = struct {
         arguments: []const u8,
     ) Error!Resident {
         var result: Resident = .{};
-        var session = try runtime.Session.start(allocator, prepared, arguments);
+        var session = try Execution.start(allocator, prepared, arguments);
         errdefer session.deinit();
         const identity = try allocator.create(Identity);
         identity.* = .{ .allocator = allocator };
@@ -210,7 +211,7 @@ pub const Resident = struct {
         checkpoint_bytes: []const u8,
     ) Error!Resident {
         var result: Resident = .{};
-        var session = try runtime.Session.restore(allocator, prepared, checkpoint_bytes);
+        var session = try Execution.restore(allocator, prepared, checkpoint_bytes);
         errdefer session.deinit();
         const identity = try allocator.create(Identity);
         identity.* = .{ .allocator = allocator };
@@ -247,7 +248,7 @@ pub const Resident = struct {
         // No fallible work follows successful custody consumption.
         var result: Resident = .{};
         result.owner().* = .{
-            .session = runtime.Session.fromDriver(restored),
+            .session = Execution.fromCore(runtime.Session.fromDriver(restored)),
             .identity = identity,
         };
         result.live = true;
@@ -274,11 +275,7 @@ pub const Resident = struct {
     fn leave(self: *Resident) void {
         // No mutable engine borrow escapes this closed owner. Its next drive
         // need not protect pointers whose entire operation has already ended.
-        if (self.live) {
-            if (@hasField(runtime.Session, "driver")) {
-                self.owner().session.driver.outer.frames.endMutableBorrows();
-            } else self.owner().session.frames.endMutableBorrows();
-        }
+        if (self.live) endMutableBorrows(&self.owner().session);
         self.gate.store(false, .release);
     }
 
@@ -304,9 +301,9 @@ pub const Resident = struct {
         errdefer state.expected = expected;
         var transaction = try session.begin();
         errdefer transaction.rollback(session);
-        const transitions_before = session.transitions;
+        const transitions_before = session.transitions();
         if (owned == .reply) {
-            if (session.statistics) |statistics| statistics.reused_expected_bindings +|= 1;
+            if (session.statistics()) |statistics| statistics.reused_expected_bindings +|= 1;
             try session.answerExpected(owned.reply, state.expected.?);
             state.expected = null;
             _ = try session.run(options.quantum);
@@ -328,7 +325,7 @@ pub const Resident = struct {
         errdefer if (finished.checkpoint) |bytes| session.allocator.free(bytes);
         const receipt = try makeReceipt(state, &finished, generation);
         errdefer if (receipt) |checkpoint_receipt| checkpoint_receipt.deinit();
-        const trace = if (@hasDecl(runtime.Session, "trace")) session.trace() else null;
+        const trace = if (session.currentCore()) |selected| selected.trace() else null;
         if (trace) |observation| if (options.trace_buffer) |buffer| {
             _ = @import("../semantic/projection.zig").encodeInto(
                 @TypeOf(observation),
@@ -346,19 +343,42 @@ pub const Resident = struct {
             .checkpoint = receipt,
             .allocator = if (destination == .encoded) destination.encoded else null,
             .trace = trace,
-            .guest_work = @intCast(session.transitions -% transitions_before),
+            .guest_work = @intCast(session.transitions() -% transitions_before),
         };
     }
 
-    fn compactCommitted(session: *runtime.Session) void {
-        const committed_store = if (@hasField(runtime.Session, "driver"))
-            &session.driver.outer.store
-        else
-            &session.store;
+    fn compactCommitted(session: *Execution) void {
+        switch (session.realized) {
+            .core => |*core| compactStore(&core.driver.outer.store),
+            .direct => |*direct| compactStore(&direct.store),
+            .lockstep => |pair| {
+                compactStore(&pair.reference.driver.outer.store);
+                compactStore(&pair.candidate.store);
+            },
+        }
+    }
+
+    fn compactStore(committed_store: *heap.Store) void {
         committed_store.compactImported() catch |err| switch (err) {
             error.OutOfMemory => {},
             else => std.debug.panic("invalid committed storage: {s}", .{@errorName(err)}),
         };
+    }
+
+    fn endMutableBorrows(session: *Execution) void {
+        switch (session.realized) {
+            .core => |*core| core.driver.outer.frames.endMutableBorrows(),
+            .direct => |*direct| direct.frames.endMutableBorrows(),
+            .lockstep => |pair| {
+                pair.reference.driver.outer.frames.endMutableBorrows();
+                pair.candidate.frames.endMutableBorrows();
+            },
+        }
+    }
+
+    fn outerRevision(session: *Execution) ?u64 {
+        const core = session.currentCore() orelse return null;
+        return core.driver.revision;
     }
 
     fn encodePublication(
@@ -404,10 +424,7 @@ pub const Resident = struct {
                 .pending_digest = finished.pending_digest,
                 .issuer = state.identity,
                 .generation = generation,
-                .outer_revision = if (@hasField(
-                    runtime.Session,
-                    "driver",
-                )) session.driver.revision else null,
+                .outer_revision = outerRevision(session),
             };
             receipt = @ptrCast(storage);
             finished.checkpoint = null;
@@ -454,17 +471,22 @@ pub const Resident = struct {
         defer self.leave();
         return state.session.checkpoint(output);
     }
-    fn binding(state: *State) capsules.Binding {
-        const selected = state.session.driver.selected;
+    fn binding(state: *State) Error!capsules.Binding {
+        const driver = &(try state.session.coreSession()).driver;
         return .{
             .artifact = .{
-                .digest = selected.identity,
-                .bytes = selected.encoded_length,
+                .digest = driver.selected.identity,
+                .bytes = driver.selected.encoded_length,
             },
-            .guest_revision = state.session.driver.guest_revision,
-            .outer_revision = state.session.driver.revision,
+            .guest_revision = driver.guest_revision,
+            .outer_revision = driver.revision,
             .generation = state.generation,
         };
+    }
+    pub fn realization(self: *Resident) Error!@import("execution.zig").Realization {
+        const state = try self.enter();
+        defer self.leave();
+        return state.session.realization();
     }
     pub fn runtimeBinding(self: *Resident) Error!capsules.Binding {
         const state = try self.enter();
@@ -476,36 +498,37 @@ pub const Resident = struct {
         defer self.leave();
         return @import("../semantic/artifact.zig").encode(
             a,
-            state.session.driver.selected.content.value,
+            (try state.session.coreSession()).driver.selected.content.value,
         );
     }
     pub fn runtimeObservation(self: *Resident, a: std.mem.Allocator) !RuntimeObservation {
         const state = try self.enter();
         defer self.leave();
-        const uncached = state.session.driver.operation == null and state.session.view == null and
-            if (state.session.driver.last_cut) |cut|
+        const session = try state.session.coreSession();
+        const uncached = session.driver.operation == null and session.view == null and
+            if (session.driver.last_cut) |cut|
                 cut.status != .active and cut.status != .unwinding
             else
                 false;
         var transaction: ?runtime.Session.Transaction = if (uncached)
-            try state.session.begin()
+            try session.begin()
         else
             null;
-        errdefer if (transaction) |*active| active.rollback(&state.session);
-        _ = try state.session.observe();
+        errdefer if (transaction) |*active| active.rollback(session);
+        _ = try session.observe();
         const observation: @import("../semantic/observe.zig").Observation =
-            if (state.session.view) |view| view.event.value.observation else .progressed;
+            if (session.view) |view| view.event.value.observation else .progressed;
         const bytes = try @import("../semantic/projection.zig").encode(
             @TypeOf(observation),
             a,
             observation,
         );
-        if (transaction) |*active| active.commit(&state.session);
+        if (transaction) |*active| active.commit(session);
         return .{
             .allocator = a,
             .observation = bytes,
-            .guest_work = state.session.driver.last_cut.?.guest_work,
-            .binding = binding(state),
+            .guest_work = session.driver.last_cut.?.guest_work,
+            .binding = try binding(state),
         };
     }
     pub fn realize(
@@ -517,14 +540,15 @@ pub const Resident = struct {
     ) !capsules.SwitchDecision {
         const state = try self.enter();
         defer self.leave();
-        if (!std.meta.eql(expected, binding(state))) return error.StaleRuntimeBinding;
+        if (!std.meta.eql(expected, try binding(state))) return error.StaleRuntimeBinding;
         const generation = try std.math.add(u64, state.generation, 1);
         const a = state.session.allocator;
+        const current = try state.session.coreSession();
         var candidate = runtime.Session.fromDriver(
-            try capsules.rehydrate(a, &state.session.driver, target),
+            try capsules.rehydrate(a, &current.driver, target),
         );
         errdefer candidate.deinit();
-        const source = try capsules.publish(a, &state.session.driver, .guest_cut, provenance);
+        const source = try capsules.publish(a, &current.driver, .guest_cut, provenance);
         errdefer a.free(source);
         const next = try capsules.publish(a, &candidate.driver, .guest_cut, provenance);
         errdefer a.free(next);
@@ -572,9 +596,10 @@ pub const Resident = struct {
             .committed => {
                 // Swapping leaves the old session in pending for disposal.
                 // The stable identity survives; every old receipt is stale.
-                std.mem.swap(runtime.Session, &state.session, &pending.candidate);
-                state.session.setStatistics(pending.candidate.statistics);
-                state.session.transitions = pending.candidate.transitions;
+                const current = &state.session.realized.core;
+                std.mem.swap(runtime.Session, current, &pending.candidate);
+                current.setStatistics(pending.candidate.statistics);
+                current.transitions = pending.candidate.transitions;
                 state.generation = pending.generation;
                 state.switching = null;
                 pending.deinit();
@@ -592,14 +617,15 @@ pub const Resident = struct {
         const state = try self.enter();
         defer self.leave();
         const generation = std.math.add(u64, state.generation, 1) catch return error.InvalidState;
+        const session = try state.session.coreSession();
         if (control == .reply) try establishExpected(state);
-        var transaction = try state.session.begin();
-        errdefer transaction.rollback(&state.session);
-        if (control == .reply) if (state.session.statistics) |statistics| {
+        var transaction = try session.begin();
+        errdefer transaction.rollback(session);
+        if (control == .reply) if (session.statistics) |statistics| {
             statistics.reused_expected_bindings +|= 1;
         };
-        try state.session.submitAdvance(control, guest_quantum, state.expected);
-        transaction.commit(&state.session);
+        try session.submitAdvance(control, guest_quantum, state.expected);
+        transaction.commit(session);
         state.expected = null;
         state.generation = generation;
     }
@@ -607,10 +633,11 @@ pub const Resident = struct {
         const state = try self.enter();
         defer self.leave();
         const generation = std.math.add(u64, state.generation, 1) catch return error.InvalidState;
-        var transaction = try state.session.begin();
-        errdefer transaction.rollback(&state.session);
-        const result = try state.session.pump(base_quantum);
-        transaction.commit(&state.session);
+        const session = try state.session.coreSession();
+        var transaction = try session.begin();
+        errdefer transaction.rollback(session);
+        const result = try session.pump(base_quantum);
+        transaction.commit(session);
         state.generation = generation;
         return result;
     }
@@ -622,7 +649,8 @@ pub const Resident = struct {
     ) !*CapsuleReceipt {
         const state = try self.enter();
         defer self.leave();
-        const bytes = try capsules.publish(output, &state.session.driver, kind, provenance);
+        const driver = &(try state.session.coreSession()).driver;
+        const bytes = try capsules.publish(output, driver, kind, provenance);
         errdefer output.free(bytes);
         const storage = try output.create(CapsuleStorage);
         errdefer output.destroy(storage);
@@ -633,7 +661,7 @@ pub const Resident = struct {
             .kind = kind,
             .issuer = state.identity,
             .generation = state.generation,
-            .outer_revision = state.session.driver.revision,
+            .outer_revision = driver.revision,
         };
         return @ptrCast(storage);
     }
@@ -649,7 +677,7 @@ pub const Resident = struct {
             saved.kind != expected_kind or
             saved.issuer != state.identity or
             saved.generation != state.generation or
-            saved.outer_revision != state.session.driver.revision) return error.InvalidState;
+            saved.outer_revision != outerRevision(&state.session)) return error.InvalidState;
         saved.transferable = false;
         state.session.deinit();
         state.identity.release();
@@ -676,12 +704,9 @@ pub const Resident = struct {
             checkpoint_owner.issuer != state.identity or
             checkpoint_owner.generation != state.generation)
             return error.InvalidState;
-        if (@hasField(
-            runtime.Session,
-            "driver",
-        )) if (checkpoint_owner.outer_revision) |revision| {
-            if (revision != state.session.driver.revision) return error.InvalidState;
-        };
+        if (checkpoint_owner.outer_revision) |revision| {
+            if (outerRevision(&state.session) != revision) return error.InvalidState;
+        }
         checkpoint_owner.transferable = false;
         state.session.deinit();
         state.identity.release();
@@ -693,11 +718,7 @@ pub const Resident = struct {
     pub fn close(self: *Resident) Error!void {
         const state = try self.enter();
         defer self.leave();
-        const terminal = if (@hasField(runtime.Session, "driver"))
-            state.session.isTerminal()
-        else
-            state.session.terminal != null;
-        if (!terminal) return error.UnfinishedSession;
+        if (!state.session.isTerminal()) return error.UnfinishedSession;
         state.session.deinit();
         state.identity.release();
         state.expected = null;
@@ -708,43 +729,39 @@ pub const Resident = struct {
     pub fn setStatistics(self: *Resident, statistics: ?*Statistics) Error!void {
         const state = try self.enter();
         defer self.leave();
-        if (@hasDecl(
-            runtime.Session,
-            "setStatistics",
-        )) state.session.setStatistics(statistics) else {
-            state.session.statistics = statistics;
-            state.session.store.statistics = if (statistics) |s| &s.storage else null;
-        }
+        state.session.setStatistics(statistics);
     }
     pub fn diagnostics(self: *Resident) Error!Diagnostics {
         const state = try self.enter();
         defer self.leave();
-        const session = &state.session;
-        if (@hasField(runtime.Session, "driver")) {
-            const outer = &session.driver.outer;
-            return .{
-                .level = .outer,
-                .frames = outer.frames.entries.count(),
-                .nodes = outer.store.nodes.items.len,
-                .transitions = outer.transitions,
-                .collection_cursors = 0,
-                .pending_blob_collection = false,
-                .imported_backing = outer.store.imported != null,
-                .slots = outer.frames.slots.statistics,
-                .custody = outer.frames.custody.nodes.statistics,
-                .transactions = outer.frames.statistics,
-            };
-        }
+        return switch (state.session.realized) {
+            .core => |*core| outerDiagnostics(&core.driver.outer),
+            .lockstep => |pair| outerDiagnostics(&pair.reference.driver.outer),
+            .direct => |*session| .{
+                .frames = session.frames.entries.count(),
+                .nodes = session.store.nodes.items.len,
+                .transitions = session.transitions,
+                .collection_cursors = session.collection_cursors,
+                .pending_blob_collection = session.pending_blob_collection,
+                .imported_backing = session.store.imported != null,
+                .slots = session.frames.slots.statistics,
+                .custody = session.frames.custody.nodes.statistics,
+                .transactions = session.frames.statistics,
+            },
+        };
+    }
+    fn outerDiagnostics(outer: anytype) Diagnostics {
         return .{
-            .frames = session.frames.entries.count(),
-            .nodes = session.store.nodes.items.len,
-            .transitions = session.transitions,
-            .collection_cursors = session.collection_cursors,
-            .pending_blob_collection = session.pending_blob_collection,
-            .imported_backing = session.store.imported != null,
-            .slots = session.frames.slots.statistics,
-            .custody = session.frames.custody.nodes.statistics,
-            .transactions = session.frames.statistics,
+            .level = .outer,
+            .frames = outer.frames.entries.count(),
+            .nodes = outer.store.nodes.items.len,
+            .transitions = outer.transitions,
+            .collection_cursors = 0,
+            .pending_blob_collection = false,
+            .imported_backing = outer.store.imported != null,
+            .slots = outer.frames.slots.statistics,
+            .custody = outer.frames.custody.nodes.statistics,
+            .transactions = outer.frames.statistics,
         };
     }
 };

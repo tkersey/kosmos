@@ -5,7 +5,11 @@ const data = @import("horos_data");
 const protocol = data.invocation;
 const heap = @import("store.zig");
 const runtime = @import("../semantic/session.zig");
-pub const Error = runtime.Error;
+const execution = @import("execution.zig");
+const runtime_types = @import("runtime_types.zig");
+pub const Execution = execution.Execution;
+pub const Realization = runtime_types.Realization;
+pub const Error = execution.Error;
 pub const Outcome = struct {
     arena: std.heap.ArenaAllocator,
     record: protocol.Outcome,
@@ -17,17 +21,31 @@ pub const Outcome = struct {
 
 /// Own all mutable caller bytes before trust checks or execution.
 pub fn invoke(allocator: std.mem.Allocator, input: protocol.Input) Error!Outcome {
+    return invokeSelected(allocator, input, runtime_types.default_realization);
+}
+
+pub fn invokeSelected(
+    allocator: std.mem.Allocator,
+    input: protocol.Input,
+    realization: Realization,
+) Error!Outcome {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const owned = try heap.duplicate(protocol.Input, arena.allocator(), input);
-    return execute(allocator, owned);
+    return execute(allocator, owned, realization);
 }
 
-fn execute(allocator: std.mem.Allocator, input: protocol.Input) Error!Outcome {
+fn execute(
+    allocator: std.mem.Allocator,
+    input: protocol.Input,
+    realization: Realization,
+) Error!Outcome {
     try protocol.validate(protocol.Input, allocator, input);
+    var prepared = try runtime.Prepared.initRealization(allocator, input.image, realization);
+    defer prepared.deinit();
     var session = switch (input.instance) {
-        .initial_args => |args| try runtime.Session.initImage(allocator, input.image, args),
-        .state => |state| try runtime.Session.restoreImage(allocator, input.image, state),
+        .initial_args => |args| try Execution.start(allocator, &prepared, args),
+        .state => |state| try Execution.restore(allocator, &prepared, state),
     };
     defer session.deinit();
     _ = try advance(&session, input.control, input.quantum);
@@ -35,7 +53,7 @@ fn execute(allocator: std.mem.Allocator, input: protocol.Input) Error!Outcome {
 }
 
 pub fn advance(
-    session: *runtime.Session,
+    session: anytype,
     control: protocol.Control,
     quantum: ?u64,
 ) Error!runtime.Observation {
@@ -50,7 +68,7 @@ pub fn advance(
 
 pub fn finish(
     allocator: std.mem.Allocator,
-    session: *runtime.Session,
+    session: anytype,
     checkpoint: bool,
 ) Error!Outcome {
     return finishObserved(allocator, session, checkpoint, null);
@@ -60,7 +78,7 @@ pub fn finish(
 /// validation authority and does not retain any output/checkpoint backing.
 pub fn finishObserved(
     allocator: std.mem.Allocator,
-    session: *runtime.Session,
+    session: anytype,
     checkpoint: bool,
     binding: ?*?runtime.ExpectedReply,
 ) Error!Outcome {
@@ -83,7 +101,7 @@ pub const Finished = struct {
 /// The caller must admit both before committing its resident transaction.
 pub fn finishPublication(
     allocator: std.mem.Allocator,
-    session: *runtime.Session,
+    session: anytype,
     mode: CheckpointMode,
     binding: ?*?runtime.ExpectedReply,
 ) Error!Finished {
@@ -138,7 +156,7 @@ pub fn finishPublication(
     };
 }
 
-fn failures(allocator: std.mem.Allocator, session: *runtime.Session) Error![]const u8 {
+fn failures(allocator: std.mem.Allocator, session: anytype) Error![]const u8 {
     const values = (try session.terminalExit()).cleanup_failures;
     var measure: data.wire.Writer = .{};
     try measure.natural(values.len);
@@ -161,9 +179,18 @@ pub fn invokeBytesWith(
     output: std.mem.Allocator,
     input: []const u8,
 ) Error![]u8 {
+    return invokeBytesSelected(allocator, output, input, runtime_types.default_realization);
+}
+
+pub fn invokeBytesSelected(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    input: []const u8,
+    realization: Realization,
+) Error![]u8 {
     var decoded = try protocol.decode(protocol.Input, allocator, input);
     defer decoded.deinit();
-    var result = try execute(allocator, decoded.value);
+    var result = try execute(allocator, decoded.value, realization);
     defer result.deinit();
     return protocol.encodeOwned(protocol.Outcome, output, result.record);
 }
@@ -173,7 +200,7 @@ pub fn invokeBytesWith(
 pub fn invokeInto(allocator: std.mem.Allocator, input: []const u8, output: []u8) Error![]const u8 {
     var decoded = try protocol.decode(protocol.Input, allocator, input);
     defer decoded.deinit();
-    var result = try execute(allocator, decoded.value);
+    var result = try execute(allocator, decoded.value, runtime_types.default_realization);
     defer result.deinit();
     return protocol.encode(protocol.Outcome, allocator, result.record, output);
 }

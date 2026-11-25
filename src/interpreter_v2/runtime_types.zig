@@ -5,6 +5,26 @@ const data = @import("horos_data");
 pub const Error = data.program_image.Error || data.state_admission.Error ||
     data.invocation.Error || data.scalar.Error || error{UnsupportedTransition};
 
+pub const Realization = enum { core, direct, lockstep };
+pub const default_realization: Realization = .core;
+
+pub const ExpectedReply = struct {
+    identity: [32]u8,
+    effect: data.program.Id,
+    pub fn fromRequest(request: data.invocation.Request) ExpectedReply {
+        return .{ .identity = request.request_identity, .effect = request.binding.effect };
+    }
+};
+
+pub const Observation = union(enum) {
+    progressed,
+    yielded,
+    requested: struct { effect: data.program.Id, payload: data.graph.Value },
+    completed: data.graph.Value,
+    failed: data.graph.Value,
+    cancelled: data.invocation.Reason,
+};
+
 /// Work counters are observations, never serialized state or execution limits.
 pub const Statistics = struct {
     /// Counts include failed attempts and are never restored by rollback.

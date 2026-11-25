@@ -2,6 +2,11 @@ const std = @import("std");
 const horos = @import("horos");
 const runtime = @import("kosmos");
 const fixture_options = @import("fixture_options");
+const realization: runtime.Realization = if (@hasDecl(fixture_options, "realization"))
+    std.meta.stringToEnum(runtime.Realization, fixture_options.realization) orelse
+        @compileError("invalid fixture realization")
+else
+    runtime.default_realization;
 
 pub fn main(init: std.process.Init) !void {
     var arguments = std.process.Args.Iterator.init(init.minimal.args);
@@ -21,7 +26,12 @@ pub fn main(init: std.process.Init) !void {
         var input = std.Io.File.stdin().reader(init.io, &buffer);
         const bytes = try input.interface.allocRemaining(init.gpa, .unlimited);
         defer init.gpa.free(bytes);
-        const result = try runtime.invocation.invokeBytes(init.gpa, bytes);
+        const result = try runtime.invocation.invokeBytesSelected(
+            init.gpa,
+            init.gpa,
+            bytes,
+            realization,
+        );
         defer init.gpa.free(result);
         try output.interface.writeAll(result);
     } else if (std.mem.eql(u8, mode, "image")) {
@@ -64,7 +74,11 @@ const PreparedPeer = struct {
         defer command.deinit();
         try data.invocation.validate(data.invocation.Input, a, command.value);
         if (self.prepared == null or !std.mem.eql(u8, self.image, command.value.image)) {
-            var prepared = try runtime.Prepared.init(a, command.value.image);
+            var prepared = try runtime.Prepared.initRealization(
+                a,
+                command.value.image,
+                realization,
+            );
             errdefer prepared.deinit();
             const image = try a.dupe(u8, command.value.image);
             if (self.prepared) |*previous| previous.deinit();
@@ -73,8 +87,8 @@ const PreparedPeer = struct {
             self.prepared = prepared;
         }
         var session = switch (command.value.instance) {
-            .initial_args => |args| try runtime.Session.start(a, &self.prepared.?, args),
-            .state => |state| try runtime.Session.restore(a, &self.prepared.?, state),
+            .initial_args => |args| try runtime.Execution.start(a, &self.prepared.?, args),
+            .state => |state| try runtime.Execution.restore(a, &self.prepared.?, state),
         };
         defer session.deinit();
         _ = try runtime.invocation.advance(&session, command.value.control, command.value.quantum);

@@ -43,14 +43,30 @@ pub fn build(b: *std.Build) void {
     const sessions = configureSessions(b, options, dependencies, host_modules, publication);
     const driver = configureDriver(b, host_modules, runtime_modules, baseline);
     configureSemantics(b, storage_checks, host_modules, baseline, sessions, driver);
+    const direct_checks = configureDirect(b, host_modules, runtime_modules);
     configurePublicTests(b, host_modules, publication, driver);
-    const wasm_modules = configureWasmModules(b, options, dependencies, runtime_modules);
+    const wasm_modules = configureWasmModules(
+        b,
+        options,
+        dependencies,
+        runtime_modules,
+        options.kernel_realization,
+    );
     const kernel = configureKernel(b, options, wasm_modules);
     const runtime_profile = configureRuntimeProfile(b, options, wasm_modules, kernel);
     const packages = configurePackages(b, kernel, runtime_profile);
     const fixtures = configureFixtures(b, options, host_modules, publication);
     const foreign_checks = configureForeignChecks(b, kernel, packages, fixtures);
     const source_checks = configureSourceChecks(b, options, dependencies, kernel, fixtures);
+    configureLockstep(b, .{
+        .options = options,
+        .dependencies = dependencies,
+        .host_modules = host_modules,
+        .runtime_modules = runtime_modules,
+        .publication = publication,
+        .source_checks = source_checks,
+        .direct_checks = direct_checks,
+    });
     const portable_checks = configurePortableChecks(b, kernel, fixtures);
     const activation = configureActivation(b, wasm_modules);
     configureQualification(
@@ -83,6 +99,7 @@ const Options = struct {
     maximum_memory: u64,
     package: @TypeOf(@import("build.zig.zon")),
     kernel_mode: std.lang.Optimize,
+    kernel_realization: ?[]const u8,
 };
 
 fn configureOptions(b: *std.Build) Options {
@@ -120,6 +137,11 @@ fn configureOptions(b: *std.Build) Options {
         "economy-workload",
         "Select one semantic economy workload",
     );
+    const kernel_realization = b.option(
+        []const u8,
+        "kernel-realization",
+        "Select the kernel and native peer realization: core, direct or lockstep",
+    );
     const capacities = configureCapacities(b, profile);
     const package = @import("build.zig.zon");
     const kernel_mode = std.meta.stringToEnum(
@@ -142,6 +164,7 @@ fn configureOptions(b: *std.Build) Options {
         .maximum_memory = capacities.maximum_memory,
         .package = package,
         .kernel_mode = kernel_mode,
+        .kernel_realization = kernel_realization,
     };
 }
 
@@ -984,6 +1007,28 @@ fn configureSemantics(
     driver.native_checks.dependOn(&storage_checks.run_native_tests.step);
 }
 
+fn configureDirect(
+    b: *std.Build,
+    host_modules: HostModules,
+    runtime_modules: RuntimeModules,
+) *std.Build.Step {
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test_direct.zig"),
+        .target = b.graph.host,
+        .optimize = host_modules.host_mode,
+        .imports = &.{
+            .{ .name = "horos_data", .module = host_modules.source_data },
+            .{ .name = "horos", .module = host_modules.horos },
+            .{ .name = "packaged_runtime", .module = runtime_modules.packaged_runtime },
+        },
+    }) });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    const check = b.step("check-direct", "Check the direct realization against the semantic core");
+    check.dependOn(&run.step);
+    return check;
+}
+
 fn configureSpecialization(
     b: *std.Build,
     host_modules: HostModules,
@@ -1064,6 +1109,7 @@ fn configureWasmModules(
     options: Options,
     dependencies: Dependencies,
     runtime_modules: RuntimeModules,
+    realization: ?[]const u8,
 ) WasmModules {
     const wasm_target = b.resolveTargetQuery(std.Target.Query.parse(.{
         .arch_os_abi = options.profile.target,
@@ -1089,6 +1135,7 @@ fn configureWasmModules(
     current_options.addOption(usize, "input_capacity", options.input_capacity);
     current_options.addOption(usize, "working_capacity", options.working_capacity);
     current_options.addOption(usize, "output_capacity", options.output_capacity);
+    if (realization) |name| current_options.addOption([]const u8, "realization", name);
     const current_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/main.zig"),
         .target = wasm_target,
@@ -1249,6 +1296,8 @@ fn configureFixtures(
             .module = host_modules.horos,
         } },
     }) });
+    if (options.kernel_realization) |name|
+        fixture_options.addOption([]const u8, "realization", name);
     fixture.root_module.addOptions("fixture_options", fixture_options);
     fixture.root_module.addImport("diagnostic_fixture", host_modules.diagnostic_fixture);
     const current_fixtures = b.addInstallArtifact(fixture, .{ .dest_dir = .{
@@ -1320,6 +1369,7 @@ fn configureForeignChecks(
 
 const SourceChecks = struct {
     source_agreement: *std.Build.Step.Run,
+    source_examples: *std.Build.Step.Run,
 };
 
 fn configureSourceChecks(
@@ -1367,7 +1417,69 @@ fn configureSourceChecks(
     )
         .dependOn(&source_agreement.step);
 
-    return .{ .source_agreement = source_agreement };
+    return .{ .source_agreement = source_agreement, .source_examples = source_examples };
+}
+
+const LockstepInputs = struct {
+    options: Options,
+    dependencies: Dependencies,
+    host_modules: HostModules,
+    runtime_modules: RuntimeModules,
+    publication: Publication,
+    source_checks: SourceChecks,
+    direct_checks: *std.Build.Step,
+};
+
+fn configureLockstep(b: *std.Build, inputs: LockstepInputs) void {
+    const wasm_modules = configureWasmModules(
+        b,
+        inputs.options,
+        inputs.dependencies,
+        inputs.runtime_modules,
+        "lockstep",
+    );
+    const kernel = configureKernel(b, inputs.options, wasm_modules);
+    const fixture_options = b.addOptions();
+    fixture_options.addOption(bool, "prepared_only", false);
+    fixture_options.addOption([]const u8, "realization", "lockstep");
+    const fixture = b.addExecutable(.{ .name = "lockstep-fixtures", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/current/fixtures.zig"),
+        .target = b.graph.host,
+        .optimize = inputs.host_modules.host_mode,
+        .imports = &.{
+            .{ .name = "kosmos", .module = inputs.publication.host_kosmos },
+            .{ .name = "horos", .module = inputs.host_modules.horos },
+            .{ .name = "diagnostic_fixture", .module = inputs.host_modules.diagnostic_fixture },
+        },
+    }) });
+    fixture.root_module.addOptions("fixture_options", fixture_options);
+    const source = b.addSystemCommand(&.{"node"});
+    source.addFileArg2(b.path("test/current/source_agreement.mjs"), .{});
+    source.addFileArg2(kernel.current_kernel.getEmittedBin(), .{});
+    source.addFileArg2(fixture.getEmittedBin(), .{ .make_absolute = true });
+    source.addDirectoryArg2(b.graph.path(.install_prefix, "source"), .{ .make_absolute = true });
+    source.addFileArg2(
+        inputs.dependencies.source.path(b, "test/v2/source_oracle.mjs"),
+        .{ .make_absolute = true },
+    );
+    if (inputs.options.source_group) |group| source.addArg(@tagName(group));
+    source.step.dependOn(&inputs.source_checks.source_examples.step);
+    source.has_side_effects = true;
+    const agreement = b.addSystemCommand(&.{"node"});
+    agreement.addFileArg2(b.path("test/current/kernel.mjs"), .{});
+    agreement.addFileArg2(kernel.current_kernel.getEmittedBin(), .{});
+    agreement.addFileArg2(fixture.getEmittedBin(), .{ .make_absolute = true });
+    agreement.has_side_effects = true;
+    agreement.expectStdOutMatch("ABI 3 native/Node canonical agreement");
+    const portable = b.step(
+        "check-lockstep-portable",
+        "Run source and native/WASM agreement with every realization in lockstep",
+    );
+    portable.dependOn(&source.step);
+    portable.dependOn(&agreement.step);
+    const all = b.step("check-lockstep", "Check the direct realization in lockstep everywhere");
+    all.dependOn(portable);
+    all.dependOn(inputs.direct_checks);
 }
 
 const PortableChecks = struct {
