@@ -32,6 +32,26 @@ test "admitted guest ownership survives caller bytes and preparation teardown" {
     );
 }
 
+test "packaged guest selection takes its lease before runtime admission" {
+    const image = try support.guestImage();
+    defer a.free(image);
+    var guest = try facade.Prepared.Guest.init(a, image);
+    defer guest.deinit();
+    var exhausted: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        facade.Prepared.initWithGuest(exhausted.allocator(), &guest),
+    );
+    try std.testing.expect(exhausted.has_induced_failure);
+    guest.deinit();
+    var unadmitted: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.InvalidState,
+        facade.Prepared.initWithGuest(unadmitted.allocator(), &guest),
+    );
+    try std.testing.expect(!unadmitted.has_induced_failure);
+}
+
 test "admitted guest selection shares owners and rejects unavailable leases" {
     const image = try support.guestImage();
     defer a.free(image);

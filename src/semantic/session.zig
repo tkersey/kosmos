@@ -58,9 +58,11 @@ pub const Prepared = struct {
         return bind(guest, runtime);
     }
     pub fn initWithGuest(a: std.mem.Allocator, selected_guest: *const Guest) Error!Prepared {
+        var guest = try selected_guest.clone();
+        errdefer guest.deinit();
         var runtime = try builtin(a);
-        defer runtime.deinit();
-        return initWithGuestAndRuntime(a, selected_guest, &runtime);
+        errdefer runtime.deinit();
+        return bind(guest, runtime);
     }
     pub fn initWithGuestAndRuntime(
         _: std.mem.Allocator,
