@@ -12,6 +12,7 @@ const capsules = @import("semantic/capsule.zig");
 const support = @import("semantic/test_support.zig");
 test {
     _ = @import("semantic/capsule_tests.zig");
+    _ = @import("semantic/guest_preparation_tests.zig");
 }
 
 test "offline diagnostics preserve live ownership and publication retry" {

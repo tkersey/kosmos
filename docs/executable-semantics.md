@@ -38,6 +38,13 @@ derivation, lowering evidence and recovery helper images. The execution owner
 must approve that artifact and the work in which it will execute. Artifact bytes,
 hashes and capsule provenance fields confer no external authority.
 
+Native hosts can retain `Prepared.Guest` after admitting an application image and
+inspect its admitted program before selecting an evaluator. `Prepared.initWithGuest`
+shares that owner with the packaged evaluator; `Prepared.initWithGuestAndRuntime`
+shares it with an explicitly selected admitted artifact. Both acquire their own
+leases and preserve guest-specific runtime identity checks. The original guest,
+runtime and preparation handles may be released independently of live sessions.
+
 Compiler policy `kosmos.source-lower/2` reconstructs generic and helper source
 from the bound implementation. A specialized artifact carries its residual
 source and finite specialization derivation. Horos reconstructs the trusted
