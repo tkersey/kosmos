@@ -7,6 +7,7 @@ const artifact = @import("semantic/artifact.zig");
 const records = @import("semantic/recovery_records.zig");
 const packaged = @import("semantic_packaged.zig");
 const a = std.testing.allocator;
+const superseded_horos_package = "horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI";
 
 fn admitted(bundle: artifact.Bundle) !artifact.Admitted {
     const bytes = try artifact.encode(a, bundle);
@@ -22,7 +23,7 @@ fn rejects(bundle: artifact.Bundle, expected: anyerror) !void {
 
 fn checkIdentity(bundle: artifact.Bundle) !void {
     var changed = bundle;
-    changed.manifest.compiler.horos_package = packaged.horos_package;
+    changed.manifest.compiler.horos_package = superseded_horos_package;
     try rejects(changed, error.UnsupportedSource);
     changed = bundle;
     changed.manifest.compiler.zig = "0.17.0";
