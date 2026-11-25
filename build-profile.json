@@ -2,7 +2,7 @@
   "zig": "0.17.1",
   "target": "wasm32-freestanding",
   "hostMode": "safe",
-  "kernelMode": "small",
+  "kernelMode": "safe",
   "stackBytes": 65536,
   "maximumMemoryBytes": 268435456,
   "defaults": {

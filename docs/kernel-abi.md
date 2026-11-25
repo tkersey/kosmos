@@ -120,6 +120,14 @@ Horos's authoring compiler. `zig build build-runtime check-package` builds the
 ordinary standalone JS package and exercises its extracted public API and CLI.
 These commands do not publish a release or create a qualified-v1 bundle.
 
+`build-profile.json` selects the kernel optimization mode, recorded as `mode` in the
+installed `kernel-profile.json`. The kernel is built ReleaseSafe: bounds, overflow,
+`unreachable` and assertion checks trap the failing call instead of being undefined
+behavior, and the trapped instance stays busy, so later commands reject. Debug
+information is stripped, so the kernel bytes do not depend on the build directory.
+With Zig 0.17.1 the stripped ReleaseSafe kernel is about 1.4 MB; a ReleaseSmall build of
+the same source is about 0.9 MB.
+
 See [verification boundaries](verification.md) for the native, independent source
 and optional JavaScript checks and browser setup. Current qualification runs the
 same Worker/native transfer cases in Chromium and Firefox. Exact subjects and
