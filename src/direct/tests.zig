@@ -120,6 +120,89 @@ fn publishAll(prepared: *const core.Prepared, input: []const u8) ![]u8 {
     return error.TooManyCuts;
 }
 
+const certification = @import("certification.zig");
+
+const Recorded = struct {
+    steps: std.ArrayList(certification.Step) = .empty,
+    replies: std.ArrayList([]u8) = .empty,
+    start: []u8,
+    end: ?[]u8 = null,
+    work: u64 = 0,
+
+    fn deinit(self: *Recorded) void {
+        for (self.replies.items) |bytes| a.free(bytes);
+        self.replies.deinit(a);
+        self.steps.deinit(a);
+        a.free(self.start);
+        if (self.end) |bytes| a.free(bytes);
+    }
+};
+
+fn recordDirect(resident: *Resident, publications: usize) !Recorded {
+    var recorded: Recorded = .{ .start = try resident.checkpoint(a) };
+    errdefer recorded.deinit();
+    var control: protocol.Control = .none;
+    for (0..publications) |_| {
+        var publication = try resident.publish(.{ .encoded = a }, control, .{ .quantum = 3 });
+        defer publication.deinit();
+        try recorded.steps.append(a, .{ .control = control, .quantum = 3 });
+        recorded.work += publication.guest_work;
+        var decoded = try protocol.decode(protocol.Outcome, a, publication.outcome.encoded);
+        defer decoded.deinit();
+        control = switch (decoded.value) {
+            .progressed => .none,
+            .yielded => .resume_yield,
+            .requested => |pending| blk: {
+                const reply = try workloads.reply(a, pending.request, 0);
+                try recorded.replies.append(a, reply);
+                break :blk .{ .reply = reply };
+            },
+            else => break,
+        };
+    }
+    recorded.end = try resident.checkpoint(a);
+    return recorded;
+}
+
+test "certification replays a direct segment on the core and fences a mismatch" {
+    const image = try workloads.image(a, .multi_shot);
+    defer a.free(image);
+    const input = try workloads.arguments(a, .multi_shot, 0);
+    defer a.free(input);
+    var prepared = try core.Prepared.initRealization(a, image, .direct);
+    defer prepared.deinit();
+    var resident = try Resident.start(a, &prepared, input);
+    defer if (resident.live) closeResident(&resident);
+    var recorded = try recordDirect(&resident, 4);
+    defer recorded.deinit();
+    const certificate = try resident.certify(&prepared, .{
+        .start = recorded.start,
+        .steps = recorded.steps.items,
+        .end = recorded.end.?,
+        .guest_work = recorded.work,
+    });
+    try std.testing.expectEqual(recorded.work, certificate.guest_work);
+    const shortened = recorded.steps.items[0 .. recorded.steps.items.len - 1];
+    try std.testing.expectError(error.CertificationMismatch, resident.certify(&prepared, .{
+        .start = recorded.start,
+        .steps = shortened,
+        .end = recorded.end.?,
+    }));
+    try std.testing.expectError(error.CertificationFenced, resident.checkpoint(a));
+    try std.testing.expectError(error.CertificationFenced, resident.close());
+    try resident.abandonFenced();
+    var fallback = try core.Prepared.initRealization(a, image, .core);
+    defer fallback.deinit();
+    var resumed = try Resident.restore(a, &fallback, recorded.start);
+    try std.testing.expectEqual(.core, try resumed.realization());
+    const recovered = try driveToEnd(&resumed);
+    defer a.free(recovered);
+    var uninterrupted = try Resident.start(a, &prepared, input);
+    const expected = try driveToEnd(&uninterrupted);
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, recovered);
+}
+
 fn driveToEnd(resident: *Resident) ![]u8 {
     var control: protocol.Control = .none;
     var reply: ?[]u8 = null;

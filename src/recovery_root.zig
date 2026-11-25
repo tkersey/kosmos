@@ -9,6 +9,7 @@ pub const Realization = ordinary.Realization;
 pub const default_realization = ordinary.default_realization;
 pub const DirectSession = ordinary.DirectSession;
 pub const Lockstep = ordinary.Lockstep;
+pub const Certification = ordinary.Certification;
 pub const Checkpoint = ordinary.Checkpoint;
 pub const Publication = ordinary.Publication;
 pub const RuntimeObservation = ordinary.RuntimeObservation;

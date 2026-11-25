@@ -10,8 +10,13 @@ const runtime = @import("../semantic/session.zig");
 const Execution = @import("execution.zig").Execution;
 const invocation = runtime.invocation;
 pub const Drive = struct { quantum: ?u64 = null, checkpoint: bool = false };
-pub const Error = @import("execution.zig").Error || error{
+const certification = @import("../direct/certification.zig");
+pub const Segment = certification.Segment;
+pub const Certificate = certification.Certificate;
+pub const Error = certification.Error || error{
     Busy,
+    CertificationFenced,
+    StaleSegment,
     UnfinishedSession,
     PublicationUncertain,
     TracePublicationBlocked,
@@ -151,6 +156,7 @@ const State = struct {
     identity: *Identity,
     generation: u64 = 0,
     switching: ?*SwitchStorage = null,
+    fenced: bool = false,
 };
 const SwitchStorage = struct {
     allocator: std.mem.Allocator,
@@ -265,9 +271,10 @@ pub const Resident = struct {
             .monotonic,
         ) != null) return error.Busy;
         if (self.live) {
-            if (self.owner().switching == null) return self.owner();
+            const state = self.owner();
+            if (state.switching == null and !state.fenced) return state;
             self.gate.store(false, .release);
-            return error.PublicationUncertain;
+            return if (state.fenced) error.CertificationFenced else error.PublicationUncertain;
         }
         self.gate.store(false, .release);
         return error.InvalidState;
@@ -708,6 +715,36 @@ pub const Resident = struct {
             if (outerRevision(&state.session) != revision) return error.InvalidState;
         }
         checkpoint_owner.transferable = false;
+        state.session.deinit();
+        state.identity.release();
+        state.expected = null;
+        self.live = false;
+    }
+    pub fn certify(
+        self: *Resident,
+        prepared: *const runtime.Prepared,
+        segment: Segment,
+    ) Error!Certificate {
+        const state = try self.enter();
+        defer self.leave();
+        const current = try state.session.checkpoint(state.session.allocator);
+        defer state.session.allocator.free(current);
+        if (!std.mem.eql(u8, current, segment.end)) return error.StaleSegment;
+        return certification.replay(state.session.allocator, prepared, segment) catch |err| {
+            if (err == error.CertificationMismatch) state.fenced = true;
+            return err;
+        };
+    }
+    pub fn abandonFenced(self: *Resident) Error!void {
+        if (self.gate.cmpxchgStrong(
+            false,
+            true,
+            .acquire,
+            .monotonic,
+        ) != null) return error.Busy;
+        defer self.gate.store(false, .release);
+        if (!self.live or !self.owner().fenced) return error.InvalidState;
+        const state = self.owner();
         state.session.deinit();
         state.identity.release();
         state.expected = null;

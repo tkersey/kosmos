@@ -10,6 +10,7 @@ pub const Realization = runtime.execution.Realization;
 pub const default_realization = runtime.runtime_types.default_realization;
 pub const DirectSession = runtime.direct.Session;
 pub const Lockstep = runtime.lockstep.Lockstep;
+pub const Certification = runtime.certification;
 pub const Checkpoint = current.resident_types.Checkpoint;
 pub const Publication = current.resident_types.Publication;
 pub const RuntimeObservation = current.resident_types.RuntimeObservation;

@@ -11,6 +11,7 @@ pub const runtime_types = @import("interpreter_v2/runtime_types.zig");
 pub const execution = @import("interpreter_v2/execution.zig");
 pub const direct = @import("direct/session.zig");
 pub const lockstep = @import("direct/lockstep.zig");
+pub const certification = @import("direct/certification.zig");
 pub const profile = @import("base/profile.zig");
 pub const service = @import("semantic/service.zig");
 pub const projection = @import("semantic/projection.zig");
