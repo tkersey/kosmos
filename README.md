@@ -2,10 +2,13 @@
 
 Formerly World; see the [rename notes](docs/rename.md).
 
-Kosmos executes complete Horos programs through a Horos-authored semantic core
-on a first-order native or import-free wasm32 base. Computations, handlers,
-retained control and cleanup are program data. The environment supplies typed
-external results. See [executable semantics](docs/executable-semantics.md) for
+Kosmos executes complete Horos programs, native or as import-free wasm32. Its
+reference realization is a Horos-authored semantic core on a first-order base;
+the default direct realization executes the same programs natively with the same
+canonical checkpoints, outcomes, requests and guest work, and qualification runs
+both in lockstep. Computations, handlers, retained control and cleanup are
+program data. The environment supplies typed external results. See
+[executable semantics](docs/executable-semantics.md) for realization selection,
 the runtime artifacts, specialization, reconstruction, and trusted boundaries.
 
 [Request-checked replay](docs/diagnostic-replay.md) runs supplied transcripts as

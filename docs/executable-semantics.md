@@ -1,11 +1,14 @@
 # Executable guest semantics
 
-The public guest facade runs `semantic/service.zig` as ordinary Horos code on
-`base/session.zig`. The build emits `semantic-core.kar`; adding a guest image
-does not rebuild the generic evaluator. The direct guest evaluator is fetched
-from the immutable, hash-pinned
-Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f` archive for qualification
-and benchmarks only. No copied native guest engine remains in this source tree.
+The public guest facade has two realizations of one guest semantics. The
+semantic core runs `semantic/service.zig` as ordinary Horos code on
+`base/session.zig`; the build emits `semantic-core.kar`, and adding a guest image
+does not rebuild the generic evaluator. The direct realization in `direct/`
+executes the same BPI3 program natively over the current storage owners and the
+same Horos admission and PST3 codec. See [direct realization](#direct-realization)
+for selection, the lockstep oracle and certification. The immutable, hash-pinned
+Kosmos `62279bce8e916e7fe613fe4575b3bc12e530596f` archive remains a separate
+qualification and benchmark reference.
 
 The resident pump continues every admitted outer operation after restore:
 initialization, advance, observation, projection and finish. Its result is
@@ -29,6 +32,8 @@ including restoration before the first initialization cut.
 | Horos data admission/codecs | BPI3/PST3/value validity, canonical bytes, schema and ownership facts |
 | `semantic/driver.zig` | Service commands, base pumping, guest response binding and separate work counters |
 | `semantic/session.zig` and `interpreter_v2/resident.zig` | Public guest API, leases, rollback, publication, local receipts and fenced switching |
+| `interpreter_v2/execution.zig` | Realization selection, dispatch and fallback to the core at a guest cut |
+| `direct/` | Direct guest transitions, the lockstep oracle and segment certification |
 | Enclosing host | Runtime approval, external grants, delivery disposition, durable publication, disclosure and distributed custody |
 
 Admission is not runtime approval. `RuntimeArtifact` checks the content address,
@@ -145,6 +150,59 @@ Recovery continues to use the authoritative machine and retained command anchors
 Exact outer checkpoints remain bound to their own realization; transfers between
 realizations still use canonical guest cuts and the existing approval and custody
 contracts.
+
+## Direct realization
+
+`Prepared.realization` selects `core`, `direct` or `lockstep`;
+`Prepared.initRealization` sets it explicitly with the builtin core.
+`Prepared.init` uses `default_realization`, which is `direct`. Selecting a
+specific core artifact with `Prepared.initWithRuntime` selects the `core`
+realization; the field may still be changed afterwards. The retained artifact is
+the core used for lockstep, fallback and certification. `Resident`, `Execution` and the fresh `invocation.invokeSelected`
+path follow that selection. `kosmos.Session` is always the semantic core. The
+`kernel-realization` build option selects the realization of the ABI 3 kernel and
+the native fixture peer; ABI 3 exports and formats do not change.
+
+Both realizations share one canonical guest representation. The direct engine
+stores the same `graph.Node` records and activation frames that PST3 names,
+projects them through the same canonicalization, and admits every published cut
+with `state_admission.validateAdmitted`, exactly as the core's guest cut does.
+A cut that the core refuses to publish, such as the cancellation cut of an
+in-flight owned disposal, is refused by the direct realization with the same
+error. Restore admits the PST3 the same way, so either realization resumes the
+other's checkpoints, native or WASM. Requests, pending-state digests, reply
+admission order and rejection names follow the core. Guest work counts the same
+logical transitions; scalar batching and the 64-bit handler-body fusion occur
+only inside one quantum and never move a published boundary.
+
+Element access over an encoded collection uses the session's `ElementOffsets`
+index, keyed by the immutable backing blob, the element sequence's byte offset
+and the element schema. Each element position is decoded once while its blob
+lives, so sequential access is linear in the collection rather than quadratic.
+Collection drops the entries of dead blobs and rollback clears the index; it is
+physical state only and never appears in a checkpoint.
+
+The direct realization has no outer execution. `beginAdvance`, `pump`, capsules,
+`runtimeBinding`, `runtimeBytes`, `runtimeObservation` and `realize` first fall
+back to the core at the current guest cut: the core is restored from the direct
+realization's canonical checkpoint and the resident continues on the core. A
+lockstep resident drops its direct candidate. The guest state, expected reply,
+generation and existing checkpoint receipts are unchanged by the fallback.
+
+The `lockstep` realization runs the core as reference and the direct engine as
+candidate on every operation. At each published cut it compares rejection names,
+guest work, the complete admitted canonical checkpoint, the outcome and the
+pending request, and returns `RealizationDiverged` on any difference, recording
+the divergence kind. It returns the core's observations and is selected only by
+qualification builds; production realizations never execute it.
+
+`Resident.certify` replays a recorded segment (start cut, controls with their
+quanta including replies, end cut and optional guest work) on the core and
+returns the start and end digests and the replayed work. The segment must end at
+the resident's current cut. A mismatch returns `CertificationMismatch` and fences
+the resident: every later operation returns `CertificationFenced` until
+`abandonFenced` releases it, and the host resumes the guest on the core from its
+last certified cut. Kosmos chooses no certification policy.
 
 ## Two checkpoint levels
 

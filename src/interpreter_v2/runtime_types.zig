@@ -6,7 +6,7 @@ pub const Error = data.program_image.Error || data.state_admission.Error ||
     data.invocation.Error || data.scalar.Error || error{UnsupportedTransition};
 
 pub const Realization = enum { core, direct, lockstep };
-pub const default_realization: Realization = .core;
+pub const default_realization: Realization = .direct;
 
 pub const ExpectedReply = struct {
     identity: [32]u8,
