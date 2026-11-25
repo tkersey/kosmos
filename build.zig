@@ -1480,6 +1480,43 @@ fn configureLockstep(b: *std.Build, inputs: LockstepInputs) void {
     const all = b.step("check-lockstep", "Check the direct realization in lockstep everywhere");
     all.dependOn(portable);
     all.dependOn(inputs.direct_checks);
+    configureDirectBenchmark(b, inputs);
+}
+
+fn configureDirectBenchmark(b: *std.Build, inputs: LockstepInputs) void {
+    const emitter_module = b.createModule(.{
+        .root_source_file = b.path("bench_direct_inputs.zig"),
+        .target = b.graph.host,
+        .optimize = inputs.host_modules.host_mode,
+        .imports = &.{
+            .{ .name = "horos_data", .module = inputs.host_modules.source_data },
+            .{ .name = "horos", .module = inputs.host_modules.horos },
+        },
+    });
+    const emitter = b.addExecutable(.{
+        .name = "direct-bench-inputs",
+        .root_module = emitter_module,
+    });
+    const emit = b.addRunArtifact(emitter);
+    const directory = emit.addOutputDirectoryArg("economy");
+    const bench = b.addSystemCommand(&.{"node"});
+    bench.addFileArg2(b.path("test/current/direct_bench.mjs"), .{});
+    inline for (.{ "core", "direct" }) |realization| {
+        const modules = configureWasmModules(
+            b,
+            inputs.options,
+            inputs.dependencies,
+            inputs.runtime_modules,
+            realization,
+        );
+        const kernel = configureKernel(b, inputs.options, modules);
+        bench.addFileArg2(kernel.current_kernel.getEmittedBin(), .{});
+    }
+    bench.addDirectoryArg2(directory, .{});
+    bench.addPassthruArgs();
+    bench.has_side_effects = true;
+    b.step("bench-direct-wasm", "Measure economy workloads on core and direct WASM kernels (JSONL)")
+        .dependOn(&bench.step);
 }
 
 const PortableChecks = struct {

@@ -12,6 +12,11 @@ const image = workloads.image;
 const arguments = workloads.arguments;
 const reply = workloads.reply;
 const protocol = data.invocation;
+const direct_runtime = struct {
+    pub const Session = kosmos.DirectSession;
+    pub const Prepared = @FieldType(kosmos.Prepared, "guest");
+    pub const invocation = kosmos.invocation;
+};
 
 pub const Step = struct {
     control: protocol.Control,
@@ -647,6 +652,34 @@ fn measureSample(context: WorkloadContext, sample: usize) !void {
     );
 }
 
+fn measureDirect(
+    context: WorkloadContext,
+    sample: usize,
+    input: []const u8,
+    trace_allocator: std.mem.Allocator,
+    trace: *std.ArrayList(Step),
+) !void {
+    const realized = try run(
+        direct_runtime,
+        context.benchmark.io,
+        context.benchmark.a,
+        &context.general.guest,
+        input,
+        sample,
+        trace_allocator,
+        trace,
+        false,
+    );
+    try emit(context.benchmark.output, .{
+        .phase = "execution",
+        .workload = @tagName(context.kind),
+        .sample = sample,
+        .input_bytes = input.len,
+        .realization = "direct-realization",
+        .costs = realized,
+    });
+}
+
 fn measureReplicates(
     context: WorkloadContext,
     sample: usize,
@@ -658,6 +691,7 @@ fn measureReplicates(
     const io = context.benchmark.io;
     const output = context.benchmark.output;
     const kind = context.kind;
+    try measureDirect(context, sample, input, trace_allocator, trace);
     for (0..3) |replicate| {
         inline for (.{
             "generic-base", "specialized-base", "instrumented-base", "generated-candidate",
