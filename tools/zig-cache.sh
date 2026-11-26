@@ -41,10 +41,11 @@ access_time_tracking() {
 }
 
 track() {
+    rm -rf -- "$snapshot"
     mkdir -p -- "$state" "$cache/tmp"
-    if [[ ! -e "$state/started" ]]; then
-        date +%s.%N > "$state/started"
+    if [[ ! -e "$state/restored" ]]; then
         : > "$state/touched"
+        : > "$state/written"
         tree_identity "$cache" > "$state/restored"
         access_time_tracking > "$state/tracking"
         printf 'Compiler cache restored: %s bytes; access tracking %s\n' \
@@ -53,25 +54,32 @@ track() {
     if [[ "$(< "$state/tracking")" == on ]]; then
         find "$cache" -type f -exec touch -a -d "@$unread_epoch" -- {} +
     fi
+    date +%s.%N > "$state/armed"
 }
 
 classify_local_units() {
     awk -F '\t' \
-        -v started="$(< "$state/started")" \
+        -v armed="$(< "$state/armed")" \
         -v tracking="$(< "$state/tracking")" \
         -v unread="$unread_epoch" \
         -v touched_in="$state/touched" \
+        -v written_in="$state/written" \
         -v touched_out="$state/touched.next" \
+        -v written_out="$state/written.next" \
         -v prune_out="$state/prune" '
         BEGIN {
-            while ((getline line < touched_in) > 0) before[line] = 1
+            while ((getline line < touched_in) > 0) touched_before[line] = 1
             close(touched_in)
+            while ((getline line < written_in) > 0) written_before[line] = 1
+            close(written_in)
             printf "" > touched_out
+            printf "" > written_out
         }
         {
-            atime = $1; mtime = $2; bytes = $3; path = $4
-            written = mtime + 0 >= started + 0
-            touched = tracking == "on" && (atime + 0 > unread + 0.5 || written || (path in before))
+            atime = $1; ctime = $2; bytes = $3; path = $4
+            written = ctime + 0 > armed + 0 || (path in written_before)
+            touched = tracking == "on" && (atime + 0 > unread + 0.5 || written || (path in touched_before))
+            if (written) print path > written_out
             if (touched) print path > touched_out
             n = split(path, part, "/")
             if (n < 4 || part[1] != "local") next
@@ -128,8 +136,7 @@ admit() {
     local phase=$1 archive_bytes_max=$2
     local output=${GITHUB_OUTPUT:-/dev/null}
     printf 'save=false\n' >> "$output"
-    rm -rf -- "$snapshot"
-    if [[ ! -e "$state/started" || ! -d "$cache" ]]; then
+    if [[ ! -e "$state/armed" || ! -d "$cache" ]]; then
         printf 'Compiler cache %s: untracked; save skipped\n' "$phase"
         return 0
     fi
@@ -137,9 +144,11 @@ admit() {
         printf 'Compiler cache %s: nonregular file; save skipped\n' "$phase"
         return 0
     fi
-    find "$cache" -type f -printf '%A@\t%T@\t%s\t%P\n' > "$state/listing"
+    find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
     classify_local_units
     LC_ALL=C sort -u -o "$state/touched" "$state/touched" "$state/touched.next"
+    LC_ALL=C sort -u -o "$state/written" "$state/written" "$state/written.next"
+    rm -rf -- "$snapshot"
     cp -al -- "$cache" "$snapshot"
     while IFS= read -r unit; do
         rm -rf -- "${snapshot:?}/$unit"

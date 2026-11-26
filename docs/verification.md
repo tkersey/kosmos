@@ -171,7 +171,9 @@ After restoring, `tools/zig-cache.sh track` checks on the workspace filesystem t
 reading a file updates its access time, then marks every cached file unread. Before
 each save, `tools/zig-cache.sh admit` hard-links the cache into a snapshot and removes
 from each build cache the manifests, outputs, configurations and ZIR files that the
-run neither read nor wrote. Zig 0.17.1 reports a manifest hit as cached without
+run neither read nor wrote. A file counts as written when its change time follows
+tracking, since extraction can preserve a modification time but not a change time.
+Zig 0.17.1 reports a manifest hit as cached without
 checking that its output exists, and records no link from a manifest to its output,
 so an output may be removed only together with its manifest. A build cache is
 therefore pruned only when the number of restored manifests the run hit equals the

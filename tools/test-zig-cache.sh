@@ -51,6 +51,11 @@ compile() {
     printf '%s' "$1" > ".zig-cache/$1"
 }
 
+extract() {
+    compile "$1"
+    touch -m -d @1000000000 -- ".zig-cache/$1"
+}
+
 admit() {
     bash "$script" admit "$1" "${2:-1000000000}" > "$workspace/report"
 }
@@ -92,13 +97,16 @@ fi
 use local/build/h/hit local/build/o/used/test local/build/h/configuration local/build/c/configured
 compile local/build/o/new/test
 compile local/build/h/new
+extract local/build/o/extracted/source.zig
+use local/build/o/extracted/source.zig
 admit qualified
 expect_saved true
 expect_present local/build/h/hit local/build/o/used/test local/build/h/configuration \
     local/build/c/configured local/build/o/new/test local/build/h/new local/build/h/timestamp \
+    local/build/o/extracted/source.zig \
     h/global-manifest o/global-output/libcompiler_rt.a p/package.tar.gz
 expect_absent local/build/h/stale local/build/o/stale local/build/z/stale-zir tmp/.tmp-leftover
-expect_report 'local/build: 9 units; 2 hit manifests; 2 read outputs; every hit output read; pruned 3 units'
+expect_report 'local/build: 10 units; 2 hit manifests; 2 read outputs; every hit output read; pruned 3 units'
 
 begin unread-hit-output
 bash "$script" track > /dev/null
