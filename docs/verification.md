@@ -165,58 +165,91 @@ runner compiled for the runner's CPU, `compiler_rt`, libc stubs, builtin modules
 fetched package archives. Build caches live under `.zig-cache/local/`
 (`ZIG_LOCAL_CACHE_DIR` and every `--cache-dir`). The global caches are `.zig-cache`
 and, for the independent core rebuild, `.zig-cache/native-driver-core`. They are
-saved whole, so a lane keeps a build runner for every runner CPU model it has used
-and a new commit never recompiles the runtime libraries.
+saved whole while they fit the lane's ceiling (below), so a lane keeps a build runner
+for every runner CPU model it has used and a new commit never recompiles the runtime
+libraries.
 After restoring, `tools/zig-cache.sh track` checks on the workspace filesystem that
-reading a file updates its access time, then marks every cached file unread. Before
-each save, `tools/zig-cache.sh admit` hard-links the cache into a snapshot and removes
-from each build cache the manifests, outputs, configurations and ZIR files that the
-run neither read nor wrote. A file counts as written when its change time follows
-tracking, since extraction can preserve a modification time but not a change time.
-Zig 0.17.1 reports a manifest hit as cached without
-checking that its output exists, and records no link from a manifest to its output,
-so an output may be removed only together with its manifest. A build cache is
-therefore pruned only when the number of restored manifests the run hit equals the
-number of restored outputs and configurations it read, that is, when every hit's
-output was read. Otherwise, or when access times do not track reads, nothing is
-removed from that cache. Temporary directories are emptied. Every file the run read
-or wrote stays, so rerunning the same commit, including the full rerun after a failed
-run, finds every artifact the run used. Native lanes read their test executables only
-when the tests run, so their pre-execution save usually keeps the whole cache and
-their end-of-lane save prunes it.
+reading a file updates its access time, marks every cached file unread and starts the
+lane's work deadline. Before the save, `tools/zig-cache.sh admit` hard-links the cache
+into a snapshot and prunes the build caches by Zig's own manifest-output pairs.
+Zig 0.17.1 stores a step's output in `o/F` or its configuration in `c/F`, where F is
+the digest `std/Build/Cache.zig` computes from the manifest's file name and the file
+digests the manifest records (`finalDigest`), and it reports a manifest hit as cached
+without checking that the output exists. `tools/zig-cache-pairs.zig` computes F with
+Zig's own `Cache.hasher_init` and manifest layout. In 1,324 manifests from five local
+caches every finalized manifest named an existing output; only never-finalized, empty
+manifests named none. The admission keeps a manifest together with its output when the
+run read or wrote either, and removes both otherwise. Outputs that no manifest names
+and ZIR files stay when the run read or wrote them. A file counts as written when its
+change time follows tracking, since extraction can preserve its access and
+modification times but not its change time. A kept manifest therefore always keeps
+its output. A manifest whose output is absent is the state in which Zig reports the
+step `cached` and the next step fails with `checking cache failed: file_open
+FileNotFound`; the admission removes such a manifest from every snapshot, read or not.
+The failing lane's own save then replaces the broken entry, retention deletes it, and
+the next run rebuilds that step. Without working access times nothing else is removed.
+Temporary directories are emptied. Every file the run read or wrote stays, so the full
+rerun after a failed run finds every artifact a lane used once that lane reached its
+admission.
+Each lane's build and test steps run through `tools/zig-cache.sh work`, which ends
+them 510 seconds after tracking started: TERM, then KILL after 10 seconds. Tracking
+started at most 24 seconds into a job in the measured runs, and admission plus save took
+at most 6 seconds, so a lane past its deadline fails, admits and saves its cache inside
+its 10-minute job limit. Reaching that limit instead would cancel the lane and skip its
+admission, which runs only when the run is not cancelled.
 The admission compresses the snapshot with the cache action's own archive pipeline
-(`tar --posix`, `zstdmt`) and saves it only if the archive plus 1 MiB is at most the
+(`tar --posix`, `zstdmt`) and saves it if the archive plus 1 MiB is at most the
 lane's ceiling: 224 MiB (234,881,024 bytes) for native-driver and 144 MiB
 (150,994,944 bytes) for every other lane. The slack covers the access and change
 times tar records, which differ between the measurement and the save; observed
-archives differed by at most 15 KB. Otherwise the previous entry stays. A
-snapshot whose paths and sizes equal the restored or already saved entry is not saved
-again. One ref's 14 lane entries therefore total at most S = 2,197,815,296 bytes, and
-one run saves at most R = 2,734,686,208 bytes, since each native lane may also save
-before execution. Fork pull requests restore caches but never save them.
-Every run except a fork's ends with `Keep compiler caches within budget`, also after
-a failure or cancellation. It checks out nothing and runs on a GitHub-hosted runner
-with only `actions: write`. It orders this ref's entries by run id, attempt and phase
-(`compiled` before `qualified`); GitHub assigns run ids in creation order. It deletes
-an entry when a later entry has the same lane and key prefix, or a different key
-prefix (host build target, CPU, Zig version or cache schema). Whichever of two
-overlapping runs finishes last, only the earlier run's entries are deleted, so an
-older configuration never deletes a newer one's set. The job then keeps the caches of
-every ref other than main within B = 10 GB − M − 2R, where M = max(S, main's compiler
-caches) + main's other caches, such as Zig's 57 MB tarball. It deletes those refs'
-entries least recently used first, never main's or this ref's.
+archives differed by at most 15 KB. A lane's archive is its pruned build caches plus
+its global caches, which grow by a build runner, about 7.8 MB compressed, for each new
+runner CPU model. Six models have been observed (graniterapids, emeraldrapids, icelake,
+znver3, znver4 and znver5). With eight, the measured archives would reach at most
+127 MB for the other lanes and 196 MB for native-driver, whose core rebuild keeps a
+second global cache. If an archive exceeds its ceiling, the admission prunes the global
+caches by the same pairs and saves what the run used; the global caches then grow
+again from the current model. Only if that archive also exceeds the ceiling does the
+lane skip its save, with a warning, and keep its previous entry. Each lane saves at
+most once per run attempt, so one ref's 14 lane entries total at most
+S = 2,197,815,296 bytes. A run also saves the setup-zig action's Zig tarball when no
+cache visible to its ref holds it (57,413,921 bytes for 0.17.1 on x86_64 Linux), so one
+run saves at most R = S + 64 MiB = 2,264,924,160 bytes. Fork pull requests restore
+compiler caches but never save them.
+Every run except a fork's ends with `Keep compiler caches within budget`, also after a
+failure or cancellation. It waits for TigerStyle and every lane, so every job that can
+save a cache in that run has finished before it lists the caches. It checks out
+nothing, runs on a GitHub-hosted runner with only `actions: write`, and decides every
+deletion in one jq program. An entry is superseded when a later entry of its ref,
+ordered by run id and attempt, has the same lane and key prefix or a different key
+prefix (host build target, CPU, Zig version or cache schema); GitHub assigns run ids in
+creation order. The job deletes the superseded entries of every ref except main, and
+main's when it runs for main. A lane restores before it saves, so no run still needs an
+entry its lane has superseded. The job then keeps refs other than main within
+B = 10 GB − M − 2R, where M = max(S, main's compiler caches) + main's other caches.
+It never deletes main's entries or its own ref's. It deletes first the entries of refs
+whose newest run succeeded or is not among this workflow's latest 100 runs, then those
+of refs whose newest run failed, was cancelled or is still running; within each group,
+least recently used first.
 If at most two runs of this workflow are in progress at any moment, counting a run
-from its first save until its budget job lists the caches, and every run's budget job
-completes, the repository's caches never exceed 10 GB. After the latest completed
-listing, refs other than main held at most B and main at most M, and every later save
-belongs to one of the at most two runs in progress, each saving at most R. GitHub
-evicts least recently used caches only above 10 GB, so pull request caches cannot
-cause main's to be evicted. A pull request's newest set is deleted by another ref's
-budget job only when refs other than main exceed B, so a failed run's set survives
-until its full rerun unless other refs save more than B in between. The first run of
-this layout started cold and saved a set of 1,000,513,446 bytes; the next run pruned
-it to 886,236,406 bytes, with every build cache certified. With main's caches at that
-time, B = 2,275,398,367 bytes, about two and a half such sets. Closing a pull
+from its first save until a budget job's listing includes its saves, and every
+non-fork run's budget job completes, the repository's caches never exceed 10 GB. After
+the latest completed listing, refs other than main held at most B and main at most M,
+and each run in progress saves at most R. GitHub evicts least recently used caches only
+above 10 GB, so pull request caches cannot cause main's to be evicted. This covers
+runs of this repository's workflow. Fork pull requests from contributors who have
+contributed before run without approval and use the workflow as their pull request
+edits it, so such a run can save caches outside this accounting.
+Another ref's budget job deletes a pull request's newest set only after every
+superseded entry and every entry of refs whose newest run succeeded, and only while the
+newest sets of refs awaiting a rerun or still running, plus the deleting run's own ref,
+exceed B. With main's caches on 2026-11-26 (1,021,140,724 compiler cache bytes and
+57,413,921 other bytes), M = 2,255,229,217 and B = 3,214,922,463 bytes, three and a
+half measured sets of 930,766,405 bytes. A failed run's set therefore survives until
+its full rerun while at most two other such sets are kept, for example another failed
+pull request and the ref whose run is finishing. With three, the job deletes the least
+recently used of them first. A ref midway through saving holds both sets only until
+the next budget job, which deletes the entries its new saves superseded. Closing a pull
 request runs `Closed pull request caches` from the base branch through
 `pull_request_target`. It checks out nothing, runs on a GitHub-hosted runner with only
 `actions: write`, and deletes every cache of that pull request's merge ref.
@@ -232,8 +265,8 @@ Every lane records the runner's own target and the host build target. Zig compil
 its build runner and configure script for the runner itself, and the
 extracted-package consumer keeps its default target, so only those entries vary by
 runner.
-The native owners, ordinary driver and checked recovery driver each compile on
-a separate runner and retain their bounded compiler caches before execution.
+The native owners, ordinary driver and checked recovery driver each compile and
+execute on a separate runner.
 The ordinary driver uses the legacy compiler and compares the shipped artifact
 byte for byte with the independently regenerated core. The checked recovery
 driver uses the optional compiler and the authenticated packaged core to exercise
