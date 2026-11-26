@@ -82,7 +82,6 @@ jobs:
           fi
           mkdir -p .zig-cache/tmp
       - name: Record native compiler and restored target identities
-        if: startsWith(matrix.lane, 'native') || matrix.lane == 'source'
         run: |
           builtin_target() {
             awk '
