@@ -71,20 +71,29 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
-            kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/
-            kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'browser' && 'portable' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/
-      - name: Select working cache
+            kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'source' && 'source-second' || matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
+            kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/
+            kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane == 'browser' && 'portable' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/
+      - name: Select working cache and track compiler cache access
         run: |
           if [ -d .zig-cache-upload ]; then
             test ! -e .zig-cache
             mv .zig-cache-upload .zig-cache
           fi
           mkdir -p .zig-cache/tmp
+          bash tools/zig-cache.sh track
+      - name: Keep local compiler caches apart from Zig's global cache
+        run: |
+          printf 'ZIG_LOCAL_CACHE_DIR=%s\n' "$PWD/.zig-cache/local/default" >> "$GITHUB_ENV"
+          if [ "${{ matrix.lane }}" = native-driver ]; then
+            printf 'KOSMOS_CACHE_ENTRY_BYTES_MAX=%s\n' "$KOSMOS_DRIVER_LANE_CACHE_BYTES_MAX" >> "$GITHUB_ENV"
+          else
+            printf 'KOSMOS_CACHE_ENTRY_BYTES_MAX=%s\n' "$KOSMOS_LANE_CACHE_BYTES_MAX" >> "$GITHUB_ENV"
+          fi
       - name: Record native compiler and restored target identities
         run: |
           builtin_target() {
@@ -132,24 +141,24 @@ jobs:
           trap 'kill "$observer" 2>/dev/null || true' EXIT
           if [ "${{ matrix.lane }}" = native ]; then
             /usr/bin/time -v zig build build-storage-check build-semantics-check \
-              build-zig17-check --cache-dir .zig-cache/native-owners \
+              build-zig17-check --cache-dir .zig-cache/local/native-owners \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             /usr/bin/time -v zig build build-semantic-recovery-driver \
-              --cache-dir .zig-cache/native-driver \
+              --cache-dir .zig-cache/local/native-driver \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose
           else
             ZIG_LOCAL_PKG_DIR="$PWD/.zig-cache/native-driver-core/zig-pkg" \
               ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache/native-driver-core" \
               /usr/bin/time -v zig build semantic-artifact --prefix "$RUNNER_TEMP/driver-core" \
-              --cache-dir .zig-cache/native-driver-core \
+              --cache-dir .zig-cache/local/native-driver-core \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             core_pid=$!
             /usr/bin/time -v zig build build-semantic-driver-executable \
-              --cache-dir .zig-cache/native-driver \
+              --cache-dir .zig-cache/local/native-driver \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             driver_pid=$!
@@ -159,61 +168,37 @@ jobs:
             exit "$status"
           fi
       - name: Admit completed native compilation before execution
-        id: native_cache_size
+        id: native_cache_admission
         if: startsWith(matrix.lane, 'native')
         continue-on-error: true
-        run: |
-          echo 'save=false' >> "$GITHUB_OUTPUT"
-          native_objects=.zig-cache-upload/native-owners/o
-          if [ "${{ matrix.lane }}" != native ]; then
-            native_objects=.zig-cache-upload/native-driver/o
-          fi
-          test -d "${native_objects/.zig-cache-upload/.zig-cache}" || exit 0
-          test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
-          test -n "$(find "${native_objects/.zig-cache-upload/.zig-cache}" -type f -size +0c -print -quit)" || exit 0
-          bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
-          echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
-          test ! -e .zig-cache-upload
-          cp -al .zig-cache .zig-cache-upload
-          while IFS= read -r -d '' object; do
-            test "$bytes" -gt 4294967296 || break
-            object=${object#* }
-            removed=$(find "$object" -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
-            rm -rf -- "$object"
-            bytes=$((bytes - removed))
-          done < <(
-            for objects in .zig-cache-upload/o .zig-cache-upload/native-owners/o .zig-cache-upload/native-driver/o .zig-cache-upload/native-driver-core/o; do
-              test ! -d "$objects" || find "$objects" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0'
-            done | sort -zn
-          )
-          bytes=$(find .zig-cache-upload -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
-          echo "Upload snapshot: $bytes bytes"
-          test "$bytes" -le 4294967296 || exit 0
-          test -n "$(find "$native_objects" -type f -size +0c -print -quit)" || exit 0
-          echo 'save=true' >> "$GITHUB_OUTPUT"
+        run: bash tools/zig-cache.sh admit compiled "$KOSMOS_CACHE_ENTRY_BYTES_MAX"
       - name: Retain completed native compilation before execution
-        if: steps.native_cache_size.outputs.save == 'true'
+        if: steps.native_cache_admission.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-compiled
+      - name: Track compiler cache access during execution
+        if: steps.native_cache_admission.outcome == 'success'
+        continue-on-error: true
+        run: bash tools/zig-cache.sh track
       - name: Check native owners and independently rebuild the core
         if: startsWith(matrix.lane, 'native')
         run: |
           if [ "${{ matrix.lane }}" = native ]; then
             zig build check-storage check-semantics check-zig17 \
-              --cache-dir .zig-cache/native-owners \
+              --cache-dir .zig-cache/local/native-owners \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             zig build check-semantic-recovery-driver \
-              --cache-dir .zig-cache/native-driver \
+              --cache-dir .zig-cache/local/native-driver \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           else
             zig build check-installed-semantic-driver --prefix "$RUNNER_TEMP/driver-core" \
-              --cache-dir .zig-cache/native-driver \
+              --cache-dir .zig-cache/local/native-driver \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           fi
@@ -274,7 +259,7 @@ jobs:
           test -n "$legacy_hash"
           cp -R "zig-pkg/$legacy_hash" "$scratch/system/$legacy_hash"
           ZIG_GLOBAL_CACHE_DIR="$scratch/cache" zig build --build-file "$scratch/consumer/build.zig" \
-            --system "$scratch/system" --cache-dir "$PWD/.zig-cache/native-consumer" \
+            --system "$scratch/system" --cache-dir "$PWD/.zig-cache/local/native-consumer" \
             -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second'
@@ -323,28 +308,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Admit complete bounded compiler cache
-        id: cache_size
-        if: ${{ !cancelled() && !startsWith(matrix.lane, 'native') }}
+      - name: Admit the lane's bounded compiler cache
+        id: cache_admission
+        if: ${{ !cancelled() }}
         continue-on-error: true
-        run: |
-          echo 'save=false' >> "$GITHUB_OUTPUT"
-          test -d .zig-cache/o || exit 0
-          test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
-          test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
-          bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
-          echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
-          test "$bytes" -le 4294967296 || exit 0
-          test ! -e .zig-cache-upload
-          cp -al .zig-cache .zig-cache-upload
-          echo 'save=true' >> "$GITHUB_OUTPUT"
-      - name: Save useful cache without deleting outputs
-        if: ${{ !cancelled() && steps.cache_size.outputs.save == 'true' }}
+        run: bash tools/zig-cache.sh admit qualified "$KOSMOS_CACHE_ENTRY_BYTES_MAX"
+      - name: Retain the lane's bounded compiler cache
+        if: ${{ !cancelled() && steps.cache_admission.outputs.save == 'true' }}
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: kosmos-native-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-qualified
   runtime-complete:
     name: Runtime qualification budget
     needs: qualify
