@@ -156,10 +156,11 @@ ABI fixture peer. Compiler caches may reuse content across dependency-lock chang
 Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
-Hosted lanes pass `-Dhost-cpu=x86_64_v3`, a CPU model that every hosted runner
-supports, so host tools, the evaluator emitter and native tests compile to the
-same cache entries on every runner model. The target defaults to that host.
-The native lanes still record the runner's own CPU. Zig compiles its build runner
+Hosted lanes pass `-Dhost-cpu=x86_64_v3+sha`, which every observed hosted runner
+model supports, so host tools, the evaluator emitter and native tests compile to the
+same cache entries on every runner model. SHA extensions keep artifact digests on
+the hardware path. The target defaults to that host.
+Every lane still records the runner's own CPU. Zig compiles its build runner
 for the runner's CPU, and the extracted-package consumer keeps its default target,
 so only those entries vary by CPU model. Builds without the option use the native CPU.
 The native owners, ordinary driver and checked recovery driver each compile on

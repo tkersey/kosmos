@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      KOSMOS_HOST_CPU: x86_64_v3
+      KOSMOS_HOST_CPU: x86_64_v3+sha
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
