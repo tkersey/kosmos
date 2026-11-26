@@ -193,10 +193,11 @@ rerun after a failed run finds every artifact a lane used once that lane reached
 admission.
 Each lane's build and test steps run through `tools/zig-cache.sh work`, which ends
 them 510 seconds after tracking started: TERM, then KILL after 10 seconds. Tracking
-started at most 24 seconds into a job in the measured runs, and admission plus save took
-at most 6 seconds, so a lane past its deadline fails, admits and saves its cache inside
-its 10-minute job limit. Reaching that limit instead would cancel the lane and skip its
-admission, which runs only when the run is not cancelled.
+started at most 24 seconds into a job in the measured runs, and admission, including
+the pairing tool's compilation, plus save took at most 10 seconds, so a lane past its
+deadline fails, admits and saves its cache inside its 10-minute job limit. Reaching
+that limit instead would cancel the lane and skip its admission, which runs only when
+the run is not cancelled.
 The admission compresses the snapshot with the cache action's own archive pipeline
 (`tar --posix`, `zstdmt`) and saves it if the archive plus 1 MiB is at most the
 lane's ceiling: 224 MiB (234,881,024 bytes) for native-driver and 144 MiB
@@ -244,8 +245,8 @@ Another ref's budget job deletes a pull request's newest set only after every
 superseded entry and every entry of refs whose newest run succeeded, and only while the
 newest sets of refs awaiting a rerun or still running, plus the deleting run's own ref,
 exceed B. With main's caches on 2026-11-26 (1,021,140,724 compiler cache bytes and
-57,413,921 other bytes), M = 2,255,229,217 and B = 3,214,922,463 bytes, three and a
-half measured sets of 930,766,405 bytes. A failed run's set therefore survives until
+57,413,921 other bytes), M = 2,255,229,217 and B = 3,214,922,463 bytes, 3.4 times the
+measured set of 954,774,387 bytes. A failed run's set therefore survives until
 its full rerun while at most two other such sets are kept, for example another failed
 pull request and the ref whose run is finishing. With three, the job deletes the least
 recently used of them first. A ref midway through saving holds both sets only until
