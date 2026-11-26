@@ -185,9 +185,11 @@ run, finds every artifact the run used. Native lanes read their test executables
 when the tests run, so their pre-execution save usually keeps the whole cache and
 their end-of-lane save prunes it.
 The admission compresses the snapshot with the cache action's own archive pipeline
-(`tar --posix`, `zstdmt`) and saves it only if the archive is at most the
+(`tar --posix`, `zstdmt`) and saves it only if the archive plus 1 MiB is at most the
 lane's ceiling: 224 MiB (234,881,024 bytes) for native-driver and 144 MiB
-(150,994,944 bytes) for every other lane. Otherwise the previous entry stays. A
+(150,994,944 bytes) for every other lane. The slack covers the access and change
+times tar records, which differ between the measurement and the save; observed
+archives differed by at most 15 KB. Otherwise the previous entry stays. A
 snapshot whose paths and sizes equal the restored or already saved entry is not saved
 again. One ref's 14 lane entries therefore total at most S = 2,197,815,296 bytes, and
 one run saves at most R = 2,734,686,208 bytes, since each native lane may also save

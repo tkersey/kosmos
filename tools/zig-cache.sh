@@ -5,6 +5,7 @@ cache=.zig-cache
 snapshot=.zig-cache-upload
 state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
 unread_epoch=1
+archive_timestamp_slack_bytes=1048576
 
 usage() {
     printf 'Usage: bash tools/zig-cache.sh track\n' >&2
@@ -169,7 +170,7 @@ admit() {
     archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 -q -c | wc -c)
     printf 'Compiler cache %s: cache %s bytes; snapshot %s bytes (%s local); archive %s bytes (maximum %s)\n' \
         "$phase" "$cache_bytes" "$snapshot_bytes" "$local_bytes" "$archive_bytes" "$archive_bytes_max"
-    if (( archive_bytes > archive_bytes_max )); then
+    if (( archive_bytes + archive_timestamp_slack_bytes > archive_bytes_max )); then
         printf 'Compiler cache %s: archive exceeds the lane maximum; save skipped, previous entry kept\n' \
             "$phase"
         return 0
