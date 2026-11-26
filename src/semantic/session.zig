@@ -38,6 +38,7 @@ pub const Error = Errors(driver.Driver.start) || Errors(driver.Driver.pump) ||
 /// Repeated sessions share both admitted guest metadata and the evaluator's
 /// prepared code. Session allocation never recompiles or re-admits that code.
 pub const Prepared = struct {
+    pub const Guest = GuestPrepared;
     guest: GuestPrepared,
     runtime: artifact.Admitted,
     pub fn init(a: std.mem.Allocator, image: []const u8) Error!Prepared {
@@ -54,6 +55,27 @@ pub const Prepared = struct {
         errdefer runtime.deinit();
         var guest = try GuestPrepared.init(a, image);
         errdefer guest.deinit();
+        return bind(guest, runtime);
+    }
+    pub fn initWithGuest(a: std.mem.Allocator, selected_guest: *const Guest) Error!Prepared {
+        var guest = try selected_guest.clone();
+        errdefer guest.deinit();
+        var runtime = try builtin(a);
+        errdefer runtime.deinit();
+        return bind(guest, runtime);
+    }
+    pub fn initWithGuestAndRuntime(
+        _: std.mem.Allocator,
+        selected_guest: *const Guest,
+        selected_runtime: *const artifact.Admitted,
+    ) Error!Prepared {
+        var runtime = try selected_runtime.clone();
+        errdefer runtime.deinit();
+        var guest = try selected_guest.clone();
+        errdefer guest.deinit();
+        return bind(guest, runtime);
+    }
+    fn bind(guest: Guest, runtime: artifact.Admitted) Error!Prepared {
         if (runtime.content.value.guest) |identity| if (!std.mem.eql(
             u8,
             &identity,

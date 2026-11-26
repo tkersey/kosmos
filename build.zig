@@ -1093,6 +1093,7 @@ fn configureWasmModules(
         .root_source_file = b.path("src/kernel/main.zig"),
         .target = wasm_target,
         .optimize = options.kernel_mode,
+        .strip = true,
         .imports = &.{ .{ .name = "runtime", .module = current_runtime }, .{
             .name = "horos_data",
             .module = wasm_data,
