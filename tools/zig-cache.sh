@@ -3,19 +3,18 @@ set -euo pipefail
 
 cache=.zig-cache
 snapshot=.zig-cache-upload
-state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
+work_directory=${RUNNER_TEMP:?}
+state=${KOSMOS_CACHE_STATE:-$work_directory/zig-cache-access}
+pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 unread_epoch=1
 archive_timestamp_slack_bytes=1048576
+deadline_kill_seconds=10
 
 usage() {
-    printf 'Usage: bash tools/zig-cache.sh track\n' >&2
-    printf '       bash tools/zig-cache.sh admit PHASE ARCHIVE_BYTES_MAX\n' >&2
+    printf 'Usage: bash tools/zig-cache.sh track WORK_SECONDS\n' >&2
+    printf '       bash tools/zig-cache.sh work STEP_SCRIPT\n' >&2
+    printf '       bash tools/zig-cache.sh admit ARCHIVE_BYTES_MAX\n' >&2
     exit 64
-}
-
-tree_identity() {
-    find "$1" -type f ! -path '*/tmp/*' ! -path '*/h/timestamp' -printf '%P\t%s\n' |
-        LC_ALL=C sort | sha256sum | cut -d' ' -f1
 }
 
 tree_bytes() {
@@ -42,89 +41,114 @@ access_time_tracking() {
 }
 
 track() {
+    local work_seconds=$1
     rm -rf -- "$snapshot"
     mkdir -p -- "$state" "$cache/tmp"
-    if [[ ! -e "$state/restored" ]]; then
-        : > "$state/touched"
-        : > "$state/written"
-        tree_identity "$cache" > "$state/restored"
-        access_time_tracking > "$state/tracking"
-        printf 'Compiler cache restored: %s bytes; access tracking %s\n' \
-            "$(tree_bytes "$cache")" "$(< "$state/tracking")"
-    fi
+    access_time_tracking > "$state/tracking"
+    printf 'Compiler cache restored: %s bytes; access tracking %s\n' \
+        "$(tree_bytes "$cache")" "$(< "$state/tracking")"
     if [[ "$(< "$state/tracking")" == on ]]; then
         find "$cache" -type f -exec touch -a -d "@$unread_epoch" -- {} +
     fi
     date +%s.%N > "$state/armed"
+    printf '%s\n' "$(( $(date +%s) + work_seconds ))" > "$state/deadline"
 }
 
-classify_local_units() {
+work() {
+    local deadline remaining status=0
+    deadline=$(< "$state/deadline")
+    remaining=$(( deadline - $(date +%s) ))
+    if (( remaining > 0 )); then
+        timeout --kill-after="$deadline_kill_seconds" "$remaining" \
+            bash --noprofile --norc -eo pipefail "$1" || status=$?
+    else
+        status=124
+    fi
+    if (( status != 0 && $(date +%s) >= deadline )); then
+        printf '::error::Lane work reached its deadline; the compiler cache is still admitted\n'
+        status=124
+    fi
+    return "$status"
+}
+
+unit_program='
+    function unit(path,    part, n, k) {
+        n = split(path, part, "/")
+        k = (part[1] == "local") ? 3 : ((part[1] ~ /^(h|o|c|z)$/) ? 1 : 2)
+        root = (k == 1) ? "" : ((k == 2) ? part[1] "/" : part[1] "/" part[2] "/")
+        kind = part[k]
+        if (n <= k || kind !~ /^(h|o|c|z)$/) return ""
+        if (kind == "h" && (n != k + 1 || part[n] == "timestamp")) return ""
+        return root kind "/" part[k + 1]
+    }
+'
+
+pair_manifests() {
+    awk -F '\t' "$unit_program"'{ if (unit($4) != "" && kind == "h") print unit($4) }' \
+        "$state/listing" |
+        zig run --cache-dir "$work_directory/zig-cache-pairs/local" \
+            --global-cache-dir "$work_directory/zig-cache-pairs/global" \
+            "$pairs_source" -- "$cache" > "$state/pairs"
+}
+
+classify_units() {
     awk -F '\t' \
+        -v scope="$1" \
         -v armed="$(< "$state/armed")" \
         -v tracking="$(< "$state/tracking")" \
         -v unread="$unread_epoch" \
-        -v touched_in="$state/touched" \
-        -v written_in="$state/written" \
-        -v touched_out="$state/touched.next" \
-        -v written_out="$state/written.next" \
-        -v prune_out="$state/prune" '
+        -v pairs_in="$state/pairs" \
+        -v prune_out="$state/prune" "$unit_program"'
         BEGIN {
-            while ((getline line < touched_in) > 0) touched_before[line] = 1
-            close(touched_in)
-            while ((getline line < written_in) > 0) written_before[line] = 1
-            close(written_in)
-            printf "" > touched_out
-            printf "" > written_out
+            while ((getline line < pairs_in) > 0) {
+                split(line, field, "\t")
+                output_of[field[1]] = field[2]
+                if (field[2] != "") manifest_of[field[2]] = field[1]
+            }
+            close(pairs_in)
         }
         {
-            atime = $1; ctime = $2; bytes = $3; path = $4
-            written = ctime + 0 > armed + 0 || (path in written_before)
-            touched = tracking == "on" && (atime + 0 > unread + 0.5 || written || (path in touched_before))
-            if (written) print path > written_out
-            if (touched) print path > touched_out
-            n = split(path, part, "/")
-            if (n < 4 || part[1] != "local") next
-            kind = part[3]
-            if (kind !~ /^(h|o|c|z)$/) next
-            if (kind == "h" && part[4] == "timestamp") next
-            unit = part[1] "/" part[2] "/" kind "/" part[4]
-            unit_root[unit] = part[2]
-            unit_kind[unit] = kind
-            unit_bytes[unit] += bytes
-            if (touched) unit_touched[unit] = 1
-            if (written) unit_written[unit] = 1
-            roots[part[2]] = 1
+            name = unit($4)
+            if (name == "") next
+            unit_root[name] = root
+            unit_bytes[name] += $3
+            if ($2 + 0 > armed + 0 || (tracking == "on" && $1 + 0 > unread + 0.5)) used[name] = 1
         }
         END {
             printf "" > prune_out
-            for (unit in unit_root) {
-                root = unit_root[unit]
+            for (name in unit_root) {
+                group[name] = (name in manifest_of) ? manifest_of[name] : name
+                if (name in used) group_used[group[name]] = 1
+            }
+            for (name in unit_root) {
+                root = unit_root[name]
                 units[root]++
-                if (!(unit in unit_touched) || (unit in unit_written)) continue
-                if (unit_kind[unit] == "h") hits[root]++
-                if (unit_kind[unit] == "o" || unit_kind[unit] == "c") reads[root]++
-            }
-            for (root in roots) {
-                certified[root] = tracking == "on" && hits[root] + 0 == reads[root] + 0
-            }
-            for (unit in unit_root) {
-                root = unit_root[unit]
-                if (!certified[root] || (unit in unit_touched)) continue
-                print unit > prune_out
+                manifest = (name in output_of)
+                broken = (group[name] in output_of) && output_of[group[name]] == ""
+                prunable = tracking == "on" && (scope == "all" || root ~ /^local\//)
+                if (manifest && !broken) pairs[root]++
+                if (manifest && broken) dropped[root]++
+                if (!broken && (!prunable || (group[name] in group_used))) continue
+                print name > prune_out
+                if (manifest && output_of[name] != "") print output_of[name] > prune_out
                 pruned[root]++
-                pruned_bytes[root] += unit_bytes[unit]
+                pruned_bytes[root] += unit_bytes[name]
             }
-            for (root in roots) {
-                printf "Compiler cache local/%s: %d units; %d hit manifests; %d read outputs; %s; pruned %d units (%.0f bytes)\n", \
-                    root, units[root], hits[root], reads[root], \
-                    certified[root] ? "every hit output read" : "pruning withheld", \
+            for (root in units) {
+                printf "Compiler cache %s: %d units; %d manifest-output pairs; %d manifests without output dropped; pruned %d units (%.0f bytes)\n", \
+                    root == "" ? "global" : root, units[root], pairs[root], dropped[root], \
                     pruned[root], pruned_bytes[root]
             }
         }
     ' "$state/listing"
 }
 
-empty_temporary_directories() {
+take_snapshot() {
+    rm -rf -- "$snapshot"
+    cp -al -- "$cache" "$snapshot"
+    while IFS= read -r unit; do
+        rm -rf -- "${snapshot:?}/$unit"
+    done < "$state/prune"
     local directory
     for directory in "$snapshot/tmp" "$snapshot"/*/tmp "$snapshot"/local/*/tmp; do
         if [[ -d "$directory" ]]; then
@@ -134,60 +158,49 @@ empty_temporary_directories() {
 }
 
 admit() {
-    local phase=$1 archive_bytes_max=$2
+    local archive_bytes_max=$1
     local output=${GITHUB_OUTPUT:-/dev/null}
     printf 'save=false\n' >> "$output"
     if [[ ! -e "$state/armed" || ! -d "$cache" ]]; then
-        printf 'Compiler cache %s: untracked; save skipped\n' "$phase"
+        printf 'Compiler cache: untracked; save skipped\n'
         return 0
     fi
     if [[ -n "$(find "$cache" ! -type d ! -type f -print -quit)" ]]; then
-        printf 'Compiler cache %s: nonregular file; save skipped\n' "$phase"
+        printf 'Compiler cache: nonregular file; save skipped\n'
         return 0
     fi
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
-    classify_local_units
-    LC_ALL=C sort -u -o "$state/touched" "$state/touched" "$state/touched.next"
-    LC_ALL=C sort -u -o "$state/written" "$state/written" "$state/written.next"
-    rm -rf -- "$snapshot"
-    cp -al -- "$cache" "$snapshot"
-    while IFS= read -r unit; do
-        rm -rf -- "${snapshot:?}/$unit"
-    done < "$state/prune"
-    empty_temporary_directories
-    local cache_bytes snapshot_bytes local_bytes identity
-    cache_bytes=$(tree_bytes "$cache")
-    snapshot_bytes=$(tree_bytes "$snapshot")
-    local_bytes=$(tree_bytes "$snapshot/local")
-    identity=$(tree_identity "$snapshot")
-    if [[ "$identity" == "$(< "$state/restored")" ]] ||
-        [[ -e "$state/saved" && "$identity" == "$(< "$state/saved")" ]]; then
-        printf 'Compiler cache %s: snapshot %s bytes equals the restored or saved entry; save skipped\n' \
-            "$phase" "$snapshot_bytes"
-        return 0
-    fi
-    local archive_bytes
-    archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 -q -c | wc -c)
-    printf 'Compiler cache %s: cache %s bytes; snapshot %s bytes (%s local); archive %s bytes (maximum %s)\n' \
-        "$phase" "$cache_bytes" "$snapshot_bytes" "$local_bytes" "$archive_bytes" "$archive_bytes_max"
-    if (( archive_bytes + archive_timestamp_slack_bytes > archive_bytes_max )); then
-        printf 'Compiler cache %s: archive exceeds the lane maximum; save skipped, previous entry kept\n' \
-            "$phase"
-        return 0
-    fi
-    printf '%s\n' "$identity" > "$state/saved"
-    printf 'save=true\n' >> "$output"
-    printf 'Compiler cache %s: save\n' "$phase"
+    pair_manifests
+    local scope archive_bytes
+    for scope in build all; do
+        classify_units "$scope"
+        take_snapshot
+        archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 -q -c | wc -c)
+        printf 'Compiler cache (%s caches pruned): cache %s bytes; snapshot %s bytes (%s local); archive %s bytes (maximum %s)\n' \
+            "$scope" "$(tree_bytes "$cache")" "$(tree_bytes "$snapshot")" \
+            "$(tree_bytes "$snapshot/local")" "$archive_bytes" "$archive_bytes_max"
+        if (( archive_bytes + archive_timestamp_slack_bytes <= archive_bytes_max )); then
+            printf 'save=true\n' >> "$output"
+            printf 'Compiler cache: save\n'
+            return 0
+        fi
+    done
+    printf '::warning::Compiler cache: even what this run used exceeds the lane maximum of %s bytes; save skipped, previous entry kept\n' \
+        "$archive_bytes_max"
 }
 
 case "${1:-}" in
     track)
-        [[ $# -eq 1 ]] || usage
-        track
+        [[ $# -eq 2 && "$2" =~ ^[0-9]+$ ]] || usage
+        track "$2"
+        ;;
+    work)
+        [[ $# -eq 2 ]] || usage
+        work "$2"
         ;;
     admit)
-        [[ $# -eq 3 && "$3" =~ ^[0-9]+$ ]] || usage
-        admit "$2" "$3"
+        [[ $# -eq 2 && "$2" =~ ^[0-9]+$ ]] || usage
+        admit "$2"
         ;;
     *)
         usage
