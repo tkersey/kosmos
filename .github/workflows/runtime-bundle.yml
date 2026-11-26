@@ -10,6 +10,11 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  KOSMOS_LANE_CACHE_BYTES_MAX: 150994944
+  KOSMOS_DRIVER_LANE_CACHE_BYTES_MAX: 234881024
+  KOSMOS_CACHE_REPOSITORY_BYTES_MAX: 10000000000
+  KOSMOS_CACHE_RUNS_IN_FLIGHT: 2
 jobs:
   tiger-style:
     name: TigerStyle
@@ -373,21 +378,20 @@ jobs:
         run: |
           test "$TIGER_STYLE" = success
           test "$QUALIFICATION" = success
-  cache-retention:
-    name: Keep one compiler cache per lane
+  compiler-caches:
+    name: Keep compiler caches within budget
     needs: qualify
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CACHE_REF: ${{ github.ref }}
     steps:
       - name: Delete this ref's superseded compiler caches
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          CACHE_REF: ${{ github.ref }}
-          RUN_SUFFIX: -${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -o pipefail
           ref_caches() {
@@ -395,16 +399,17 @@ jobs:
               -f ref="$CACHE_REF" -F per_page=100 \
               --jq '.actions_caches[] | select(.key | startswith("kosmos-native-"))'
           }
-          ref_caches | jq -rs --arg suffix "$RUN_SUFFIX" '
-            (map(select(.key | endswith($suffix)))
-              | if length > 0 then .[0].key | split("/")[0] else "" end) as $current
-            | select($current != "")
-            | map(select((.key | split("/")[0]) != $current))
-              + (map(select((.key | split("/")[0]) == $current))
-                | group_by(.key | split("/")[1])
-                | map(sort_by(.created_at) | .[:-1])
-                | add // [])
-            | .[] | [.id, .size_in_bytes, .key] | @tsv
+          ref_caches | jq -rs '
+            def position:
+              capture("-(?<run>[0-9]+)-(?<attempt>[0-9]+)(-(?<phase>[a-z]+))?$")
+              | [(.run | tonumber), (.attempt | tonumber), (.phase // "")];
+            [.[] | select(.key | test("-[0-9]+-[0-9]+(-[a-z]+)?$"))
+              | . + {position: (.key | position), prefix: (.key | split("/")[0]),
+                lane: (.key | split("/")[1])}] as $entries
+            | $entries[] | . as $entry
+            | select(any($entries[]; .position > $entry.position
+                and (.prefix != $entry.prefix or .lane == $entry.lane)))
+            | [.id, .size_in_bytes, .key] | @tsv
           ' > "$RUNNER_TEMP/superseded.tsv"
           while IFS=$'\t' read -r id bytes key; do
             echo "Deleting $key ($bytes bytes)"
@@ -421,3 +426,72 @@ jobs:
           echo "$CACHE_REF compiler caches: deleted $deleted, kept $kept" |
             tee -a "$GITHUB_STEP_SUMMARY"
           test ! -s "$RUNNER_TEMP/undeleted.txt"
+      - name: Keep other refs' caches within the repository budget
+        if: always()
+        env:
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -o pipefail
+          all_caches() {
+            gh api -X GET --paginate "repos/$GH_REPO/actions/caches" -F per_page=100 \
+              --jq '.actions_caches[]'
+          }
+          gh api -X GET --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+            -F per_page=100 --jq '.jobs[].name | select(startswith("Qualify / ")) | ltrimstr("Qualify / ")' \
+            > "$RUNNER_TEMP/lanes.txt"
+          test -s "$RUNNER_TEMP/lanes.txt"
+          set_bytes=0
+          run_bytes=0
+          while IFS= read -r lane; do
+            entry_bytes=$KOSMOS_LANE_CACHE_BYTES_MAX
+            if [ "$lane" = native-driver ]; then
+              entry_bytes=$KOSMOS_DRIVER_LANE_CACHE_BYTES_MAX
+            fi
+            set_bytes=$((set_bytes + entry_bytes))
+            run_bytes=$((run_bytes + entry_bytes))
+            case "$lane" in native*) run_bytes=$((run_bytes + entry_bytes)) ;; esac
+          done < "$RUNNER_TEMP/lanes.txt"
+          all_caches > "$RUNNER_TEMP/caches.json"
+          main_compiler_bytes=$(jq -rs --arg main "$DEFAULT_REF" \
+            'map(select(.ref == $main and (.key | startswith("kosmos-native-"))) | .size_in_bytes) | add // 0' \
+            "$RUNNER_TEMP/caches.json")
+          main_other_bytes=$(jq -rs --arg main "$DEFAULT_REF" \
+            'map(select(.ref == $main and (.key | startswith("kosmos-native-") | not)) | .size_in_bytes) | add // 0' \
+            "$RUNNER_TEMP/caches.json")
+          main_reserved=$(((main_compiler_bytes > set_bytes ? main_compiler_bytes : set_bytes) + main_other_bytes))
+          budget=$((KOSMOS_CACHE_REPOSITORY_BYTES_MAX - main_reserved - KOSMOS_CACHE_RUNS_IN_FLIGHT * run_bytes))
+          {
+            echo "Lanes: $(wc -l < "$RUNNER_TEMP/lanes.txt"); one set at most $set_bytes bytes; one run saves at most $run_bytes bytes"
+            echo "$DEFAULT_REF: $main_compiler_bytes compiler cache bytes, $main_other_bytes other bytes; reserved $main_reserved bytes"
+            echo "Other refs' budget: $KOSMOS_CACHE_REPOSITORY_BYTES_MAX - $main_reserved - $KOSMOS_CACHE_RUNS_IN_FLIGHT x $run_bytes = $budget bytes"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$budget" -gt 0
+          jq -rs --arg main "$DEFAULT_REF" --arg current "$CACHE_REF" --argjson budget "$budget" '
+            (map(select(.ref != $main) | .size_in_bytes) | add // 0) as $total
+            | map(select(.ref != $main and .ref != $current))
+            | sort_by(.last_accessed_at, .created_at)
+            | reduce .[] as $entry ({excess: ($total - $budget), evicted: []};
+                if .excess > 0
+                then {excess: (.excess - $entry.size_in_bytes), evicted: (.evicted + [$entry])}
+                else . end)
+            | .evicted[] | [.id, .size_in_bytes, .ref, .last_accessed_at, .key] | @tsv
+          ' "$RUNNER_TEMP/caches.json" > "$RUNNER_TEMP/evicted.tsv"
+          while IFS=$'\t' read -r id bytes ref accessed key; do
+            echo "Deleting $ref $key ($bytes bytes, last used $accessed)"
+            gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" --silent || true
+          done < "$RUNNER_TEMP/evicted.tsv"
+          all_caches > "$RUNNER_TEMP/remaining.json"
+          jq -r '.id' "$RUNNER_TEMP/remaining.json" | LC_ALL=C sort > "$RUNNER_TEMP/remaining.txt"
+          cut -f1 "$RUNNER_TEMP/evicted.tsv" | LC_ALL=C sort |
+            LC_ALL=C comm -12 - "$RUNNER_TEMP/remaining.txt" > "$RUNNER_TEMP/undeleted.txt"
+          jq -rs 'group_by(.ref)[] | "\(.[0].ref): \(length) entries, \(map(.size_in_bytes) | add) bytes"' \
+            "$RUNNER_TEMP/remaining.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          other_bytes=$(jq -rs --arg main "$DEFAULT_REF" \
+            'map(select(.ref != $main) | .size_in_bytes) | add // 0' "$RUNNER_TEMP/caches.json")
+          evicted_bytes=$(cut -f2 "$RUNNER_TEMP/evicted.tsv" | awk '{ n += $1 } END { printf "%.0f", n }')
+          echo "Other refs: $other_bytes bytes listed; deleted $(wc -l < "$RUNNER_TEMP/evicted.tsv") entries ($evicted_bytes bytes); $((other_bytes - evicted_bytes)) bytes within $budget" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          test ! -s "$RUNNER_TEMP/undeleted.txt"
+          test "$((other_bytes - evicted_bytes))" -le "$budget"
