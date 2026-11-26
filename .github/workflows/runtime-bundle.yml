@@ -33,6 +33,8 @@ jobs:
         run: bash tools/tiger-style.sh "$TIGER_HEAD"
       - name: Verify TigerStyle selection and failure behavior
         run: bash tools/test-tiger-style.sh
+      - name: Verify compiler cache admission
+        run: TMPDIR="$RUNNER_TEMP" bash tools/test-zig-cache.sh
   qualify:
     name: Qualify / ${{ matrix.lane }}
     strategy:
