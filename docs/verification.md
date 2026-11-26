@@ -152,10 +152,13 @@ same authenticated packaged artifact. It does not invoke `check-native` and then
 overlapping `check`. Native test run steps always execute, even when compilation
 is cached. An independent native-consumer lane builds only its Horos-authored
 input producer and the extracted public package, without compiling the optional
-ABI fixture peer. Compiler caches may reuse content across dependency-lock changes.
-Cache lookup prefers the same lane across dependency-lock changes before its
-legacy cache fallbacks. Zig's input hashes and the dependency admission guards
-remain authoritative; a cache hit never replaces test execution.
+ABI fixture peer. A compiler cache key names the runner OS and architecture, Zig
+version, host build target and CPU, lane and dependency-lock hash. Every restore
+prefix names the same host build target and CPU, so an entry compiled for another
+host target is never restored. Lookup prefers the same lane and lock, then a related
+lane with the same lock, then the same lane or its related lane across dependency-lock
+changes. Zig's input hashes and the dependency admission guards remain
+authoritative; a cache hit never replaces test execution.
 Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
 `-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
 5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
