@@ -169,14 +169,19 @@ pull request closes. Closing a pull request runs `Closed pull request caches` fr
 the base branch through `pull_request_target`. It checks out nothing, runs on a
 GitHub-hosted runner with only `actions: write`, and deletes every cache of that
 pull request's merge ref; entries saved by a run still in progress at that moment
-remain until GitHub removes caches unused for seven days. Between runs the
-compiler caches total at most (1 + P) × S, where P counts open pull requests from this
-repository with saved caches and S is the size of one ref's 14 lane entries. Each
-run in progress adds at most S until its retention job. GitHub evicts the least
-recently used caches only above the repository's 10 GB limit, so with one run in
-progress main's entries are evicted only when (2 + P) × S exceeds 10 GB. S was 1.02 GB for main's 14 entries and at most 1.63 GB
-for a pull request whose cache still carried objects for an earlier host target,
-so main's caches survive up to four open pull requests with saved caches.
+remain until GitHub removes caches unused for seven days.
+Between runs the compiler caches total at most (1 + P) × S, where P counts open
+pull requests from this repository with saved caches and S is the size of one
+ref's 14 lane entries. Each run in progress adds at most S until its retention
+job. GitHub evicts the least recently used caches only above the repository's
+10 GB limit, so with one run in progress main's entries are evicted only when
+(2 + P) × S exceeds 10 GB. The retention job reports S on every run. The first
+run of this cache key left S = 1.02 GB; a full rerun on other runner models raised
+it to 1.15 GB, since each runner CPU model new to a lane adds about 10 MB, that
+lane's build runner. At 1.15 GB main's caches survive up to six open pull
+requests with saved caches; at 1.63 GB, the largest set observed for one ref
+before this key, up to four. A dependency-lock change restores the previous
+lock's objects, so S can grow until each lane reaches its 4 GiB upload limit.
 Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
 `-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
 5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
