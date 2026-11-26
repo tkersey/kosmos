@@ -156,13 +156,17 @@ ABI fixture peer. Compiler caches may reuse content across dependency-lock chang
 Cache lookup prefers the same lane across dependency-lock changes before its
 legacy cache fallbacks. Zig's input hashes and the dependency admission guards
 remain authoritative; a cache hit never replaces test execution.
-Hosted lanes pass `-Dhost-cpu=x86_64_v3+sha`, which every observed hosted runner
-model supports, so host tools, the evaluator emitter and native tests compile to the
-same cache entries on every runner model. SHA extensions keep artifact digests on
-the hardware path. The target defaults to that host.
-Every lane still records the runner's own CPU. Zig compiles its build runner
-for the runner's CPU, and the extracted-package consumer keeps its default target,
-so only those entries vary by CPU model. Builds without the option use the native CPU.
+Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
+`-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
+5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
+kernel or C library, and every observed hosted runner model supports that CPU.
+Host tools, the evaluator emitter and native tests therefore compile to the same
+cache entries on every runner. SHA extensions keep artifact digests on the hardware
+path. The target defaults to that host. A host CPU requires a host target that
+names its architecture, OS and ABI; builds without either option stay native.
+Every lane records the runner's own target and the host build target. Zig compiles
+its build runner for the runner itself, and the extracted-package consumer keeps its
+default target, so only those entries vary by runner.
 The native owners, ordinary driver and checked recovery driver each compile on
 a separate runner and retain their bounded compiler caches before execution.
 The ordinary driver uses the legacy compiler and compares the shipped artifact

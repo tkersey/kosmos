@@ -88,18 +88,33 @@ const Options = struct {
 };
 
 fn hostTarget(b: *std.Build) std.Build.ResolvedTarget {
+    const arch_os_abi = b.option(
+        []const u8,
+        "host-target",
+        "Explicit arch-os-abi for host tools and native tests (default: native)",
+    );
     const cpu = b.option(
         []const u8,
         "host-cpu",
-        "CPU model for host tools and native tests (default: native)",
-    ) orelse return b.graph.host;
-    const query = std.Build.parseTargetQuery(.{ .cpu_features = cpu }) catch |err| switch (err) {
-        error.ParseFailed => {
-            b.invalid_user_input = true;
-            return b.graph.host;
-        },
+        "CPU model for -Dhost-target (default: baseline)",
+    );
+    if (arch_os_abi == null and cpu == null) return b.graph.host;
+    const query = std.Build.parseTargetQuery(.{
+        .arch_os_abi = arch_os_abi orelse "native",
+        .cpu_features = cpu,
+    }) catch |err| switch (err) {
+        error.ParseFailed => return rejectHostTarget(b),
     };
+    if (query.cpu_arch == null or query.os_tag == null or query.abi == null) {
+        std.debug.print("-Dhost-target must name the architecture, OS and ABI\n", .{});
+        return rejectHostTarget(b);
+    }
     return b.resolveTargetQuery(query);
+}
+
+fn rejectHostTarget(b: *std.Build) std.Build.ResolvedTarget {
+    b.invalid_user_input = true;
+    return b.graph.host;
 }
 
 fn buildsForHost(host: std.Build.ResolvedTarget, target: std.Build.ResolvedTarget) bool {

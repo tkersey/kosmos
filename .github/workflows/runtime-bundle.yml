@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
+      KOSMOS_HOST_TARGET: x86_64-linux.5.10...7.2-gnu.2.31
       KOSMOS_HOST_CPU: x86_64_v3+sha
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -101,7 +102,8 @@ jobs:
             --cache-dir "$RUNNER_TEMP/zig-target-diagnostic-local" |
             builtin_target
           printf 'HOST BUILD TARGET\n'
-          zig build-exe --show-builtin -fno-llvm -Osafe -mcpu="$KOSMOS_HOST_CPU" \
+          zig build-exe --show-builtin -fno-llvm -Osafe \
+            -target "$KOSMOS_HOST_TARGET" -mcpu="$KOSMOS_HOST_CPU" \
             --global-cache-dir "$RUNNER_TEMP/zig-target-diagnostic-global" \
             --cache-dir "$RUNNER_TEMP/zig-target-diagnostic-local" |
             builtin_target
@@ -128,20 +130,24 @@ jobs:
           if [ "${{ matrix.lane }}" = native ]; then
             /usr/bin/time -v zig build build-storage-check build-semantics-check \
               build-zig17-check --cache-dir .zig-cache/native-owners \
-              -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe --summary all --verbose
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              -Doptimize=safe --summary all --verbose
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             /usr/bin/time -v zig build build-semantic-recovery-driver \
-              --cache-dir .zig-cache/native-driver -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-driver \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose
           else
             ZIG_LOCAL_PKG_DIR="$PWD/.zig-cache/native-driver-core/zig-pkg" \
               ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache/native-driver-core" \
               /usr/bin/time -v zig build semantic-artifact --prefix "$RUNNER_TEMP/driver-core" \
-              --cache-dir .zig-cache/native-driver-core -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-driver-core \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             core_pid=$!
             /usr/bin/time -v zig build build-semantic-driver-executable \
-              --cache-dir .zig-cache/native-driver -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-driver \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             driver_pid=$!
             status=0
@@ -194,32 +200,38 @@ jobs:
         run: |
           if [ "${{ matrix.lane }}" = native ]; then
             zig build check-storage check-semantics check-zig17 \
-              --cache-dir .zig-cache/native-owners -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-owners \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             zig build check-semantic-recovery-driver \
-              --cache-dir .zig-cache/native-driver -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-driver \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           else
             zig build check-installed-semantic-driver --prefix "$RUNNER_TEMP/driver-core" \
-              --cache-dir .zig-cache/native-driver -Dhost-cpu="$KOSMOS_HOST_CPU" \
+              --cache-dir .zig-cache/native-driver \
+              -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           fi
       - name: Check specialization
         if: matrix.lane == 'specialization'
         run: >-
           zig build check-ordinary-specialization
-          -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check recovery specialization
         if: matrix.lane == 'recovery-specialization'
         run: >-
           zig build check-recovery-specialization
-          -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check public receipt owners
         if: matrix.lane == 'publication'
         run: >-
           zig build check-publication
-          -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check every selected current session fixture
         if: matrix.lane == 'sessions' || matrix.lane == 'session-ownership' || matrix.lane == 'source-regressions'
         run: |
@@ -233,7 +245,8 @@ jobs:
             source-regressions) group=regressions; expected=17 ;;
           esac
           zig build build-session-check -Dsession-group="$group" \
-            -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+            -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
           zig-out/verification/sessions 2>&1 | tee "$RUNNER_TEMP/session-tests.log"
           if command -v rg >/dev/null; then
             rg -Fxq "All $expected tests passed." "$RUNNER_TEMP/session-tests.log"
@@ -243,7 +256,9 @@ jobs:
       - name: Consume the actual native source package without a JS producer
         if: matrix.lane == 'consumer'
         run: |
-          zig build emit-native-input -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          zig build emit-native-input \
+            -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/source" "$scratch/kosmos" "$scratch/consumer" "$scratch/system"
@@ -274,18 +289,22 @@ jobs:
         run: >-
           zig build check-activation-storage-wasm check-kernel
           check-capacity check-codecs check-package build-runtime
-          -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Qualify both browser Worker environments
         if: matrix.lane == 'browser'
         run: >-
-          zig build check-browser -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+          zig build check-browser
+          -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Qualify every source example and instruction frontier
         if: matrix.lane == 'source' || matrix.lane == 'source-second'
         run: |
           group=first
           if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
           zig build check-source -Dsource-group="$group" -Dfixture-profile=prepared_only \
-            -Dhost-cpu="$KOSMOS_HOST_CPU" -Doptimize=safe -Dpackaged-runtime=true --summary all
+            -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'
         working-directory: zig-out/runtime
