@@ -163,8 +163,20 @@ Each ref keeps at most one compiler cache per lane. After the lanes finish, the
 `Keep one compiler cache per lane` job lists the ref's caches. If this run saved one,
 it deletes every entry with a different key prefix (host build target, CPU, Zig
 version or cache schema) and every entry older than the ref's newest entry for the
-same lane. That job alone has `actions: write`, checks out nothing and runs no
-repository code. Fork pull requests, whose token is read-only, skip it.
+same lane. That job alone has `actions: write`; it checks out nothing. Fork pull
+requests, whose token is read-only, skip it and keep each run's entries until the
+pull request closes. Closing a pull request runs `Closed pull request caches` from
+the base branch through `pull_request_target`. It checks out nothing, runs on a
+GitHub-hosted runner with only `actions: write`, and deletes every cache of that
+pull request's merge ref; entries saved by a run still in progress at that moment
+remain until GitHub removes caches unused for seven days. Between runs the
+compiler caches total at most (1 + P) × S, where P counts open pull requests from this
+repository with saved caches and S is the size of one ref's 14 lane entries. Each
+run in progress adds at most S until its retention job. GitHub evicts the least
+recently used caches only above the repository's 10 GB limit, so with one run in
+progress main's entries are evicted only when (2 + P) × S exceeds 10 GB. S was 1.02 GB for main's 14 entries and at most 1.63 GB
+for a pull request whose cache still carried objects for an earlier host target,
+so main's caches survive up to four open pull requests with saved caches.
 Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
 `-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
 5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
@@ -197,7 +209,10 @@ Matching compiler artifacts are restored and missing inputs are rebuilt; every
 selected test still executes. Every runtime lane has at most ten minutes. The runtime
 budget gate checks elapsed time from workflow start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
-qualification and the exempt TigerStyle job to succeed.
+qualification and the exempt TigerStyle job to succeed. Cache retention runs
+outside both gates. A truly cold run on a slow runner can exceed 600 seconds;
+recover with a full rerun of the whole workflow, never a rerun of only its failed
+jobs.
 The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
 acquisition times in the integrated Protean qualification. Upstream signature and
 archive-name verification remain active. An explicit mirror removes the action's
