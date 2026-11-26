@@ -371,3 +371,51 @@ jobs:
         run: |
           test "$TIGER_STYLE" = success
           test "$QUALIFICATION" = success
+  cache-retention:
+    name: Keep one compiler cache per lane
+    needs: qualify
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete this ref's superseded compiler caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CACHE_REF: ${{ github.ref }}
+          RUN_SUFFIX: -${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -o pipefail
+          ref_caches() {
+            gh api -X GET --paginate "repos/$GH_REPO/actions/caches" \
+              -f ref="$CACHE_REF" -F per_page=100 \
+              --jq '.actions_caches[] | select(.key | startswith("kosmos-native-"))'
+          }
+          ref_caches | jq -rs --arg suffix "$RUN_SUFFIX" '
+            (map(select(.key | endswith($suffix)))
+              | if length > 0 then .[0].key | split("/")[0] else "" end) as $current
+            | select($current != "")
+            | map(select((.key | split("/")[0]) != $current))
+              + (map(select((.key | split("/")[0]) == $current))
+                | group_by(.key | split("/")[1])
+                | map(sort_by(.created_at) | .[:-1])
+                | add // [])
+            | .[] | [.id, .size_in_bytes, .key] | @tsv
+          ' > "$RUNNER_TEMP/superseded.tsv"
+          while IFS=$'\t' read -r id bytes key; do
+            echo "Deleting $key ($bytes bytes)"
+            gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" --silent || true
+          done < "$RUNNER_TEMP/superseded.tsv"
+          ref_caches > "$RUNNER_TEMP/remaining.json"
+          jq -r '.id' "$RUNNER_TEMP/remaining.json" | LC_ALL=C sort > "$RUNNER_TEMP/remaining.txt"
+          cut -f1 "$RUNNER_TEMP/superseded.tsv" | LC_ALL=C sort |
+            LC_ALL=C comm -12 - "$RUNNER_TEMP/remaining.txt" > "$RUNNER_TEMP/undeleted.txt"
+          deleted=$(jq -Rrs 'split("\n") | map(select(length > 0) | split("\t")[1] | tonumber)
+            | "\(length) (\(add // 0) bytes)"' "$RUNNER_TEMP/superseded.tsv")
+          kept=$(jq -rs '"\(length) (\(map(.size_in_bytes) | add // 0) bytes)"' \
+            "$RUNNER_TEMP/remaining.json")
+          echo "$CACHE_REF compiler caches: deleted $deleted, kept $kept" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          test ! -s "$RUNNER_TEMP/undeleted.txt"

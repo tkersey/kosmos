@@ -159,6 +159,12 @@ host target is never restored. Lookup prefers the same lane and lock, then a rel
 lane with the same lock, then the same lane or its related lane across dependency-lock
 changes. Zig's input hashes and the dependency admission guards remain
 authoritative; a cache hit never replaces test execution.
+Each ref keeps at most one compiler cache per lane. After the lanes finish, the
+`Keep one compiler cache per lane` job lists the ref's caches. If this run saved one,
+it deletes every entry with a different key prefix (host build target, CPU, Zig
+version or cache schema) and every entry older than the ref's newest entry for the
+same lane. That job alone has `actions: write`, checks out nothing and runs no
+repository code. Fork pull requests, whose token is read-only, skip it.
 Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
 `-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
 5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
