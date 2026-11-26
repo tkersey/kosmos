@@ -166,7 +166,7 @@ admit() {
         return 0
     fi
     local archive_bytes
-    archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 --long=30 -q -c | wc -c)
+    archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 -q -c | wc -c)
     printf 'Compiler cache %s: cache %s bytes; snapshot %s bytes (%s local); archive %s bytes (maximum %s)\n' \
         "$phase" "$cache_bytes" "$snapshot_bytes" "$local_bytes" "$archive_bytes" "$archive_bytes_max"
     if (( archive_bytes > archive_bytes_max )); then
