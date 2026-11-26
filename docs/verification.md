@@ -213,7 +213,10 @@ belongs to one of the at most two runs in progress, each saving at most R. GitHu
 evicts least recently used caches only above 10 GB, so pull request caches cannot
 cause main's to be evicted. A pull request's newest set is deleted by another ref's
 budget job only when refs other than main exceed B, so a failed run's set survives
-until its full rerun unless other refs save more than B in between. Closing a pull
+until its full rerun unless other refs save more than B in between. The first run of
+this layout started cold and saved a set of 1,000,513,446 bytes; the next run pruned
+it to 886,236,406 bytes, with every build cache certified. With main's caches at that
+time, B = 2,275,398,367 bytes, about two and a half such sets. Closing a pull
 request runs `Closed pull request caches` from the base branch through
 `pull_request_target`. It checks out nothing, runs on a GitHub-hosted runner with only
 `actions: write`, and deletes every cache of that pull request's merge ref.
