@@ -160,13 +160,17 @@ replaces test execution.
 Hosted lanes build host tools, the evaluator emitter and native tests for
 `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31`: the architecture, the Linux 5.10–7.2
 range, the ABI and glibc 2.31, so nothing in it comes from the runner's kernel or C
-library. Before restoring, each lane chooses `-Dhost-cpu` with
+library. Every qualification build passes the same target and CPU as `-Dtarget` and
+`-Dcpu` too, so public modules and `zig-out` build for them and share the host modules.
+Before restoring, each lane chooses `-Dhost-cpu` with
 `tools/zig-cache.sh host-cpu`, which reads the runner's `/proc/cpuinfo` flags. It
 selects `x86_64_v3+sha` only when they include `sha_ni` and every feature that Zig
 0.17.1's `x86_64_v3` adds to the x86-64 baseline (`pni ssse3 sse4_1 sse4_2 popcnt cx16
 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave`), and `baseline` otherwise. No
 binary therefore runs on a CPU that lacks its features: a runner without them builds
-for `baseline` and misses the `x86_64_v3+sha` caches instead of failing its tests.
+for `baseline` and misses the `x86_64_v3+sha` caches instead of failing its tests. When
+reading the flags fails, the lane warns and builds for `baseline`; a missing CPU model
+line only warns.
 SHA extensions keep artifact digests on the hardware path. Every cache key is
 `kosmos-native-v6-<os>-<arch>-0.17.1-<host target>-<cpu>/<lane>/<lock>-<run number>-<attempt>-<phase>`,
 and every restore prefix names the same host target and CPU, so host artifacts hit on
@@ -182,7 +186,11 @@ unknown one, so those tools keep `baseline`. Zig compiles its build runner (`mak
 the global cache) and each cache's configure script for the runner itself, so only those
 vary by runner model.
 Builds without either option stay native; `-Dhost-cpu` without `-Dhost-target` is
-rejected, and a host target must name its architecture, OS and ABI.
+rejected, and a host target must name its architecture, OS and ABI. `-Dhost-target`
+changes only host tools, emitters and native tests: `-Dtarget` still defaults to
+`native`, so public modules and `zig-out` keep the native target unless `-Dtarget` is
+given, and then build separately from the host modules unless both name the same target
+and CPU.
 Every lane compiles before it runs a check: the native lanes with their `build-*`
 steps, every other lane by running its `zig build` arguments once with
 `-Dcompile-only=true`, under which each requested step depends only on the compilations
@@ -196,20 +204,21 @@ At the end of a lane in which every step succeeded, `tools/zig-cache.sh admit` p
 all of `.zig-cache` (the build caches, the nested builds' caches `source-examples/` and
 `native-consumer/`, the independent core rebuild's caches and Zig's global cache) to what
 the whole job, compilation and checks, read or wrote, and the lane saves it under the
-`checked` phase. A failed or cancelled lane saves nothing at its end; its compile save,
-or the previous entry, stays.
+`checked` phase when enough of the job's time remains (below). A failed or cancelled
+lane saves nothing at its end; its compile save, or the previous entry, stays.
 Every saved tree carries `kosmos-cache-record`, the size and path of each of its other
-files. After restoring, `tools/zig-cache.sh track` discards the tree when the restore
-failed or the tree differs from its record (an extraction that stops early can still
-report success), so a partial extraction never becomes the working cache and the lane
-compiles from nothing. It builds or reuses the pairing tool in `.zig-cache/tools/` for
-the lane's host target, checks on the workspace filesystem that reading a file updates
-its access time, marks every restored file unread, and records the change time of a
-file it touches, waiting until a second touch reads a later change time, so every later
-write follows the mark. Since the compile save reads what it keeps, `unstage` marks
-every file unread again from a new mark and remembers what the compilation used. The
-target identity diagnostic reads restored builtin modules before `track`, so its reads
-count for nothing.
+files. After restoring, `tools/zig-cache.sh track` first renames the tree to
+`.zig-cache.restored`, so no `.zig-cache` exists until the tree is verified. It renames
+the tree back only when the restore succeeded and the tree matches its record (an
+extraction that stops early can still report success), and deletes it otherwise, so a
+partial extraction never becomes the working cache and the lane compiles from nothing.
+It builds or reuses the pairing tool in `.zig-cache/tools/` for the lane's host target,
+checks on the workspace filesystem that reading a file updates its access time, marks
+every restored file unread, and records the change time of a file it touches, waiting
+until a second touch reads a later change time, so every later write follows the mark.
+Since the compile save reads what it keeps, `unstage` marks every file unread again from
+a new mark and remembers what the compilation used. The target identity diagnostic
+reads restored builtin modules before `track`, so its reads count for nothing.
 The admissions keep a unit (a manifest, output, configuration, ZIR file, builtin module,
 package archive or extracted package) when the job read or wrote it; a file counts as
 written when its change time follows the mark, which extraction cannot preserve. Zig
@@ -221,9 +230,10 @@ output exists. `tools/zig-cache-pairs.zig` computes F with Zig's own `Cache.hash
 and manifest layout, and lists the inputs a manifest records under the local or global
 cache (builtin modules, generated files). A manifest is kept together with its output
 when the job read or wrote either, and removed with it otherwise; a kept manifest also
-keeps the cache inputs it records, which a hit checks. A manifest that names no existing
-output is removed from every save; for a Run step without side effects and without
-outputs, which Zig 0.17.1 caches by manifest alone
+keeps the cache inputs it records, which a hit checks, transitively: when such an input
+lies in another manifest's output, that manifest and the inputs it records are kept as
+well. A manifest that names no existing output is removed from every save; for a Run
+step without side effects and without outputs, which Zig 0.17.1 caches by manifest alone
 (`lib/compiler/Maker/Step/Run.zig:560-605`), that step runs again next time. Zig's
 build runner depends only on the Zig version and the runner (its CPU and kernel
 release), and building one takes 50–100 seconds, so a tree also keeps the build runners
@@ -241,12 +251,47 @@ A save is skipped with a warning when reads leave no access time, when the pairi
 fails (it fails on any manifest it cannot open or read), when the job used no compiled
 output outside the pairing tool's own cache, or when the tree exceeds 1,000,000,000
 bytes, about twice the largest measured (native-driver, 498,240,971 bytes).
+Cache work never fails, cancels or changes the outcome of a qualification lane. The
+restore, the target identity diagnostic, `track`, the stage, both saves, `unstage` and
+the admission each carry `continue-on-error: true` and `timeout-minutes: 1`, so a
+failure or timeout shows as a failed step, with a `::warning::` from
+`tools/zig-cache.sh`, and the lane goes on. None of them can leave a cache that changes
+what a check computes. Zig reports a manifest hit as cached without checking its output,
+so a manifest present without its output would fail its step, while a missing manifest
+only recompiles: `track` keeps `.zig-cache` absent until the tree is verified, the stage
+sets every manifest aside before any other unit, and `unstage` returns every other unit
+before any manifest, so wherever either stops, no manifest is present without its
+output. A cache-tool failure skips every later save instead of continuing on partial
+data: `tools/zig-cache.sh` stops at the first failing command and writes `save=true`
+last; `track` writes its access mark last; the stage, `unstage` and the admission take
+the mark when they start and put it back (`unstage` a new one) only when they finish or
+skip cleanly, so after a failed or killed step no later step finds a mark and none
+saves.
+Saves after the checks never push a job past its ten-minute limit. `track` reads the
+job's start, `started_at` of the job's own record (`job.check_run_id`) in the Actions
+API, into `KOSMOS_JOB_STARTED`. The admission is the first cache step after the checks;
+before anything else it subtracts the time since that start from the job's 600 s and,
+unless at least 150 s remain, or when the start could not be read, warns and exits
+without pruning or saving. The 150 s cover the admission's own 60-second timeout, the
+checked save's 60-second timeout and 30 s for the steps that end the job (at most 4 s in
+round 9's 28 lane runs), the kill of a timed-out step and clock skew: an admission that
+starts by 450 s ends by 510 s, its save by 570 s and the job by 600 s. Measured in
+round 9, the admission took at most 1 s and the checked save at most 5 s, so a lane
+whose checks end by 450 s keeps its checked save; a colder lane (sessions ended its
+checks at 543 s in run 45946785256) keeps only its compile save. The compile save runs
+before the checks without a time condition, because a full rerun after a cold timeout
+restores it; its time (at most 4 s measured, 60 s by its timeout) counts against the
+job's limit like any other step's.
 The stage, both saves, `unstage` and the admission carry no status condition, so GitHub
-runs each only after every earlier step has succeeded, and the admission and its save
-are the lane's last steps. A failed compilation saves nothing. A compilation after a
-discarded restore starts from an empty cache, so the set it saves is complete. Fork pull
-requests restore compiler caches but never save them, and runs on branches other than
-`main` save none either.
+runs each only after every earlier step has succeeded or been tolerated, and the
+admission and its save are the lane's last steps. A failed compilation saves nothing. A
+compilation after a discarded restore starts from an empty cache, so the set it saves is
+complete. Fork pull requests restore compiler caches, this workflow never saves theirs,
+and runs on branches other than `main` save none either. A fork pull request runs its own
+copy of the workflow, which its author can edit to save caches under the pull request's
+ref; a returning contributor's fork can run without approval, depending on the
+repository's approval setting, which is the owner's. Such saves fall outside the bound
+below.
 `Keep one compiler cache per lane and CPU` runs after every lane of a run on `main` or a
 same-repository pull request, also after a failure or cancellation. It checks out
 nothing and runs on a GitHub-hosted runner with only `actions: write` and
@@ -260,28 +305,31 @@ request runs `Closed pull request caches` from the base branch through
 every cache of the pull request's merge ref. A run still in progress at the close can
 save after that, and its own retention job then finds the pull request closed and
 deletes those saves. Both jobs log a failed deletion and wait up to 30 seconds for the
-cache list to drop deleted entries before failing.
+cache list to drop deleted entries before failing. `Closed pull request caches` reports
+as deleted only the entries its last listing no longer holds.
 After a successful retention, a ref holds at most one entry per CPU and lane, so at most
 C sets of 14 entries, where C ≤ 2 is the number of CPU classes its runs chose; forks and
-branches other than `main` hold none. Each run whose saves no successful retention has
-yet covered adds at most two entries per lane (its compile and job saves): a run whose
-retention job is still to finish, or failed, timed out or was cancelled, keeps them until
-a later run's retention on the same ref succeeds. A closed pull request's ref holds none
-once `Closed pull request caches` or a later retention on it succeeds; when that cleanup
-fails, times out or is cancelled and no run follows, its entries stay until GitHub
-removes caches unused for seven days.
+branches other than `main` hold none. Each run attempt whose saves no successful
+retention has yet covered adds at most two entries per lane (its compile and job saves);
+every attempt saves under its own keys and has its own retention job, and an attempt
+whose retention job is still to finish, or failed, timed out or was cancelled, keeps
+them until a later attempt's retention on the same ref succeeds. A closed pull
+request's ref holds none once `Closed pull request caches` or a later retention on it
+succeeds; when that cleanup fails, times out or is cancelled and no run follows, its
+entries stay until GitHub removes caches unused for seven days.
 The code enforces those counts, at most six jobs' build runners per entry, and the
 1,000,000,000-byte ceiling on each entry's tree (each archive GitHub counted for this
 pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per
 entry, which keeps `main` safe only up to nine entries, so the bound below rests on
-measured sizes. Measured: run 45946785256 saved the largest set, 1,008,556,734 bytes
+measured sizes. S bounds a set of 14 entries including the build runners each keeps
+for its history. Measured: run 45946785256 saved the largest set, 1,008,556,734 bytes
 compressed for 14 entries with one build runner per global cache, and a build runner is
-2,591,504 bytes compressed. Five more build runners in each of a set's 15 global caches,
-the most the six-job limit admits, bring a set to at most S = 1,202,919,534 bytes. With
-P the same-repository pull requests whose ref holds caches (every open one, and a closed
-one whose cleanup has not succeeded, for up to seven days) and F the runs whose saves no
-successful retention has covered, the compiler caches total at most
-((1 + P) × C + 2F) × S, beside `main`'s Zig tarball saved by the setup action
+2,591,504 bytes compressed. The history keeps at most five more build runners in each
+of a set's 15 global caches, so S = 1,008,556,734 + 75 × 2,591,504 = 1,202,919,534
+bytes. With P the same-repository pull requests whose ref holds caches (every open one,
+and a closed one whose cleanup has not succeeded, for up to seven days) and F the run
+attempts whose saves no successful retention has covered, the compiler caches total at
+most ((1 + P) × C + 2F) × S, beside `main`'s Zig tarball saved by the setup action
 (57,413,921 bytes). GitHub evicts caches only above 10 GB, so pull request caches can
 cause `main`'s to be evicted only if that total plus the tarball exceeds 10 GB; at the
 measured sizes the total stays below 10,000,000,000 bytes while (1 + P) × C + 2F ≤ 8:
@@ -312,7 +360,8 @@ selected test still executes. Every runtime lane has at most ten minutes. The ru
 budget gate checks elapsed time from workflow start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed. The 600-second gate is the
-only time gate; the compiler cache retention job runs outside both gates. A truly cold
+only time gate; the admission's time check decides only whether the checked save
+happens, and the compiler cache retention job runs outside both gates. A truly cold
 run on a slow runner can exceed 600 seconds; recover with a full rerun of the whole
 workflow, never a rerun of only its failed jobs.
 The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
