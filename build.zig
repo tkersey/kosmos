@@ -63,6 +63,30 @@ pub fn build(b: *std.Build) void {
         portable_checks,
         activation,
     );
+    if (options.compile_only) configureCompileOnly(b);
+}
+
+/// With `-Dcompile-only`, each top-level step depends only on the compilations it reaches,
+/// so CI can save a lane's compiler cache after compiling and before running any check.
+/// Zig still runs the steps that generate a compilation's sources.
+fn configureCompileOnly(b: *std.Build) void {
+    for (b.top_level_steps.values()) |top_level| {
+        var reached: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
+        var compiles: std.ArrayList(*std.Build.Step) = .empty;
+        reached.put(b.allocator, &top_level.step, {}) catch @panic("OOM");
+        var index: usize = 0;
+        while (index < reached.count()) : (index += 1) {
+            const step = reached.keys()[index];
+            if (step.tag == .compile) {
+                compiles.append(b.allocator, step) catch @panic("OOM");
+                continue;
+            }
+            for (step.dependencies.items) |dependency| {
+                reached.put(b.allocator, dependency, {}) catch @panic("OOM");
+            }
+        }
+        top_level.step.dependencies = compiles;
+    }
 }
 
 const SessionGroup = enum { behavior, ownership, regressions };
@@ -75,6 +99,7 @@ const Options = struct {
     optimize: std.lang.Optimize,
     profile: Profile,
     use_packaged_runtime: bool,
+    compile_only: bool,
     session_group: ?SessionGroup,
     source_group: ?SourceGroup,
     fixture_profile: FixtureProfile,
@@ -138,6 +163,11 @@ fn configureOptions(b: *std.Build) Options {
         "packaged-runtime",
         "Use the source/compiler/content-bound evaluator artifact",
     ) orelse true;
+    const compile_only = b.option(
+        bool,
+        "compile-only",
+        "Compile what the requested steps run, without running or installing it",
+    ) orelse false;
     const session_group = b.option(
         SessionGroup,
         "session-group",
@@ -171,6 +201,7 @@ fn configureOptions(b: *std.Build) Options {
         .optimize = optimize,
         .profile = profile,
         .use_packaged_runtime = use_packaged_runtime,
+        .compile_only = compile_only,
         .session_group = session_group,
         .source_group = source_group,
         .fixture_profile = fixture_profile,
