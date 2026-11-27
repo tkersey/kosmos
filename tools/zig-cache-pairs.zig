@@ -1,12 +1,15 @@
 const std = @import("std");
 const Cache = std.Build.Cache;
 const Io = std.Io;
+const PathPrefix = std.zig.Server.Message.PathPrefix;
 
 const manifest_bytes_max: u32 = std.math.maxInt(u32);
 const manifest_directory = "h/";
 const output_directories = [_][]const u8{ "o/", "c/" };
 const path_bytes_max: usize = 4096;
 
+/// For each manifest path read from standard input, prints the manifest, the output Zig derives
+/// from it when that output exists, and every input it records under a cache directory.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -34,19 +37,31 @@ fn writePair(
     writer: *Io.Writer,
 ) !void {
     try writer.print("{s}\t", .{manifest_path});
-    if (try namedOutput(io, gpa, cache, manifest_path)) |digest| {
-        const root = rootOf(manifest_path).?;
-        for (output_directories) |directory| {
-            var path_buffer: [path_bytes_max]u8 = undefined;
-            const output_path = try std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{
-                root, directory, &digest,
-            });
-            if (try exists(io, cache, output_path)) {
-                try writer.writeAll(output_path);
-                break;
-            }
+    const root = rootOf(manifest_path) orelse return writer.writeByte('\n');
+    const limit: Io.Limit = .limited(manifest_bytes_max);
+    const contents = cache.readFileAlloc(io, manifest_path, gpa, limit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return writer.writeByte('\n'),
+    };
+    defer gpa.free(contents);
+    var inputs: Io.Writer.Allocating = .init(gpa);
+    defer inputs.deinit();
+    const name = std.fs.path.basename(manifest_path);
+    const digest = scan(name, contents, &inputs.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        error.InvalidManifest => return writer.writeByte('\n'),
+    };
+    for (output_directories) |directory| {
+        var path_buffer: [path_bytes_max]u8 = undefined;
+        const output_path = try std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{
+            root, directory, &digest,
+        });
+        if (try exists(io, cache, output_path)) {
+            try writer.writeAll(output_path);
+            break;
         }
     }
+    try writer.writeAll(inputs.written());
     try writer.writeByte('\n');
 }
 
@@ -60,23 +75,13 @@ fn rootOf(manifest_path: []const u8) ?[]const u8 {
     return manifest_path[0..root_end];
 }
 
-fn namedOutput(
-    io: Io,
-    gpa: std.mem.Allocator,
-    cache: Io.Dir,
-    manifest_path: []const u8,
-) error{OutOfMemory}!?Cache.HexDigest {
-    if (rootOf(manifest_path) == null) return null;
-    const limit: Io.Limit = .limited(manifest_bytes_max);
-    const contents = cache.readFileAlloc(io, manifest_path, gpa, limit) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer gpa.free(contents);
-    return outputDigest(std.fs.path.basename(manifest_path), contents) catch null;
-}
-
-fn outputDigest(name: []const u8, contents: []const u8) error{InvalidManifest}!Cache.HexDigest {
+/// Computes the output digest as `Cache.Manifest.finalDigest` does, and writes, each after a
+/// tab, the path of every recorded input that lies under the local or global cache directory.
+fn scan(
+    name: []const u8,
+    contents: []const u8,
+    inputs: *Io.Writer,
+) error{ InvalidManifest, WriteFailed }!Cache.HexDigest {
     if (contents.len == 0 or contents[contents.len - 1] != 0) return error.InvalidManifest;
     if (name.len != Cache.hex_digest_len) return error.InvalidManifest;
     var input_digest: Cache.BinDigest = undefined;
@@ -91,6 +96,12 @@ fn outputDigest(name: []const u8, contents: []const u8) error{InvalidManifest}!C
         const path = file_offset.pathFallible(contents) catch return error.InvalidManifest;
         if (path.len == 0) return error.InvalidManifest;
         hasher.update(&file.digest);
+        switch (file.flags.prefix) {
+            @backingInt(PathPrefix.local_cache), @backingInt(PathPrefix.global_cache) => {
+                try inputs.print("\t{s}", .{path});
+            },
+            else => {},
+        }
         offset += Cache.Manifest.File.sizeOf(path.len);
     }
     if (offset + 1 != contents.len) return error.InvalidManifest;
