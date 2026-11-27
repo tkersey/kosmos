@@ -15,11 +15,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CACHE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+          DELETED: |
+            $listed | map(select(.id as $id | all($remaining[]; .id != $id)))
+            | "\($ref): deleted \(length) of \($listed | length) entries, \(map(.size_in_bytes) | add // 0) bytes"
         run: |
           set -o pipefail
           ref_caches() {
             gh api -X GET --paginate "repos/$GH_REPO/actions/caches" \
               -f ref="$CACHE_REF" -F per_page=100 --jq '.actions_caches[]'
+          }
+          listed() {
+            grep -Fxq -f <(cut -f1 "$RUNNER_TEMP/closed.tsv") <(jq -r .id "$RUNNER_TEMP/remaining.json")
           }
           ref_caches > "$RUNNER_TEMP/closed.json"
           jq -r '[.id, .size_in_bytes, .key] | @tsv' "$RUNNER_TEMP/closed.json" > "$RUNNER_TEMP/closed.tsv"
@@ -28,12 +34,16 @@ jobs:
             gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" --silent ||
               echo "::warning::Deleting $key failed"
           done < "$RUNNER_TEMP/closed.tsv"
-          jq -rs --arg ref "$CACHE_REF" '"\($ref): deleted \(length) entries, \(map(.size_in_bytes) | add // 0) bytes"' \
-            "$RUNNER_TEMP/closed.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          for _ in 1 2 3 4 5 6; do
+          for attempt in 1 2 3 4 5 6; do
             ref_caches > "$RUNNER_TEMP/remaining.json"
-            grep -Fxq -f <(cut -f1 "$RUNNER_TEMP/closed.tsv") <(jq -r .id "$RUNNER_TEMP/remaining.json") || exit 0
-            sleep 5
+            listed || break
+            if [ "$attempt" != 6 ]; then
+              sleep 5
+            fi
           done
-          echo "::error::A deleted cache is still listed"
-          exit 1
+          jq -nr --arg ref "$CACHE_REF" --slurpfile listed "$RUNNER_TEMP/closed.json" \
+            --slurpfile remaining "$RUNNER_TEMP/remaining.json" "$DELETED" | tee -a "$GITHUB_STEP_SUMMARY"
+          if listed; then
+            echo "::error::A deleted cache is still listed"
+            exit 1
+          fi

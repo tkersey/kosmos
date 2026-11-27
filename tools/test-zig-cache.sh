@@ -476,6 +476,19 @@ if ! grep -Fq 'const target = b.standardTargetOptions(.{});' "$tools/../build.zi
     fail "-Dhost-target changes the default -Dtarget"
 fi
 
+scenario=closed
+awk '
+    /^          DELETED: \|$/ { active = 1; next }
+    active && /^            / { sub(/^            /, ""); print; next }
+    active { exit }
+' "$tools/../.github/workflows/closed-pull-request-caches.yml" > "$scratch/deleted.jq"
+printf '{"id": %d, "size_in_bytes": %d, "key": "k%d"}\n' 1 10 1 2 20 2 3 40 3 > "$scratch/listed.json"
+printf '{"id": 2, "size_in_bytes": 20, "key": "k2"}\n{"id": 9, "size_in_bytes": 5, "key": "k9"}\n' \
+    > "$scratch/remaining.json"
+deleted=$(jq -nr --arg ref R --slurpfile listed "$scratch/listed.json" \
+    --slurpfile remaining "$scratch/remaining.json" -f "$scratch/deleted.jq")
+[[ "$deleted" == 'R: deleted 2 of 3 entries, 50 bytes' ]] || fail "the close summary counts unconfirmed deletions: $deleted"
+
 scenario=retention
 awk '
     /^          SUPERSEDED: \|$/ { active = 1; next }
