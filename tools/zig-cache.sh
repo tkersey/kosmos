@@ -432,11 +432,12 @@ seal() {
         fi
     done
     cp -- "$state/history" "$history"
+    tree_record "$cache" > "$record"
     bytes=$(tree_bytes "$cache")
     if (( bytes > save_bytes_max )); then
+        rm -f -- "$record"
         skip "::warning::Compiler cache: ${bytes} bytes exceed the ${save_bytes_max}-byte ceiling"
     fi
-    tree_record "$cache" > "$record"
     : > "$state/sealed"
     mv -T -- "$cache" "$saved"
     give

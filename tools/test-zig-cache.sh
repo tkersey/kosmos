@@ -428,13 +428,30 @@ expect_saved false
 expect_present h/$m1 o/$f1/test b/stale
 expect_report '::warning::Compiler cache: the job used no compiled output; save skipped'
 
-begin ceiling
+begin ceiling-measured
 track
 use h/$m1 o/$f1/test
-KOSMOS_CACHE_BYTES_MAX=10 run admit
-expect_saved false
-expect_absent kosmos-cache-record
-expect_report '-byte ceiling; save skipped'
+run admit
+expect_saved true
+saved_bytes=$(find "$extraction" -type f -printf '%s\n' | awk '{ n += $1 } END { print n }')
+record_bytes=$(stat -c %s -- "$extraction/kosmos-cache-record")
+expect_report "Compiler cache: save $saved_bytes bytes"
+(( record_bytes > 0 )) || fail "the saved record is empty, so the ceiling cannot be shown to count it"
+for ceiling in at below; do
+    begin "ceiling-$ceiling"
+    track
+    use h/$m1 o/$f1/test
+    if [[ "$ceiling" == at ]]; then
+        KOSMOS_CACHE_BYTES_MAX=$saved_bytes run admit
+        expect_saved true
+        expect_recorded
+    else
+        KOSMOS_CACHE_BYTES_MAX=$(( saved_bytes - 1 )) run admit
+        expect_saved false
+        expect_absent kosmos-cache-record
+        expect_report "::warning::Compiler cache: $saved_bytes bytes exceed the $(( saved_bytes - 1 ))-byte ceiling; save skipped"
+    fi
+done
 
 begin nonregular
 track

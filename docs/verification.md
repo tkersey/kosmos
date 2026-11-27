@@ -309,10 +309,10 @@ A save is skipped with a warning when reads leave no access time, when the tree 
 entry that is neither a regular file nor a directory (a symbolic link, FIFO or socket;
 the warning names it), when the pairing tool is missing or fails (it is missing after a
 build that failed, was stopped or skipped, and fails on any manifest it cannot open or
-read), when the job used no compiled output, or when the tree exceeds 1,000,000,000
-bytes, about twice the largest measured (native-driver, 498,240,971 bytes). A missing
-pairing tool skips only this job's saves: the next job builds it again from nothing,
-whatever this job saved.
+read), when the job used no compiled output, or when the files of the tree as saved,
+`kosmos-cache-record` included, exceed 1,000,000,000 bytes, about twice the largest
+measured (native-driver, 498,240,971 bytes). A missing pairing tool skips only this
+job's saves: the next job builds it again from nothing, whatever this job saved.
 Cache work never fails or changes the outcome of a qualification lane, and the time it
 adds is bounded. The restore, the target identity diagnostic,
 the pairing tool's build, `track`, the stage, both saves, `unstage` and the admission
@@ -456,8 +456,8 @@ workflow, which on `main` saves `kosmos-native-v2-` entries of up to 4 GiB per l
 runs no retention; such entries fall outside the bound until a successful retention on
 their ref deletes them as an older version.
 The code enforces those counts, at most six jobs' build runners per entry, and the
-1,000,000,000-byte ceiling on each entry's tree (each archive GitHub counted for this
-pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per
+1,000,000,000-byte ceiling on the files of each entry's tree, its record included (each
+archive GitHub counted for this pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per
 entry, which keeps `main` safe only up to nine entries, so the bound below rests on
 measured sizes. S bounds a set of 14 entries including the build runners each keeps
 for its history. Measured: run 45946785256 saved the largest set, 1,008,556,734 bytes
