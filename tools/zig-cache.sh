@@ -62,12 +62,19 @@ tool() {
 }
 
 limit() {
-    local status=0
+    local status=0 started=$SECONDS elapsed
     KOSMOS_CACHE_LIMITED=1 timeout -k "$kill_seconds" "$step_seconds_max" bash "${BASH_SOURCE[0]}" "$@" ||
         status=$?
-    if (( status == 124 || status == 137 )); then
+    elapsed=$(( SECONDS - started ))
+    if (( status == 124 )); then
         printf '::warning::Compiler cache: %s exceeded its %d s limit and was stopped; this job saves no further compiler cache\n' \
             "$mode" "$step_seconds_max"
+    elif (( status == 137 && elapsed >= step_seconds_max )); then
+        printf '::warning::Compiler cache: %s exceeded its %d s limit and was killed; this job saves no further compiler cache\n' \
+            "$mode" "$step_seconds_max"
+    elif (( status == 137 )); then
+        printf '::warning::Compiler cache: %s was killed after %d s, before its %d s limit; this job saves no further compiler cache\n' \
+            "$mode" "$elapsed" "$step_seconds_max"
     elif (( status != 0 )); then
         printf '::warning::Compiler cache: %s failed with status %d; this job saves no further compiler cache\n' \
             "$mode" "$status"

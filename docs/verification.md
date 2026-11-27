@@ -316,10 +316,14 @@ compile save 4.8 s, `unstage` 4.9 s, the admission 1.6 s and the checked save 4.
 pairing tool's cold build, timed in the 14 lanes of run 45946785256, none of which
 restored a cache, took 2.5–4.3 s. `tools/zig-cache.sh` runs the tool's build, `track`,
 the stage, `unstage` and the admission each under its own `timeout`, which stops it after
-20 s, about four times the longest measured, with SIGTERM and 1 s later SIGKILL; it then
-warns that the step exceeded its 20 s limit and was stopped, or that it failed with its
-status, and no later step saves. When `track` skips, fails or is stopped after it set the
-restored tree aside, `tools/zig-cache.sh` deletes `.zig-cache.restored` under a
+20 s, about four times the longest measured, with SIGTERM and 1 s later SIGKILL. It then
+warns by the step's exit status: 124, `timeout`'s own, as exceeding its 20 s limit and
+being stopped; 137, a SIGKILL from `timeout` or from elsewhere (the kernel's OOM
+killer), as exceeding its limit and being killed when 20 s had passed, and otherwise as
+killed after the seconds it ran, before its limit; any other nonzero status as failed
+with that status. In each case no later step saves. When `track` skips, fails or is
+stopped after it set the restored tree aside, `tools/zig-cache.sh` deletes
+`.zig-cache.restored` under a
 second 20 s limit (the restore, which downloads and writes the same tree, took at most
 3.9 s) and warns, without failing the step, if the deletion fails or is stopped.
 The restore and both saves are actions, whose step timeout GitHub counts in whole

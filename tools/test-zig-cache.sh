@@ -818,6 +818,17 @@ compile o/$f1/test
 run stage
 expect_saved false
 
+begin track-killed
+failing cmp << 'EOF'
+kill -KILL "$PPID"
+EOF
+PATH=$failing_path track && fail "a killed track succeeded"
+expect_report '::warning::Compiler cache: track was killed after '
+expect_report ' s, before its 20 s limit; this job saves no further compiler cache'
+! grep -Fq 'exceeded its' "$workspace/report" || fail "a step killed within its limit was reported as exceeding it"
+expect_report 'Compiler cache: deleted the unverified restored tree'
+[[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a killed track left the restored tree"
+
 begin stray-compile-save
 track
 use h/$m1 o/$f1/test
@@ -846,7 +857,11 @@ for signal in term kill; do
                 fail "track ignoring SIGTERM succeeded past its limit"
         fi
         (( $(date +%s) - started <= 3 )) || fail "a stopped track took $(( $(date +%s) - started )) s for a 1 s limit"
-        expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
+        if [[ "$signal" == term ]]; then
+            expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
+        else
+            expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was killed; this job saves no further compiler cache'
+        fi
         [[ ! -e .zig-cache.restored ]] || fail "a stopped track left the restored tree in the workspace"
         if [[ "$command" == cmp ]]; then
             expect_report 'Compiler cache: deleted the unverified restored tree'
