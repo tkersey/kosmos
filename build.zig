@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
     const activation = configureActivation(b, wasm_modules);
     configureQualification(
         b,
+        host_modules.target,
         dependencies,
         driver,
         foreign_checks,
@@ -62,6 +63,27 @@ pub fn build(b: *std.Build) void {
         portable_checks,
         activation,
     );
+    if (options.compile_only) configureCompileOnly(b);
+}
+
+fn configureCompileOnly(b: *std.Build) void {
+    for (b.top_level_steps.values()) |top_level| {
+        var reached: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
+        var compiles: std.ArrayList(*std.Build.Step) = .empty;
+        reached.put(b.allocator, &top_level.step, {}) catch @panic("OOM");
+        var index: usize = 0;
+        while (index < reached.count()) : (index += 1) {
+            const step = reached.keys()[index];
+            if (step.tag == .compile) {
+                compiles.append(b.allocator, step) catch @panic("OOM");
+                continue;
+            }
+            for (step.dependencies.items) |dependency| {
+                reached.put(b.allocator, dependency, {}) catch @panic("OOM");
+            }
+        }
+        top_level.step.dependencies = compiles;
+    }
 }
 
 const SessionGroup = enum { behavior, ownership, regressions };
@@ -69,10 +91,12 @@ const SourceGroup = enum { first, second };
 const FixtureProfile = enum { full, prepared_only };
 
 const Options = struct {
+    host: std.Build.ResolvedTarget,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     profile: Profile,
     use_packaged_runtime: bool,
+    compile_only: bool,
     session_group: ?SessionGroup,
     source_group: ?SourceGroup,
     fixture_profile: FixtureProfile,
@@ -85,7 +109,47 @@ const Options = struct {
     kernel_mode: std.lang.Optimize,
 };
 
+fn hostTarget(b: *std.Build) std.Build.ResolvedTarget {
+    const arch_os_abi = b.option(
+        []const u8,
+        "host-target",
+        "Explicit arch-os-abi for host tools and native tests (default: the build host)",
+    );
+    const cpu = b.option(
+        []const u8,
+        "host-cpu",
+        "CPU model for -Dhost-target (default: baseline)",
+    );
+    if (arch_os_abi == null) {
+        if (cpu == null) return b.graph.host;
+        std.debug.print("-Dhost-cpu requires -Dhost-target\n", .{});
+        return rejectHostTarget(b);
+    }
+    const query = std.Build.parseTargetQuery(.{
+        .arch_os_abi = arch_os_abi.?,
+        .cpu_features = cpu,
+    }) catch |err| switch (err) {
+        error.ParseFailed => return rejectHostTarget(b),
+    };
+    if (query.cpu_arch == null or query.os_tag == null or query.abi == null) {
+        std.debug.print("-Dhost-target must name the architecture, OS and ABI\n", .{});
+        return rejectHostTarget(b);
+    }
+    return b.resolveTargetQuery(query);
+}
+
+fn rejectHostTarget(b: *std.Build) std.Build.ResolvedTarget {
+    b.invalid_user_input = true;
+    return b.graph.host;
+}
+
+fn buildsForHost(host: std.Build.ResolvedTarget, target: std.Build.ResolvedTarget) bool {
+    if (host.query.isNative()) return target.query.isNative();
+    return target.query.eql(host.query);
+}
+
 fn configureOptions(b: *std.Build) Options {
+    const host = hostTarget(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = std.json.parseFromSliceLeaky(
@@ -100,6 +164,11 @@ fn configureOptions(b: *std.Build) Options {
         "packaged-runtime",
         "Use the source/compiler/content-bound evaluator artifact",
     ) orelse true;
+    const compile_only = b.option(
+        bool,
+        "compile-only",
+        "Compile what the requested steps run, without running or installing it",
+    ) orelse false;
     const session_group = b.option(
         SessionGroup,
         "session-group",
@@ -128,10 +197,12 @@ fn configureOptions(b: *std.Build) Options {
     ) orelse @panic("invalid kernel mode");
 
     return .{
+        .host = host,
         .target = target,
         .optimize = optimize,
         .profile = profile,
         .use_packaged_runtime = use_packaged_runtime,
+        .compile_only = compile_only,
         .session_group = session_group,
         .source_group = source_group,
         .fixture_profile = fixture_profile,
@@ -233,9 +304,9 @@ fn configureDependencies(b: *std.Build, options: Options) ?Dependencies {
         .target = options.target,
         .optimize = options.optimize,
     });
-    const host_data = if (options.target.query.isNative()) data else b.createModule(.{
+    const host_data = if (buildsForHost(options.host, options.target)) data else b.createModule(.{
         .root_source_file = source.path(b, "src/data/root.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = options.optimize,
     });
     const runtime_sources = b.createModule(.{
@@ -362,7 +433,7 @@ fn configureStorageChecks(
 ) StorageChecks {
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/interpreter_v2/tests.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "horos_data", .module = dependencies.host_data }},
     }) });
@@ -374,7 +445,7 @@ fn configureStorageChecks(
         .dependOn(&run_native_tests.step);
     const activation_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/interpreter_v2/activation_slots_tests.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = options.optimize,
         .imports = &.{.{ .name = "horos_data", .module = dependencies.host_data }},
     }) });
@@ -387,6 +458,7 @@ fn configureStorageChecks(
 }
 
 const HostModules = struct {
+    target: std.Build.ResolvedTarget,
     host_mode: std.lang.Optimize,
     source_data: *std.Build.Module,
     horos: *std.Build.Module,
@@ -411,12 +483,12 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
         b.createModule(
             .{
                 .root_source_file = dependencies.source.path(b, "src/data/root.zig"),
-                .target = b.graph.host,
+                .target = options.host,
                 .optimize = host_mode,
             },
         );
-    const native = options.target.query.isNative() and host_mode == options.optimize;
-    const horos = horosModule(b, dependencies.source, b.graph.host, host_mode, source_data);
+    const native = buildsForHost(options.host, options.target) and host_mode == options.optimize;
+    const horos = horosModule(b, dependencies.source, options.host, host_mode, source_data);
     const public_horos = if (native) horos else horosModule(
         b,
         dependencies.source,
@@ -434,7 +506,7 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
     const recovery = if (recovery_shares_horos)
         horos
     else
-        horosModule(b, dependencies.recovery_source, b.graph.host, host_mode, null);
+        horosModule(b, dependencies.recovery_source, options.host, host_mode, null);
     const recovery_options = b.addOptions();
     recovery_options.addOption(
         []const u8,
@@ -453,11 +525,12 @@ fn configureHostModules(b: *std.Build, options: Options, dependencies: Dependenc
     ));
     const diagnostic_fixture = b.createModule(.{
         .root_source_file = b.path("src/diagnostic_replay_fixture.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = host_mode,
         .imports = &.{.{ .name = "horos", .module = horos }},
     });
     return .{
+        .target = options.host,
         .host_mode = host_mode,
         .source_data = source_data,
         .horos = horos,
@@ -513,7 +586,7 @@ fn configureArtifactImages(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("src/semantic_artifact.zig"),
-                    .target = b.graph.host,
+                    .target = options.host,
                     .optimize = host_modules.host_mode,
                     .imports = &.{ .{ .name = "horos_data", .module = host_modules.source_data }, .{
                         .name = "horos",
@@ -533,7 +606,7 @@ fn configureArtifactImages(
                 .root_module = b.createModule(
                     .{
                         .root_source_file = b.path("src/semantic_packaged.zig"),
-                        .target = b.graph.host,
+                        .target = options.host,
                         .optimize = host_modules.host_mode,
                     },
                 ),
@@ -567,7 +640,7 @@ fn configureRuntimeModules(
     );
     const packaged_runtime = b.createModule(.{
         .root_source_file = runtime_source,
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = host_modules.host_mode,
     });
     const rebuilt_directory = if (!options.use_packaged_runtime)
@@ -577,7 +650,7 @@ fn configureRuntimeModules(
         _ = files.addCopyFile(artifact_images.semantic_artifact, "semantic-core.kar");
         break :rebuilt files.getDirectory();
     };
-    const public_runtime = if (options.target.query.isNative())
+    const public_runtime = if (buildsForHost(options.host, options.target))
         packaged_runtime
     else
         b.createModule(.{
@@ -607,11 +680,11 @@ fn configurePublication(
     host_modules: HostModules,
     runtime_modules: RuntimeModules,
 ) Publication {
-    const host_kosmos = if (options.target.query.isNative() and
+    const host_kosmos = if (buildsForHost(options.host, options.target) and
         host_modules.host_mode == options.optimize) dependencies.public_kosmos else b.createModule(
         .{
             .root_source_file = b.path("src/root.zig"),
-            .target = b.graph.host,
+            .target = options.host,
             .optimize = host_modules.host_mode,
             .imports = &.{.{
                 .name = "horos_data",
@@ -629,7 +702,7 @@ fn configurePublication(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("test/v2/publication_bench.zig"),
-                    .target = b.graph.host,
+                    .target = options.host,
                     .optimize = host_modules.host_mode,
                     .imports = &.{ .{
                         .name = "kosmos",
@@ -686,7 +759,7 @@ fn configureBaseline(b: *std.Build, host_modules: HostModules) Baseline {
     const native_baseline = b.createModule(.{ .root_source_file = baseline_source.path(
         b,
         "src/interpreter_v2/stable_session.zig",
-    ), .target = b.graph.host, .optimize = host_modules.host_mode, .imports = &.{.{
+    ), .target = host_modules.target, .optimize = host_modules.host_mode, .imports = &.{.{
         .name = "horos_data",
         .module = host_modules.source_data,
     }} });
@@ -707,7 +780,7 @@ fn configureEconomy(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("bench_semantics.zig"),
-                    .target = b.graph.host,
+                    .target = options.host,
                     .optimize = host_modules.host_mode,
                     .imports = &.{ .{
                         .name = "native_baseline",
@@ -752,21 +825,21 @@ fn configureSessions(
 ) Sessions {
     const authoring_client = b.createModule(.{
         .root_source_file = dependencies.source.path(b, "examples/authoring_client.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = host_modules.host_mode,
         .imports = &.{.{ .name = "horos", .module = host_modules.horos }},
     });
     const borrow_returns = b.createModule(
         .{
             .root_source_file = dependencies.source.path(b, "test/v2/borrow_returns.zig"),
-            .target = b.graph.host,
+            .target = options.host,
             .optimize = host_modules.host_mode,
             .imports = &.{.{ .name = "horos", .module = host_modules.horos }},
         },
     );
     const stable_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/stable_source.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{
             .name = "kosmos",
@@ -823,12 +896,12 @@ fn configureDriver(
             "runtime.zig",
             "pub const bytes = @embedFile(\"semantic-core.kar\");\n",
         ),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
     });
     const driver_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_driver.zig"),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{ .name = "native_baseline", .module = baseline.native_baseline }, .{
             .name = "horos_data",
@@ -878,7 +951,7 @@ fn configureRecoveryDriver(
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test_semantic_recovery.zig"),
-            .target = b.graph.host,
+            .target = host.target,
             .optimize = host.host_mode,
             .imports = &.{
                 .{ .name = "horos", .module = host.horos },
@@ -900,7 +973,7 @@ fn configureRecoveryDriver(
             .{ .name = "kosmos_recovery", .module = b.modules.get("kosmos_recovery").? },
         },
     });
-    const native = ordinary.resolved_target.?.query.isNative();
+    const native = buildsForHost(host.target, ordinary.resolved_target.?);
     const module_types = if (native)
         b.addTest(.{ .name = "kosmos-public-compiler", .root_module = public_module })
     else
@@ -931,7 +1004,7 @@ fn configureDiagnosticExample(
 ) void {
     const example = b.createModule(.{
         .root_source_file = b.path("src/diagnostic_replay_example.zig"),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
         .imports = &.{
             .{ .name = "horos", .module = host_modules.horos },
@@ -944,7 +1017,7 @@ fn configureDiagnosticExample(
         .name = "diagnostic-replay",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/diagnostic_replay.zig"),
-            .target = b.graph.host,
+            .target = host_modules.target,
             .optimize = host_modules.host_mode,
             .imports = &.{.{ .name = "diagnostic_example", .module = example }},
         }),
@@ -965,7 +1038,7 @@ fn configureSemantics(
 ) void {
     const semantic_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic.zig"),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{ .name = "native_baseline", .module = baseline.native_baseline }, .{
             .name = "horos_data",
@@ -992,7 +1065,7 @@ fn configureSpecialization(
 ) void {
     const specialization_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test_semantic_specialization.zig"),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{ .name = "native_baseline", .module = baseline.native_baseline }, .{
             .name = "horos_data",
@@ -1006,7 +1079,7 @@ fn configureSpecialization(
     const recovery_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test_semantic_recovery_specialization.zig"),
-            .target = b.graph.host,
+            .target = host_modules.target,
             .optimize = host_modules.host_mode,
             .imports = &.{
                 .{ .name = "horos_data", .module = host_modules.source_data },
@@ -1037,7 +1110,7 @@ fn configurePublicTests(
 ) void {
     const public_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/native_publication.zig"),
-        .target = b.graph.host,
+        .target = host_modules.target,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{ .name = "kosmos", .module = publication.host_kosmos }, .{
             .name = "horos",
@@ -1243,7 +1316,7 @@ fn configureFixtures(
     fixture_options.addOption(bool, "prepared_only", options.fixture_profile == .prepared_only);
     const fixture = b.addExecutable(.{ .name = "current-fixtures", .root_module = b.createModule(.{
         .root_source_file = b.path("test/current/fixtures.zig"),
-        .target = b.graph.host,
+        .target = options.host,
         .optimize = host_modules.host_mode,
         .imports = &.{ .{ .name = "kosmos", .module = publication.host_kosmos }, .{
             .name = "horos",
@@ -1261,7 +1334,7 @@ fn configureFixtures(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("test/native_consumer/emit.zig"),
-                    .target = b.graph.host,
+                    .target = options.host,
                     .optimize = host_modules.host_mode,
                     .imports = &.{.{ .name = "horos", .module = host_modules.horos }},
                 },
@@ -1460,6 +1533,7 @@ fn configureActivation(b: *std.Build, wasm_modules: WasmModules) Activation {
 
 fn configureQualification(
     b: *std.Build,
+    host: std.Build.ResolvedTarget,
     dependencies: Dependencies,
     driver: Driver,
     foreign_checks: ForeignChecks,
@@ -1476,7 +1550,7 @@ fn configureQualification(
         .name = "kosmos-borrow-diagnostics",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/interpreter_v2/borrow_diagnostics.zig"),
-            .target = b.graph.host,
+            .target = host,
             // Keep the named assertion frame in intentional-panic diagnostics.
             .optimize = .debug,
             .imports = &.{.{ .name = "horos_data", .module = dependencies.host_data }},

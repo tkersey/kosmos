@@ -2,7 +2,20 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
-    const dependency = b.dependency("kosmos", .{ .target = target, .optimize = optimize });
+    const dependency = b.dependency("kosmos", .{
+        .target = target,
+        .optimize = optimize,
+        .@"host-target" = b.option(
+            []const u8,
+            "host-target",
+            "Explicit arch-os-abi for the dependency's host tools (default: the build host)",
+        ),
+        .@"host-cpu" = b.option(
+            []const u8,
+            "host-cpu",
+            "CPU model for -Dhost-target (default: baseline)",
+        ),
+    });
     const module = b.createModule(
         .{
             .root_source_file = b.path("main.zig"),
