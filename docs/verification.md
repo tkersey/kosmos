@@ -212,11 +212,26 @@ files. Directly before `track`, a lane that saves builds the pairing tool in its
 into `$RUNNER_TEMP/zig-cache-pairs`, with its own local and global caches there, so the
 build neither reads nor writes `.zig-cache`, depends on nothing an earlier job saved and
 is equally cold in every job, and the binary exists only once this job's build finished.
-After restoring, `tools/zig-cache.sh track` first renames the tree to
-`.zig-cache.restored`, so no `.zig-cache` exists until the tree is verified. It renames
-the tree back only when the restore succeeded and the tree matches its record (an
-extraction that stops early can still report success), and deletes it otherwise, so a
-partial extraction never becomes the working cache and the lane compiles from nothing.
+Both saves archive the tree at `.zig-cache.saved`: the stage and the admission rename
+`.zig-cache` to `.zig-cache.saved` as the last thing before their save, and `unstage`
+renames it back. The restore therefore extracts into `.zig-cache.saved`, never into
+`.zig-cache`. An extraction can outlive its restore: when the restore's one-minute
+timeout stops the action, the runner stops the action's own process, which need not stop
+the `tar` it started, and terminates whatever still carries the job's
+`RUNNER_TRACKING_ID` only when the job ends. Such a process writes below
+`.zig-cache.saved` by path, or into a file it already holds open. After restoring,
+`tools/zig-cache.sh track` therefore first renames `.zig-cache.saved` to
+`.zig-cache.restored`; then it sends SIGKILL to every process that carries the job's
+`RUNNER_TRACKING_ID` and is neither `track` nor one of its ancestors, waits until each
+has exited, warns with their names when there were any, and deletes whatever they wrote
+to `.zig-cache.saved` before they stopped. Only then does it verify the tree, so nothing
+an earlier step started can write anywhere afterwards, and a file such a process held
+open reaches `.zig-cache` only as part of a tree that matches its record. When
+`RUNNER_TRACKING_ID` is unset or the job's processes cannot be listed, `track` warns,
+deletes the tree and the job saves nothing. `track` renames the tree to `.zig-cache` only
+when the restore succeeded and the tree matches its record (an extraction that stops
+early can still report success), and deletes it otherwise, so a partial extraction never
+becomes the working cache and the lane compiles from nothing.
 It then checks on the workspace filesystem that reading a file updates its access time,
 marks every restored file unread, and records the change time of a file it touches,
 waiting until a second touch reads a later change time, so every later write follows
@@ -224,8 +239,8 @@ the mark.
 Since the compile save reads what it keeps, `unstage` marks every file unread again from
 a new mark and remembers what the compilation used, after a stage that classified the
 job's use; after a stage that stopped before that, nothing was saved and `track`'s mark
-stands. The target identity diagnostic
-reads restored builtin modules before `track`, so its reads count for nothing.
+stands. The target identity diagnostic reads the restored builtin modules in
+`.zig-cache.saved` before `track`, so its reads count for nothing.
 The admissions keep a unit (a manifest, output, configuration, ZIR file, builtin module,
 package archive or extracted package) when the job read or wrote it; a file counts as
 written when its change time follows the mark, which extraction cannot preserve. Zig
@@ -267,8 +282,9 @@ each carry `continue-on-error: true` and `timeout-minutes: 1`, so a failure or t
 shows as a failed step, with a `::warning::`, and the lane goes on. None of them can
 leave a cache that changes what a check computes. Zig reports a manifest hit as cached
 without checking its output, so a manifest present without its output would fail its
-step, while a missing manifest only recompiles: `track` keeps `.zig-cache` absent until
-the tree is verified, the stage sets every manifest aside before any other unit, and
+step, while a missing manifest only recompiles: the restore never writes `.zig-cache`,
+`track` moves only a verified tree there, the stage sets every manifest aside before any
+other unit, and
 `unstage` returns every other unit before any manifest, so wherever either stops, no
 manifest is present without its output. A cache-tool failure skips every later save
 instead of continuing on partial data: `tools/zig-cache.sh` stops at the first failing
@@ -286,8 +302,8 @@ restored a cache, took 2.5–4.3 s. `tools/zig-cache.sh` runs the tool's build, 
 the stage, `unstage` and the admission each under its own `timeout`, which stops it after
 20 s, about four times the longest measured, with SIGTERM and 1 s later SIGKILL; it then
 warns that the step exceeded its 20 s limit and was stopped, or that it failed with its
-status, and no later step saves. When `track` skips, fails or is stopped while the
-restored tree is still aside, `tools/zig-cache.sh` deletes `.zig-cache.restored` under a
+status, and no later step saves. When `track` skips, fails or is stopped after it set the
+restored tree aside, `tools/zig-cache.sh` deletes `.zig-cache.restored` under a
 second 20 s limit (the restore, which downloads and writes the same tree, took at most
 3.9 s) and warns, without failing the step, if the deletion fails or is stopped.
 Reading the job's start stops after 10 s (SIGKILL 1 s later).
@@ -308,8 +324,9 @@ job's own record (`job.check_run_id`) in the Actions API, into `KOSMOS_JOB_START
 runs `tools/zig-cache.sh due`, which the restore waits for; the tool's build, `track`, the
 stage and the admission check the same start when they begin. Past 450 s each warns and
 skips: the restore does not run; the pairing tool is not built, so no later step saves;
-`track` deletes the restored tree unverified, so the lane compiles from nothing and saves
-nothing; the stage sets nothing aside, so the compile
+`track` touches nothing, so the extraction stays unverified in `.zig-cache.saved`, which
+nothing reads, moves or archives, and the lane compiles from nothing and saves nothing;
+the stage sets nothing aside, so the compile
 save does not run and `unstage` returns nothing and keeps `track`'s mark; the admission
 neither prunes nor saves. The compile save and `unstage` run only after a stage that
 began by 450 s, to save and return what it set aside. When the start cannot be read,

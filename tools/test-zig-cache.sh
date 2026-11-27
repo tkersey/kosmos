@@ -16,6 +16,9 @@ export REAL_FIND REAL_MV REAL_RM REAL_ZIG
 tool_cache=$scratch/zig-cache-pairs
 pairs_tool=$tool_cache/zig-cache-pairs
 real_cache=$scratch/real-cache
+extraction=.zig-cache.saved
+RUNNER_TRACKING_ID=zig-cache-test-$$
+export RUNNER_TRACKING_ID
 failures=0
 
 m1=00000000000000000000000000000001 f1=eaae50b21867a4fc20733d2d7251e2b6
@@ -60,9 +63,17 @@ restored_manifest_input() {
 }
 
 record_tree() {
-    find .zig-cache -type f ! -path .zig-cache/kosmos-cache-record -printf '%s %P\n' | LC_ALL=C sort \
+    find "$extraction" -type f ! -path "$extraction/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort \
         > "$scratch/record"
-    mv -- "$scratch/record" .zig-cache/kosmos-cache-record
+    mv -- "$scratch/record" "$extraction/kosmos-cache-record"
+}
+
+tree() {
+    if [[ -e .zig-cache ]]; then
+        printf '.zig-cache'
+    else
+        printf '%s' "$extraction"
+    fi
 }
 
 begin() {
@@ -75,7 +86,7 @@ begin() {
     KOSMOS_JOB_STARTED=$(date +%s)
     export KOSMOS_JOB_STARTED
     : > "$GITHUB_OUTPUT"
-    local cache=.zig-cache
+    local cache=$extraction
     restored_manifest $cache/h/$m1
     restored_manifest $cache/h/$m2
     restored_manifest $cache/h/$m3
@@ -124,6 +135,13 @@ use() {
     local path
     for path in "$@"; do
         cat -- ".zig-cache/$path" > /dev/null
+    done
+}
+
+archive() {
+    local path
+    for path in "$@"; do
+        cat -- "$extraction/$path" > /dev/null
     done
 }
 
@@ -193,19 +211,24 @@ expect_saved() {
         fail "expected save=$1"
         cat "$workspace/report" >&2
     fi
+    if [[ "$1" == true && ( -e .zig-cache || ! -d "$extraction" ) ]]; then
+        fail "the saved tree is not where the save archives it"
+    fi
 }
 
 expect_present() {
-    local path
+    local path root
+    root=$(tree)
     for path in "$@"; do
-        [[ -e ".zig-cache/$path" ]] || fail "missing $path"
+        [[ -e "$root/$path" ]] || fail "missing $path"
     done
 }
 
 expect_absent() {
-    local path
+    local path root
+    root=$(tree)
     for path in "$@"; do
-        [[ ! -e ".zig-cache/$path" ]] || fail "retained $path"
+        [[ ! -e "$root/$path" ]] || fail "retained $path"
     done
 }
 
@@ -217,16 +240,20 @@ expect_report() {
 }
 
 expect_recorded() {
-    if ! cmp -s .zig-cache/kosmos-cache-record <(
-        find .zig-cache -type f ! -path .zig-cache/kosmos-cache-record -printf '%s %P\n' | LC_ALL=C sort
+    local root
+    root=$(tree)
+    if ! cmp -s "$root/kosmos-cache-record" <(
+        find "$root" -type f ! -path "$root/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort
     ); then
         fail "the saved tree differs from its record"
     fi
 }
 
 expect_history() {
-    if ! cmp -s .zig-cache/kosmos-build-runners <(printf '%s\n' "$@"); then
-        fail "build runner history: $(tr '\n' '|' < .zig-cache/kosmos-build-runners 2> /dev/null)"
+    local root
+    root=$(tree)
+    if ! cmp -s "$root/kosmos-build-runners" <(printf '%s\n' "$@"); then
+        fail "build runner history: $(tr '\n' '|' < "$root/kosmos-build-runners" 2> /dev/null)"
     fi
 }
 
@@ -298,9 +325,9 @@ expect_report 'Compiler cache root: 4 units; 1 manifest-output pairs; 0 manifest
 for damage in truncated missing unrecorded; do
     begin "partial-$damage"
     case $damage in
-        truncated) printf 'x' > .zig-cache/o/$f1/test ;;
-        missing) rm -- .zig-cache/z/used-zir ;;
-        unrecorded) rm -- .zig-cache/kosmos-cache-record ;;
+        truncated) printf 'x' > "$extraction/o/$f1/test" ;;
+        missing) rm -- "$extraction/z/used-zir" ;;
+        unrecorded) rm -- "$extraction/kosmos-cache-record" ;;
     esac
     track
     expect_report '::warning::Compiler cache: the restored tree differs from its record'
@@ -319,7 +346,7 @@ expect_absent kosmos-cache-record
 expect_kept
 
 begin broken
-rm -rf .zig-cache/o/$f2
+rm -rf "$extraction/o/$f2"
 record_tree
 track
 use h/$m1 o/$f1/test h/$m2
@@ -402,8 +429,9 @@ expect_recorded
 expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test b/used/builtin.zig
 expect_absent h/$m2 o/$f2 source-examples/h/$m2 source-examples/o/$f2 z/used-zir p/used.tar.gz
 : > "$GITHUB_OUTPUT"
-use h/$m1 o/$f1/test h/$m7 o/$f7/test
+archive h/$m1 o/$f1/test h/$m7 o/$f7/test
 run unstage
+[[ -d .zig-cache && ! -e "$extraction" ]] || fail "unstage did not return the saved tree to .zig-cache"
 expect_absent kosmos-cache-record
 expect_present h/$m2 o/$f2/test source-examples/h/$m2 source-examples/o/$f2/test z/used-zir \
     p/used.tar.gz h/$m4 o/$f4/test
@@ -434,24 +462,24 @@ if [[ -z "$runner_manifest" ]]; then
 else
     begin build-runner
     runner_name=$(basename "$runner_manifest")
-    cp -- "$runner_manifest" .zig-cache/h/"$runner_name"
-    cp -- "$runner_manifest" .zig-cache/native-driver-core/h/"$runner_name"
+    cp -- "$runner_manifest" "$extraction/h/$runner_name"
+    cp -- "$runner_manifest" "$extraction/native-driver-core/h/$runner_name"
     pairing=$(printf 'h/%s\n' "$runner_name" | "$pairs_tool" "$(dirname "$(dirname "$runner_manifest")")")
     runner_output=$(cut -f2 <<< "$pairing")
     mapfile -t runner_inputs < <(tr '\t' '\n' <<< "$pairing" | tail -n +3)
     if [[ "$runner_output" != o/* || ${#runner_inputs[@]} -eq 0 ]]; then
         fail "the real manifest names no output directory or inputs: $pairing"
     fi
-    restored_file ".zig-cache/$runner_output/maker"
-    restored_file ".zig-cache/native-driver-core/$runner_output/test"
+    restored_file "$extraction/$runner_output/maker"
+    restored_file "$extraction/native-driver-core/$runner_output/test"
     for input in "${runner_inputs[@]}"; do
-        restored_file ".zig-cache/$input"
+        restored_file "$extraction/$input"
     done
     for runner in "$m9 $f9" "$m10 $f10" "$m11 $f11" "$m12 $f12"; do
-        restored_manifest ".zig-cache/h/${runner% *}"
-        restored_file ".zig-cache/o/${runner#* }/maker"
+        restored_manifest "$extraction/h/${runner% *}"
+        restored_file "$extraction/o/${runner#* }/maker"
     done
-    printf '%s\n' "o/$f10" "$runner_output" o/gone '' '' "o/$f11" > .zig-cache/kosmos-build-runners
+    printf '%s\n' "o/$f10" "$runner_output" o/gone '' '' "o/$f11" > "$extraction/kosmos-build-runners"
     record_tree
     track
     expect_absent kosmos-build-runners
@@ -504,11 +532,11 @@ expect_present h/$m4 o/$f4/test
 chmod 644 .zig-cache/h/$m2
 
 begin transitive
-restored_manifest_input .zig-cache/h/$m13 '\x08' "o/$f14/generated"
-restored_file .zig-cache/o/$f13/test
-restored_manifest_input .zig-cache/h/$m14 '\x0c' b/transitive/builtin.zig
-restored_file .zig-cache/o/$f14/generated
-restored_file .zig-cache/b/transitive/builtin.zig
+restored_manifest_input "$extraction/h/$m13" '\x08' "o/$f14/generated"
+restored_file "$extraction/o/$f13/test"
+restored_manifest_input "$extraction/h/$m14" '\x0c' b/transitive/builtin.zig
+restored_file "$extraction/o/$f14/generated"
+restored_file "$extraction/b/transitive/builtin.zig"
 record_tree
 track
 use h/$m13 o/$f13/test
@@ -535,9 +563,9 @@ expect_report 'untracked, or an earlier compiler cache step failed; save skipped
 expect_present h/$m4 o/$f4/test b/stale
 
 begin track-discard
-printf 'x' > .zig-cache/o/$f1/test
+printf 'x' > "$extraction/o/$f1/test"
 failing rm << 'EOF'
-if [[ "$*" == *.zig-cache* ]]; then
+if [[ "$*" == *.zig-cache.restored* ]]; then
     exit 1
 fi
 exec "$REAL_RM" "$@"
@@ -641,15 +669,22 @@ expect_report "fewer than the 150 s a cache step needs to begin; the pairing too
 
 begin late-track
 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track
-expect_report "fewer than the 150 s a cache step needs to begin; the restored tree is deleted"
-expect_report 'Compiler cache: deleted the unverified restored tree'
-[[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a late track left the unverified tree in the workspace"
+expect_report "fewer than the 150 s a cache step needs to begin; this job uses no restored tree and saves no compiler cache"
+[[ -d "$extraction" && ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a late track moved the extraction"
+run unstage
+[[ -d "$extraction" && ! -e .zig-cache ]] || fail "unstage moved an extraction that no stage renamed"
 compile o/$f1/test
 run stage
 expect_saved false
 expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+run unstage
+run admit
+expect_saved false
+[[ -d "$extraction" ]] || fail "a step after a late track moved the extraction"
+expect_absent h/$m1 h/$m4 b/stale
 
-begin late-track-stuck-deletion
+begin track-stuck-deletion
+printf 'x' > "$extraction/o/$f1/test"
 failing rm << 'EOF'
 if [[ "$*" == *.zig-cache.restored* ]]; then
     sleep 5
@@ -657,11 +692,59 @@ fi
 exec "$REAL_RM" "$@"
 EOF
 started=$(date +%s)
-PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track ||
-    fail "a late track whose deletion was stopped failed"
-(( $(date +%s) - started <= 3 )) || fail "a stopped deletion took $(( $(date +%s) - started )) s for a 1 s limit"
+if PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track; then
+    fail "a track whose deletion was stopped succeeded"
+fi
+(( $(date +%s) - started <= 4 )) || fail "two stopped deletions took $(( $(date +%s) - started )) s for 1 s limits"
+expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped'
 expect_report '::warning::Compiler cache: deleting the unverified restored tree stopped or failed with status 124; it stays in the workspace'
-[[ ! -e .zig-cache ]] || fail "a late track left the unverified tree in use"
+[[ ! -e .zig-cache ]] || fail "a track whose deletion was stopped left the unverified tree in use"
+
+begin stray-extraction
+cat > "$workspace/stray" << EOF
+exec 3>> '$extraction/o/$f1/test'
+printf '%s\n' "\$\$" > '$workspace/stray.pid'
+while [[ ! -e '$workspace/release' ]]; do
+    sleep 0.01
+done
+printf 'stray' >&3
+mkdir -p '$extraction/o/stray'
+printf 'stray' > '$extraction/o/stray/test'
+: > '$workspace/stray.done'
+EOF
+(bash "$workspace/stray" &)
+for _ in {1..500}; do
+    [[ ! -s "$workspace/stray.pid" ]] || break
+    sleep 0.01
+done
+track
+: > "$workspace/release"
+sleep 0.5
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$(< "$workspace/stray.pid")]"
+expect_kept
+if [[ -e "$workspace/stray.done" ]] || kill -0 "$(< "$workspace/stray.pid")" 2> /dev/null; then
+    fail "an extraction left running outlived track"
+    kill "$(< "$workspace/stray.pid")" 2> /dev/null || :
+fi
+if grep -q stray ".zig-cache/o/$f1/test"; then
+    fail "an extraction left running wrote into .zig-cache through a file it held open"
+fi
+[[ ! -e "$extraction" ]] || fail "an extraction left running wrote into $extraction after track"
+use h/$m1 o/$f1/test
+run admit
+expect_saved true
+expect_present h/$m1 o/$f1/test
+expect_absent o/stray
+
+begin untracked-job
+RUNNER_TRACKING_ID='' track
+expect_report '::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so track cannot stop what earlier steps left running; this job uses no restored tree and saves no compiler cache'
+expect_report 'Compiler cache: deleted the unverified restored tree'
+[[ ! -e .zig-cache && ! -e .zig-cache.restored && ! -e "$extraction" ]] ||
+    fail "a track that cannot stop leftover processes kept the restored tree"
+compile o/$f1/test
+run stage
+expect_saved false
 
 begin late-stage
 track
@@ -757,6 +840,10 @@ grep -Fxq "        run: bash tools/zig-cache.sh track \"\$RESTORE\"" "$workflow"
     fail "track does not run under the tool's limit"
 grep -Fq "started=\$(timeout -k 1 10 gh api " "$workflow" || fail "reading the job start has no 10 s limit"
 grep -Fxq "        if: steps.start.outputs.due == 'true'" "$workflow" || fail "the restore does not wait for the time check"
+if (( $(grep -c "^          path: $extraction\$" "$workflow") != 3 )) || grep -q '^          path: \.zig-cache$' "$workflow" ||
+    ! grep -Fxq "saved=\$cache.saved" "$script" || ! grep -Fxq 'cache=.zig-cache' "$script"; then
+    fail "the restore and both saves do not all use $extraction, apart from the working cache"
+fi
 bound=$(( (10 + 1) + 2 * (60 + 10) + 5 * (step_limit + kill_after) ))
 (( bound == 256 )) || fail "cache work before the checks may take $bound s, not the documented 256 s"
 grep -Fq '11 + 70 + 21 + (21 + 21) + 21 + 70 + 21 = 256 s' "$tools/../docs/verification.md" ||

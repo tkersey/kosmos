@@ -5,6 +5,7 @@ shopt -s inherit_errexit
 cache=.zig-cache
 record=$cache/kosmos-cache-record
 history=$cache/kosmos-build-runners
+saved=$cache.saved
 restored=$cache.restored
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 output=${GITHUB_OUTPUT:-/dev/null}
@@ -160,14 +161,58 @@ arm() {
     printf '%s\n' "$tracking" > "$state/tracking"
 }
 
+stop() {
+    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor names=
+    local -A ours=()
+    local -a strays=()
+    if [[ -z "$id" ]]; then
+        skip '::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so track cannot stop what earlier steps left running'
+    fi
+    ancestor=$$
+    while (( ancestor > 0 )); do
+        ours[$ancestor]=1
+        read -r line < "/proc/$ancestor/stat"
+        line=${line##*) }
+        read -r _ ancestor _ <<< "$line"
+    done
+    grep -lsxzF -- "RUNNER_TRACKING_ID=$id" /proc/[0-9]*/environ > "$state/tracked" || :
+    if ! grep -Fxq -- "/proc/$$/environ" "$state/tracked"; then
+        skip "::warning::Compiler cache: this job's processes cannot be listed, so track cannot stop what earlier steps left running"
+    fi
+    while IFS= read -r line; do
+        pid=${line#/proc/}
+        pid=${pid%/environ}
+        if [[ -n "${ours[$pid]:-}" ]] || ! grep -qsxzF -- "RUNNER_TRACKING_ID=$id" "/proc/$pid/environ"; then
+            continue
+        fi
+        if read -r name 2> /dev/null < "/proc/$pid/comm"; then
+            names+=" ${name}[${pid}]"
+        fi
+        kill -KILL -- "$pid" 2> /dev/null || :
+        strays+=("$pid")
+    done < "$state/tracked"
+    for pid in "${strays[@]}"; do
+        while read -r line 2> /dev/null < "/proc/$pid/stat"; do
+            line=${line##*) }
+            [[ "$line" != [ZX]* ]] || break
+            sleep 0.01
+        done
+    done
+    if (( ${#strays[@]} > 0 )); then
+        printf '::warning::Compiler cache: stopped what earlier steps left running:%s\n' "$names"
+    fi
+}
+
 track() {
     local bytes tracking
-    if [[ -e "$cache" ]]; then
-        mv -T -- "$cache" "$restored"
-    fi
     rm -rf -- "$state"
     mkdir -p -- "$state"
     fits
+    if [[ -e "$saved" ]]; then
+        mv -T -- "$saved" "$restored"
+    fi
+    stop
+    rm -rf -- "$saved"
     if [[ "$1" == success && -f "$restored/kosmos-cache-record" ]]; then
         tree_record "$restored" > "$state/restored-record"
         if cmp -s -- "$restored/kosmos-cache-record" "$state/restored-record"; then
@@ -381,6 +426,8 @@ seal() {
         skip "::warning::Compiler cache: ${bytes} bytes exceed the ${save_bytes_max}-byte ceiling"
     fi
     tree_record "$cache" > "$record"
+    : > "$state/sealed"
+    mv -T -- "$cache" "$saved"
     give
     printf 'Compiler cache: save %s bytes\n' "$bytes"
     printf 'save=true\n' >> "$output"
@@ -401,7 +448,10 @@ stage() {
 unstage() {
     local unit
     take
-    rm -f -- "$record" "$history"
+    if [[ -e "$state/sealed" && -e "$saved" ]]; then
+        mv -T -- "$saved" "$cache"
+    fi
+    rm -f -- "$state/sealed" "$record" "$history"
     if [[ -f "$state/prune" ]]; then
         tac -- "$state/prune" > "$state/return"
         while IFS= read -r unit; do
@@ -454,7 +504,7 @@ case "${1:-}" in
         ;;
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage
-        begin "$1" 'the restored tree is deleted and this job saves no compiler cache' "$@"
+        begin "$1" 'this job uses no restored tree and saves no compiler cache' "$@"
         track "$2"
         ;;
     stage | unstage | admit)
