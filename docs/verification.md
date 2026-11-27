@@ -337,18 +337,24 @@ request runs `Closed pull request caches` from the base branch through
 `pull_request_target`, also without checkout and with only `actions: write`; it deletes
 every cache of the pull request's merge ref. A run still in progress at the close can
 save after that, and its own retention job then finds the pull request closed and
-deletes those saves. Both jobs log a failed deletion and wait up to 30 seconds for the
-cache list to drop deleted entries before failing. `Closed pull request caches` reports
-as deleted only the entries its last listing no longer holds.
+deletes those saves. Neither job can turn a run red. Each warns about a failed deletion
+and waits up to 30 seconds for the cache list to drop deleted entries, then warns about
+any still listed; a command that fails (an API error while reading the pull request or
+listing caches) stops the step with a `::warning::` naming it, before any later
+deletion; and the step carries `continue-on-error: true` and a four-minute timeout, so
+a hang is stopped and tolerated. A retention succeeds when it finishes without a
+warning. `Closed pull request caches` reports as deleted only the entries its last
+listing no longer holds.
 After a successful retention, a ref holds at most one entry per CPU and lane, so at most
 C sets of 14 entries, where C ≤ 2 is the number of CPU classes its runs chose; forks and
 branches other than `main` hold none. Each run attempt whose saves no successful
 retention has yet covered adds at most two entries per lane (its compile and job saves);
 every attempt saves under its own keys and has its own retention job, and an attempt
-whose retention job is still to finish, or failed, timed out or was cancelled, keeps
-them until a later attempt's retention on the same ref succeeds. A closed pull
+whose retention is still to finish, stopped with a warning, timed out or was cancelled,
+keeps them until a later attempt's retention on the same ref succeeds. A closed pull
 request's ref holds none once `Closed pull request caches` or a later retention on it
-succeeds; when that cleanup fails, times out or is cancelled and no run follows, its entries stay until GitHub removes caches unused for seven days.
+succeeds; when that cleanup stops with a warning, times out or is cancelled and no run
+follows, its entries stay until GitHub removes caches unused for seven days.
 The code enforces those counts, at most six jobs' build runners per entry, and the
 1,000,000,000-byte ceiling on each entry's tree (each archive GitHub counted for this
 pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per

@@ -788,6 +788,58 @@ superseded() {
 [[ "$(superseded open)" == "3 4 6 7 " ]] || fail "open retention deleted: $(superseded open)"
 [[ "$(superseded closed)" == "1 2 3 4 5 6 7 8 " ]] || fail "closed retention deleted: $(superseded closed)"
 
+scenario=retention-failure
+run_block() {
+    awk -v job="$2:" '
+        /^  [a-z-]+:$/ { active = ($1 == job) }
+        active && /^        run: \|$/ { body = 1; next }
+        body && /^          / { sub(/^          /, ""); print; next }
+        body { exit }
+    ' "$1"
+}
+run_block "$workflow" cache-retention > "$scratch/retain.sh"
+run_block "$tools/../.github/workflows/closed-pull-request-caches.yml" delete > "$scratch/close.sh"
+mkdir -p -- "$scratch/gh-down" "$scratch/gh-stuck" "$scratch/retain-temp"
+cat > "$scratch/gh-down/gh" << 'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+exit 1
+EOF
+cat > "$scratch/gh-stuck/gh" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$GH_LOG"
+case "\$*" in
+    *pulls/*) printf 'open\n' ;;
+    *DELETE*) ;;
+    *) printf '{"id": 5, "size_in_bytes": 1, "key": "$v3/native/bb-98-2-compiled"}\n{"id": 6, "size_in_bytes": 1, "key": "$v3/native/aa-98-1-checked"}\n' ;;
+esac
+EOF
+printf '#!/usr/bin/env bash\n' > "$scratch/gh-stuck/sleep"
+chmod +x -- "$scratch/gh-down/gh" "$scratch/gh-stuck/gh" "$scratch/gh-stuck/sleep"
+retain() {
+    : > "$scratch/gh.log"
+    env PATH="$scratch/$1:$PATH" GH_LOG="$scratch/gh.log" GH_REPO=o/r CACHE_REF=refs/pull/93/merge \
+        PULL_REQUEST="$2" SUPERSEDED="$(< "$scratch/superseded.jq")" DELETED="$(< "$scratch/deleted.jq")" \
+        RUNNER_TEMP="$scratch/retain-temp" GITHUB_STEP_SUMMARY="$scratch/summary" \
+        bash -e "$scratch/$3" > "$scratch/retain.out" 2>&1 || fail "$3 with $1 and pull request '$2' exited $?"
+}
+expect_retained() {
+    grep -Fq -- "$1" "$scratch/retain.out" || fail "$2 lacks: $1 ($(tr '\n' '|' < "$scratch/retain.out"))"
+}
+retain gh-down 93 retain.sh
+expect_retained '::warning::Compiler cache retention stopped where ' 'retention with the API down'
+retain gh-down '' retain.sh
+expect_retained '::warning::Compiler cache retention stopped where ' 'retention on main with the API down'
+! grep -q DELETE "$scratch/gh.log" || fail "retention deleted after a failed listing"
+retain gh-stuck 93 retain.sh
+expect_retained '::warning::A deleted cache is still listed after 30 seconds' 'retention with a stuck deletion'
+[[ "$(grep DELETE "$scratch/gh.log")" == 'api -X DELETE repos/o/r/actions/caches/6 --silent' ]] ||
+    fail "retention deleted other than the superseded entry: $(grep DELETE "$scratch/gh.log" | tr '\n' '|')"
+retain gh-down '' close.sh
+expect_retained '::warning::Closed pull request cache cleanup stopped where ' 'cleanup with the API down'
+retain gh-stuck '' close.sh
+expect_retained '::warning::A deleted cache is still listed after 30 seconds' 'cleanup with a stuck deletion'
+
 scenario=zig-pairs
 for directory in "$scratch/tools-cache/.zig-cache/tools" "$ZIG_GLOBAL_CACHE_DIR"; do
     find "$directory/h" -type f ! -name timestamp -size +0c -printf 'h/%P\n' > "$scratch/finalized.txt"

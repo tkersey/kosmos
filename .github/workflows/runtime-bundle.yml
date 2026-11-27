@@ -360,6 +360,8 @@ jobs:
       pull-requests: read
     steps:
       - name: Delete this ref's superseded compiler caches, or every cache once its pull request closed
+        continue-on-error: true
+        timeout-minutes: 4
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -378,6 +380,7 @@ jobs:
             | .[] | [.id, .size_in_bytes, .key] | @tsv
         run: |
           set -o pipefail
+          trap 'status=$?; if [ "$status" != 0 ]; then printf "::warning::Compiler cache retention stopped where %s failed with status %d; what it did not delete stays until a later retention succeeds\n" "$BASH_COMMAND" "$status"; exit 0; fi' EXIT
           ref_caches() {
             gh api -X GET --paginate "repos/$GH_REPO/actions/caches" \
               -f ref="$CACHE_REF" -F per_page=100 --jq '.actions_caches[]'
@@ -397,8 +400,8 @@ jobs:
             grep -Fxq -f <(cut -f1 "$RUNNER_TEMP/superseded.tsv") \
               <(jq -r .id "$RUNNER_TEMP/remaining.json") || break
             if [ "$attempt" = 6 ]; then
-              echo "::error::A deleted cache is still listed"
-              exit 1
+              echo "::warning::A deleted cache is still listed after 30 seconds"
+              break
             fi
             sleep 5
           done

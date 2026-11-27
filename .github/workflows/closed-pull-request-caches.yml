@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Delete every cache saved for the closed pull request
+        continue-on-error: true
+        timeout-minutes: 4
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -20,6 +22,7 @@ jobs:
             | "\($ref): deleted \(length) of \($listed | length) entries, \(map(.size_in_bytes) | add // 0) bytes"
         run: |
           set -o pipefail
+          trap 'status=$?; if [ "$status" != 0 ]; then printf "::warning::Closed pull request cache cleanup stopped where %s failed with status %d; what it did not delete stays until GitHub removes it\n" "$BASH_COMMAND" "$status"; exit 0; fi' EXIT
           ref_caches() {
             gh api -X GET --paginate "repos/$GH_REPO/actions/caches" \
               -f ref="$CACHE_REF" -F per_page=100 --jq '.actions_caches[]'
@@ -44,6 +47,5 @@ jobs:
           jq -nr --arg ref "$CACHE_REF" --slurpfile listed "$RUNNER_TEMP/closed.json" \
             --slurpfile remaining "$RUNNER_TEMP/remaining.json" "$DELETED" | tee -a "$GITHUB_STEP_SUMMARY"
           if listed; then
-            echo "::error::A deleted cache is still listed"
-            exit 1
+            echo "::warning::A deleted cache is still listed after 30 seconds"
           fi
