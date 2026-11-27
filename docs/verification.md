@@ -234,11 +234,19 @@ It warns with their names when there were any, and deletes whatever they wrote t
 `.zig-cache.saved` before they stopped. Only then does it verify the
 tree, so nothing an earlier step started can write anywhere afterwards, and a file such
 a process held open reaches `.zig-cache` only as part of a tree that matches its record.
-When `RUNNER_TRACKING_ID` is unset, the job's processes cannot be listed, or such a
-process is still listed 10 s (half the step's 20 s limit) after the first listing,
-`track` warns, naming such processes, deletes the tree and the job saves nothing.
-`track` has no time check, so it never leaves an extraction unverified in
-`.zig-cache.saved` with its `tar` still running.
+When `RUNNER_TRACKING_ID` is unset or the job's processes cannot be listed, `track`
+warns, deletes the tree and the job saves nothing. The listing stops at a deadline 10 s
+(half the step's 20 s limit, in bash's whole `SECONDS`, so 9 to 10 s) after the first
+listing: when a pass at or after it still finds a process left, `track` warns
+`what earlier steps left running did not exit within 10 s of SIGKILL:` with every
+process it signalled or failed to signal, skips without verifying, deletes
+`.zig-cache.restored` and gives no mark, so the lane compiles from nothing and the job
+saves nothing. What that pass found is left running: a process whose SIGKILL has not
+taken effect yet (one blocked in uninterruptible I/O) or failed. It runs until it exits
+or the job ends, and can keep writing below `.zig-cache.saved` or into a file it holds
+open, but never into `.zig-cache`, which receives no restored tree, and nothing it
+writes is saved. The deadline bounds only this cleanup, not qualification: the lane's
+compilation and checks run as usual, and the 600 s gate stays their only time limit.
 `track` renames the tree to `.zig-cache` only
 when the restore succeeded and the tree matches its record (an extraction that stops
 early can still report success), and deletes it otherwise, so a partial extraction never
@@ -254,9 +262,10 @@ stands. Before the new mark, `unstage` stops what earlier steps left running, as
 does: a compile save stopped by its one-minute timeout can leave its `tar` running, and
 that `tar` follows the directories it opened into `.zig-cache` once `unstage` renames the
 tree back, so its reads after the mark would count units the job never used. When
-`unstage` cannot stop such processes, it warns, gives no mark back, and the admission
-saves nothing. The target identity diagnostic reads the restored builtin modules in
-`.zig-cache.saved` before `track`, so its reads count for nothing.
+`unstage` cannot stop such processes, or the same 10 s deadline fires, it warns, leaves
+what is still listed running, gives no mark back, and the admission saves nothing. The
+target identity diagnostic reads the restored builtin modules in `.zig-cache.saved`
+before `track`, so its reads count for nothing.
 The admissions keep a unit (a manifest, output, configuration, ZIR file, builtin module,
 package archive or extracted package) when the job read or wrote it; a file counts as
 written when its change time follows the mark, which extraction cannot preserve. Zig
@@ -337,9 +346,11 @@ and the cache work after them (the admission and the checked save) at most 21 + 
 beside GitHub's start-up of each step (under 0.1 s in these logs). The target identity
 diagnostic, which `main` already ran on the native and source lanes, is not cache work
 and keeps its own one-minute timeout (0.2 s measured).
-No cache step reads the clock or has a cutoff: each is bounded only by its own limit, and
-`track`, the stage, the compile save, `unstage` and the admission run whenever every
-earlier step succeeded or was tolerated. The runtime budget gate's 600 s, measured from
+No cache step reads the job's clock or skips for how far the job has got: each is
+bounded only by its own limit, and `track`, the stage, the compile save, `unstage` and
+the admission run whenever every earlier step succeeded or was tolerated. The only times
+a cache step measures are its own: `stop()`'s 10 s deadline and how long a killed step
+ran. The runtime budget gate's 600 s, measured from
 the start of the run attempt, is the only pass/fail time limit. Each lane's job carries
 `timeout-minutes: 20` only as a backstop against a runaway step: a lane still running
 after 600 s already fails its attempt's gate, and the gate passes a later attempt only
@@ -380,7 +391,11 @@ nothing and runs on a GitHub-hosted runner with only `actions: write` and
 `pull-requests: read`. For each host target, CPU and lane on the run's ref it keeps the
 entry with the highest run id, attempt and phase (`checked` after `compiled`), read from
 the key rather than from the creation time, so an older run that saves last never
-displaces a newer run's entry; run ids, unlike run numbers, never restart. It deletes the
+displaces a newer run's entry; run ids, unlike run numbers, never restart. A newer run's
+or attempt's `compiled` entry therefore replaces an older `checked` one, although it
+holds only what compilation used and the next run compiles the checks' units again,
+because the full-rerun recovery needs the newest entry, even a compile-only one, to
+seed the rerun. It deletes the
 others and every entry of an older key version (`kosmos-native-v<N>-` with N below the
 workflow's `KOSMOS_CACHE_VERSION`, or with no version); a newer version's entries, saved
 by a later workflow on the same ref, stay. If
