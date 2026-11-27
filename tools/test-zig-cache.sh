@@ -411,6 +411,27 @@ if ! grep -Eq 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0\.17\.1-%s-%s' "$work
     ! grep -Fq "\"\$RUNNER_OS\" \"\$RUNNER_ARCH\" \"\$KOSMOS_HOST_TARGET\" \"\$cpu\"" "$workflow"; then
     fail "the key prefix does not name the host target and the chosen CPU"
 fi
+awk '
+    /^  [a-z-]+:$/ { job = $1 }
+    job == "qualify:" && /^      - / { step++ }
+    job == "qualify:" {
+        builds[step] += gsub(/zig build( |$)/, "&")
+        pinned[step] += gsub(/-Dhost-target="\$KOSMOS_HOST_TARGET" -Dhost-cpu="\$KOSMOS_HOST_CPU"/, "&")
+    }
+    END {
+        for (s in builds) {
+            total += builds[s]
+            if (builds[s] != pinned[s]) print "step " s ": " builds[s] " builds, " pinned[s] " pinned"
+        }
+        if (total < 10) print total " builds"
+    }
+' "$workflow" > "$scratch/unpinned.txt"
+[[ ! -s "$scratch/unpinned.txt" ]] ||
+    fail "a qualification build leaves the host target or CPU native: $(tr '\n' ';' < "$scratch/unpinned.txt")"
+consumer=$tools/../test/native_consumer/build.zig
+if ! grep -Fq '.@"host-target" = b.option(' "$consumer" || ! grep -Fq '.@"host-cpu" = b.option(' "$consumer"; then
+    fail "the native consumer does not pass the host target and CPU to its Kosmos dependency"
+fi
 
 scenario=retention
 awk '

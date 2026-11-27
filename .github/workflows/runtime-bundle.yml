@@ -251,6 +251,7 @@ jobs:
           zig build --build-file "$scratch/consumer/build.zig" \
             --system "$scratch/system" --cache-dir "$PWD/.zig-cache/native-consumer" \
             -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
+            -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
             -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'

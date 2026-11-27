@@ -171,9 +171,16 @@ SHA extensions keep artifact digests on the hardware path. Every cache key is
 `kosmos-native-v6-<os>-<arch>-0.17.1-<host target>-<cpu>/<lane>/<lock>-<run number>-<attempt>-<phase>`,
 and every restore prefix names the same host target and CPU, so host artifacts hit on
 every runner model that chooses the same CPU. The consumer lane builds the extracted
-package for the same host target and CPU, from a fixed scratch path, with the lane's own
-global cache. Zig compiles its build runner (`maker`, in the global cache) and each
-cache's configure script for the runner itself, so only those vary by runner model.
+package for the same target and CPU, from a fixed scratch path, with the lane's own
+global cache, and `test/native_consumer/build.zig` passes `-Dhost-target` and
+`-Dhost-cpu` on to its Kosmos dependency, so the dependency's packaged-artifact emitter
+builds for them as well. The source lanes' nested `zig build emit-examples` runs Horos's
+own `build.zig`, which builds its emitter and authoring cases for its qualification
+host; on every x86_64 Linux runner that is `x86_64-linux.5.10...7.2-gnu.2.31` with the
+`baseline` CPU, whatever the runner model. Horos takes no host option and rejects an
+unknown one, so those tools keep `baseline`. Zig compiles its build runner (`maker`, in
+the global cache) and each cache's configure script for the runner itself, so only those
+vary by runner model.
 Builds without either option stay native; `-Dhost-cpu` without `-Dhost-target` is
 rejected, and a host target must name its architecture, OS and ABI.
 Every lane compiles before it runs a check: the native lanes with their `build-*`
