@@ -3,9 +3,6 @@ set -euo pipefail
 
 cache=.zig-cache
 record=$cache/kosmos-cache-record
-work_directory=${RUNNER_TEMP:?}
-state=${KOSMOS_CACHE_STATE:-$work_directory/zig-cache-access}
-aside=$state/aside
 history=$cache/kosmos-build-runners
 tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
@@ -317,10 +314,13 @@ case "${1:-}" in
         ;;
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage
+        state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
         track "$2"
         ;;
     stage | unstage | admit)
         [[ $# -eq 1 ]] || usage
+        state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
+        aside=$state/aside
         "$1"
         ;;
     *)
