@@ -114,7 +114,7 @@ expect_report() {
 }
 
 begin pairs
-bash "$script" track 600 > /dev/null
+bash "$script" track > /dev/null
 if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
     printf 'Access-time tracking is unavailable on this filesystem; cannot test pruning.\n' >&2
     exit 1
@@ -131,7 +131,7 @@ expect_absent local/build/h/$m4 local/build/o/$f4 local/build/o/orphan \
 expect_report 'local/build/: 13 units; 4 manifest-output pairs; 2 manifests without output dropped; pruned 6 units'
 
 begin written
-bash "$script" track 600 > /dev/null
+bash "$script" track > /dev/null
 use local/build/h/$m1 local/build/o/$f1/test
 printf '\0' > .zig-cache/local/build/h/$m7
 compile local/build/o/$f7/test
@@ -143,7 +143,7 @@ expect_absent local/build/h/$m2 local/build/o/$f2 local/build/z/used-zir
 
 begin broken
 rm -rf .zig-cache/local/build/o/$f2
-bash "$script" track 600 > /dev/null
+bash "$script" track > /dev/null
 use local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2
 admit
 expect_saved true
@@ -152,7 +152,7 @@ expect_present local/build/h/$m1 local/build/o/$f1/test
 expect_report '3 manifests without output dropped'
 
 begin untracked
-bash "$script" track 600 > /dev/null
+bash "$script" track > /dev/null
 printf 'off\n' > "$KOSMOS_CACHE_STATE/tracking"
 admit
 expect_saved true
@@ -163,7 +163,7 @@ expect_report 'local/build/: 13 units; 4 manifest-output pairs; 2 manifests with
 
 begin ceiling
 head -c 4194304 /dev/urandom > .zig-cache/o/$f8/libcompiler_rt.a
-bash "$script" track 600 > /dev/null
+bash "$script" track > /dev/null
 use local/build/h/$m1 local/build/o/$f1/test
 admit 3145728
 expect_saved true
@@ -175,25 +175,29 @@ expect_saved false
 expect_report '::warning::Compiler cache: even what this run used exceeds the lane maximum'
 
 begin deadline
-bash "$script" track 2 > /dev/null
 printf 'false\nexit 0\n' > "$workspace/errexit.sh"
 printf 'exit 3\n' > "$workspace/status.sh"
 printf 'sleep 30\n' > "$workspace/slow.sh"
+printf ': > "%s/ran"\n' "$workspace" > "$workspace/late.sh"
+export KOSMOS_LANE_DEADLINE=$(( $(date +%s) + 600 ))
 status=0
 bash "$script" work "$workspace/errexit.sh" > "$workspace/report" || status=$?
 (( status == 1 )) || fail "a failing command returned $status, not 1"
 status=0
 bash "$script" work "$workspace/status.sh" > "$workspace/report" || status=$?
 (( status == 3 )) || fail "the step status became $status, not 3"
+KOSMOS_LANE_DEADLINE=$(( $(date +%s) + 2 ))
 status=0
 started=$SECONDS
 bash "$script" work "$workspace/slow.sh" > "$workspace/report" || status=$?
 (( status == 124 )) || fail "a step past the deadline returned $status, not 124"
 (( SECONDS - started < 15 )) || fail "a step ran $((SECONDS - started)) s past a 2 s deadline"
 expect_report '::error::Lane work reached its deadline'
+KOSMOS_LANE_DEADLINE=$(( $(date +%s) - 1 ))
 status=0
-bash "$script" work "$workspace/status.sh" > "$workspace/report" || status=$?
+bash "$script" work "$workspace/late.sh" > "$workspace/report" || status=$?
 (( status == 124 )) || fail "a step after the deadline returned $status, not 124"
+[[ ! -e "$workspace/ran" ]] || fail "a step after the deadline ran"
 
 scenario=zig-pairs
 for directory in "$scratch/zig-cache-pairs/local" "$scratch/zig-cache-pairs/global"; do

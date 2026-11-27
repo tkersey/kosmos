@@ -11,8 +11,8 @@ archive_timestamp_slack_bytes=1048576
 deadline_kill_seconds=10
 
 usage() {
-    printf 'Usage: bash tools/zig-cache.sh track WORK_SECONDS\n' >&2
-    printf '       bash tools/zig-cache.sh work STEP_SCRIPT\n' >&2
+    printf 'Usage: bash tools/zig-cache.sh track\n' >&2
+    printf '       KOSMOS_LANE_DEADLINE=EPOCH_SECONDS bash tools/zig-cache.sh work STEP_SCRIPT\n' >&2
     printf '       bash tools/zig-cache.sh admit ARCHIVE_BYTES_MAX\n' >&2
     exit 64
 }
@@ -41,7 +41,6 @@ access_time_tracking() {
 }
 
 track() {
-    local work_seconds=$1
     rm -rf -- "$snapshot"
     mkdir -p -- "$state" "$cache/tmp"
     access_time_tracking > "$state/tracking"
@@ -51,12 +50,10 @@ track() {
         find "$cache" -type f -exec touch -a -d "@$unread_epoch" -- {} +
     fi
     date +%s.%N > "$state/armed"
-    printf '%s\n' "$(( $(date +%s) + work_seconds ))" > "$state/deadline"
 }
 
 work() {
-    local deadline remaining status=0
-    deadline=$(< "$state/deadline")
+    local deadline=$KOSMOS_LANE_DEADLINE remaining status=0
     remaining=$(( deadline - $(date +%s) ))
     if (( remaining > 0 )); then
         timeout --kill-after="$deadline_kill_seconds" "$remaining" \
@@ -191,11 +188,11 @@ admit() {
 
 case "${1:-}" in
     track)
-        [[ $# -eq 2 && "$2" =~ ^[0-9]+$ ]] || usage
-        track "$2"
+        [[ $# -eq 1 ]] || usage
+        track
         ;;
     work)
-        [[ $# -eq 2 ]] || usage
+        [[ $# -eq 2 && "${KOSMOS_LANE_DEADLINE:-}" =~ ^[0-9]+$ ]] || usage
         work "$2"
         ;;
     admit)

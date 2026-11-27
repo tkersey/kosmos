@@ -169,9 +169,9 @@ saved whole while they fit the lane's ceiling (below), so a lane keeps a build r
 for every runner CPU model it has used and a new commit never recompiles the runtime
 libraries.
 After restoring, `tools/zig-cache.sh track` checks on the workspace filesystem that
-reading a file updates its access time, marks every cached file unread and starts the
-lane's work deadline. Before the save, `tools/zig-cache.sh admit` hard-links the cache
-into a snapshot and prunes the build caches by Zig's own manifest-output pairs.
+reading a file updates its access time and marks every cached file unread. Before the
+save, `tools/zig-cache.sh admit` hard-links the cache into a snapshot and prunes the
+build caches by Zig's own manifest-output pairs.
 Zig 0.17.1 finalizes a manifest under `h/` for each step it caches and stores the
 step's output in `o/F` or its configuration in `c/F`, where F is the digest
 `std/Build/Cache.zig` computes from the manifest's file name and the file digests the
@@ -198,26 +198,32 @@ Without working access times nothing else is removed.
 Temporary directories are emptied. Every file the run read or wrote stays, so the full
 rerun after a failed run finds every artifact a lane used once that lane reached its
 admission.
-Each lane's build and test steps, and the portable lane's packaging, run through
-`tools/zig-cache.sh work` (logged as `shell: /usr/bin/bash tools/zig-cache.sh work
-{0}`). It runs the step's script with `bash --noprofile --norc -eo pipefail`, the flags
-of GitHub's `shell: bash`. On main these steps ran under the default `bash -e {0}`, so
-the wrapper adds `pipefail`; only the session step has pipelines, and it already sets
-`pipefail`. The wrapper ends the script 510 seconds after tracking started: TERM, then
-KILL after 10 seconds. The deadline is anchored at tracking, not at the job's start.
-After a lane's last work step only the admission and the save run before its cache is
-saved, each with a one-minute timeout. The portable lane uploads its package after the
-save, also with a one-minute timeout, and the post steps of checkout, setup-zig and
-setup-node run last. A lane past its deadline therefore fails, admits and saves its
-cache inside its 10-minute job limit provided that the time from the job's start to
-tracking plus the admission and save time is at most 80 seconds (600 − 510 − 10), and
-that the steps outside the wrapper between tracking and the last work step (target
-identities, setup-node and the browser lane's tool installation) end by the deadline.
-Nothing enforces these preconditions. In run 45910441500 tracking started 14.2–23.1
-seconds after each job's first log line, and admission, including the pairing tool's
-compilation, plus save took 5.5–11.2 seconds (11.2 on the native lane). Reaching the
-job limit before the save would cancel the lane and skip its admission or save, which
-run only when the run is not cancelled.
+Every step of a lane after its setup actions, including its build and test steps and
+the portable lane's packaging, runs through `tools/zig-cache.sh work` (logged as
+`shell: /usr/bin/bash tools/zig-cache.sh work {0}`). It runs the step's script with
+`bash --noprofile --norc -eo pipefail`, the flags of GitHub's `shell: bash`. On main
+these steps ran under the default `bash -e {0}`, so the wrapper adds `pipefail`: a
+pipeline now also fails when `git ls-files` or `zig build-exe --show-builtin` fails
+before its last command; the session step already set `pipefail`.
+The deadline's guarantee is arithmetic. A lane's first step sets its work deadline
+465 seconds (`KOSMOS_LANE_WORK_SECONDS`) after that step starts. The setup actions run
+next, each under a step timeout: checkout 1 minute, setup-zig 2, the cache restore 1
+and setup-node 1, 300 seconds together; they precede every other step, so they end
+before the deadline. A restore that fails or times out is discarded, so a partial
+extraction never becomes the working cache. The wrapper ends each later step's script
+at the deadline, TERM and then KILL after 10 seconds, and fails a step that starts
+after the deadline without running it.
+The admission runs under `timeout --kill-after=5 30`, at most 35 seconds, and the save
+under a one-minute step timeout. The save therefore ends at most
+465 + 10 + 35 + 60 = 570 seconds after the lane's first step starts, 30 seconds inside
+the 10-minute job limit. That margin covers the runner's set-up before the first step,
+at most 4 seconds after the job's start in run 45914614208, and the transitions between
+steps. Only the portable lane's package upload, with a one-minute timeout, and the post
+steps of checkout, setup-zig and setup-node follow the save, so none of them can cancel
+it. A lane past its deadline therefore fails, admits and saves its cache inside its
+job limit. In run 45914614208 the slowest lane's last work step ended 334 seconds after
+its job started, and admission, including the pairing tool's compilation, plus save
+took 5–10 seconds.
 The admission compresses the snapshot with the cache action's own archive pipeline
 (`tar --posix`, `zstdmt`) and saves it if the archive plus 1 MiB is at most the
 lane's ceiling: 224 MiB (234,881,024 bytes) for native-driver and 144 MiB
