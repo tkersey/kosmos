@@ -31,7 +31,8 @@ tree_bytes() {
 }
 
 tree_record() {
-    find "$1" -type f ! -path "$1/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort
+    find "$1" -mindepth 1 ! -path "$1/kosmos-cache-record" \( -type f -printf 'f %s %P\n' -o -printf '%y %P\n' \) |
+        LC_ALL=C sort
 }
 
 host_cpu() {
@@ -387,9 +388,9 @@ classify() {
     if [[ "$tracking" != on ]]; then
         skip '::warning::Compiler cache: reads leave no access time here, so the cache cannot be pruned to what the job used'
     fi
-    nonregular=$(find "$cache" ! -type d ! -type f -print -quit)
+    nonregular=$(find "$cache" ! -type d ! -type f -printf '%P' -quit)
     if [[ -n "$nonregular" ]]; then
-        skip 'Compiler cache: nonregular file'
+        skip "::warning::Compiler cache: $nonregular is neither a regular file nor a directory"
     fi
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
     awk -F '\t' \

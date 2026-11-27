@@ -208,10 +208,12 @@ all of `.zig-cache` (the build caches, the nested builds' caches `source-example
 the whole job, compilation and checks, read or wrote, and the lane saves it under the
 `checked` phase. A failed or cancelled
 lane saves nothing at its end; its compile save, or the previous entry, stays.
-Every saved tree carries `kosmos-cache-record`, the size and path of each of its other
-files. Directly before `track`, a lane that saves builds the pairing tool in its own step:
-`tools/zig-cache.sh tool` compiles `tools/zig-cache-pairs.zig` for the lane's host target
-into `$RUNNER_TEMP/zig-cache-pairs`, with its own local and global caches there, so the
+Every saved tree carries `kosmos-cache-record`, which lists every other entry of the
+tree, directories included, by type and path, with the size of each file, so a restored
+tree that lacks even an empty output directory differs from it. Directly before `track`,
+a lane that saves builds the pairing tool in its own step: `tools/zig-cache.sh tool`
+compiles `tools/zig-cache-pairs.zig` for the lane's host target into
+`$RUNNER_TEMP/zig-cache-pairs`, with its own local and global caches there, so the
 build neither reads nor writes `.zig-cache`, depends on nothing an earlier job saved and
 is equally cold in every job, and the binary exists only once this job's build finished.
 Both saves archive the tree at `.zig-cache.saved`: the stage and the admission rename
@@ -254,9 +256,11 @@ can keep writing into the tree or a file it holds open, but nothing it writes is
 The deadline bounds only this cleanup, not qualification: the lane's compilation and
 checks run as usual, and the 600 s gate stays their only time limit.
 `track` renames the tree to `.zig-cache` only
-when the restore succeeded and the tree matches its record (an extraction that stops
-early can still report success), and deletes it otherwise, so a partial extraction never
-becomes the working cache and the lane compiles from nothing.
+when the restore succeeded and the tree matches its record, and deletes it otherwise, so
+a partial extraction never becomes the working cache and the lane compiles from nothing.
+A restore can succeed after a partial extraction: the pinned `actions/cache` 5.1.0 turns
+a failed `tar` into a `Failed to restore` warning and a cache miss, leaves what it
+extracted, and the step succeeds.
 It then checks on the workspace filesystem that reading a file updates its access time,
 marks every restored file unread, and records the change time of a file it touches,
 waiting until a second touch reads a later change time, so every later write follows
@@ -301,12 +305,14 @@ cache (12 for native-driver, whose core rebuild has its own), and so at most 64,
 bytes of build runners per global cache in the tree at the measured 10,678,169 bytes
 each. A lane on a runner model and kernel among those six skips the build-runner
 compilation and rebuilds only its configure scripts. Temporary directories are emptied.
-A save is skipped with a warning when reads leave no access time, when the pairing tool
-is missing or fails (it is missing after a build that failed, was stopped or skipped, and
-fails on any manifest it cannot open or read), when the job used no compiled output, or
-when the tree exceeds 1,000,000,000 bytes, about twice the largest measured
-(native-driver, 498,240,971 bytes). A missing pairing tool skips only this job's saves:
-the next job builds it again from nothing, whatever this job saved.
+A save is skipped with a warning when reads leave no access time, when the tree holds an
+entry that is neither a regular file nor a directory (a symbolic link, FIFO or socket;
+the warning names it), when the pairing tool is missing or fails (it is missing after a
+build that failed, was stopped or skipped, and fails on any manifest it cannot open or
+read), when the job used no compiled output, or when the tree exceeds 1,000,000,000
+bytes, about twice the largest measured (native-driver, 498,240,971 bytes). A missing
+pairing tool skips only this job's saves: the next job builds it again from nothing,
+whatever this job saved.
 Cache work never fails or changes the outcome of a qualification lane, and the time it
 adds is bounded. The restore, the target identity diagnostic,
 the pairing tool's build, `track`, the stage, both saves, `unstage` and the admission
@@ -371,9 +377,9 @@ saves, the tool adds 2.5–4.3 s to each. Cache work can push a lane past its 20
 limit only when the lane's other steps take more than 1,200 − 245 − 91 = 864 s, so only
 in a lane that fails the gate without it.
 Every lane that finishes compiling therefore leaves its compiles for the full rerun,
-unless a cache step fails or the tree cannot be saved (no access times, no pairing tool,
-nothing used, over the ceiling): the stage and the compile save run directly after the
-last compilation, whenever it ends, and take at most 21 + 70 = 91 s, so they finish
+unless a cache step fails or the tree cannot be saved (no access times, an entry neither
+a file nor a directory, no pairing tool, nothing used, over the ceiling): the stage and
+the compile save run directly after the last compilation, whenever it ends, and take at most 21 + 70 = 91 s, so they finish
 before the job limit for any compilation that ends by 1,109 s into its job, far later
 than any lane
 that can pass the gate (every compilation measured so far ended by 388 s: native-driver,

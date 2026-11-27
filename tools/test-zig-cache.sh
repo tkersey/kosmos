@@ -62,9 +62,17 @@ restored_manifest_input() {
     touch -d @1000000000 -- "$1"
 }
 
+entries() {
+    find "$1" -mindepth 1 ! -path "$1/kosmos-cache-record" \( -type f -printf 'f %s %P\n' -o -printf '%y %P\n' \) |
+        LC_ALL=C sort
+}
+
+files_only() {
+    find "$1" -type f ! -path "$1/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort
+}
+
 record_tree() {
-    find "$extraction" -type f ! -path "$extraction/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort \
-        > "$scratch/record"
+    entries "$extraction" > "$scratch/record"
     mv -- "$scratch/record" "$extraction/kosmos-cache-record"
 }
 
@@ -271,9 +279,7 @@ expect_report() {
 expect_recorded() {
     local root
     root=$(tree)
-    if ! cmp -s "$root/kosmos-cache-record" <(
-        find "$root" -type f ! -path "$root/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort
-    ); then
+    if ! cmp -s "$root/kosmos-cache-record" <(entries "$root"); then
         fail "the saved tree differs from its record"
     fi
 }
@@ -351,12 +357,34 @@ expect_saved true
 expect_present h/$m1 o/$f1/test b/fresh/builtin.zig p/fresh.tar.gz
 expect_report 'Compiler cache root: 4 units; 1 manifest-output pairs; 0 manifests without output dropped; 0 build runners kept; pruned 0 units'
 
-for damage in truncated missing unrecorded; do
+begin empty-output
+rm -- "$extraction/o/$f2/test"
+record_tree
+track
+expect_kept
+use h/$m1 o/$f1/test h/$m2
+run admit
+expect_saved true
+expect_recorded
+grep -Fxq "d o/$f2" "$extraction/kosmos-cache-record" || fail "the record omits the empty output directory"
+track
+expect_kept
+expect_present h/$m2 o/$f2
+
+for damage in truncated missing unrecorded empty-directory; do
     begin "partial-$damage"
     case $damage in
         truncated) printf 'x' > "$extraction/o/$f1/test" ;;
         missing) rm -- "$extraction/z/used-zir" ;;
         unrecorded) rm -- "$extraction/kosmos-cache-record" ;;
+        empty-directory)
+            rm -- "$extraction/o/$f2/test"
+            record_tree
+            files_only "$extraction" > "$workspace/files-only"
+            rmdir -- "$extraction/o/$f2"
+            files_only "$extraction" | cmp -s "$workspace/files-only" - ||
+                fail "a files-only record notices the missing empty output directory"
+            ;;
     esac
     track
     expect_report '::warning::Compiler cache: the restored tree differs from its record'
@@ -407,6 +435,19 @@ KOSMOS_CACHE_BYTES_MAX=10 run admit
 expect_saved false
 expect_absent kosmos-cache-record
 expect_report '-byte ceiling; save skipped'
+
+begin nonregular
+track
+use h/$m1 o/$f1/test
+ln -s test ".zig-cache/o/$f1/link"
+run stage
+expect_saved false
+expect_report "::warning::Compiler cache: o/$f1/link is neither a regular file nor a directory; save skipped"
+run unstage
+run admit
+expect_saved false
+expect_report "::warning::Compiler cache: o/$f1/link is neither a regular file nor a directory; save skipped"
+expect_present h/$m4 o/$f4/test
 
 for failure in failed stopped; do
     begin "tool-$failure"
