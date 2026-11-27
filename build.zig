@@ -123,9 +123,13 @@ fn hostTarget(b: *std.Build) std.Build.ResolvedTarget {
         "host-cpu",
         "CPU model for -Dhost-target (default: baseline)",
     );
-    if (arch_os_abi == null and cpu == null) return b.graph.host;
+    if (arch_os_abi == null) {
+        if (cpu == null) return b.graph.host;
+        std.debug.print("-Dhost-cpu requires -Dhost-target\n", .{});
+        return rejectHostTarget(b);
+    }
     const query = std.Build.parseTargetQuery(.{
-        .arch_os_abi = arch_os_abi orelse "native",
+        .arch_os_abi = arch_os_abi.?,
         .cpu_features = cpu,
     }) catch |err| switch (err) {
         error.ParseFailed => return rejectHostTarget(b),
