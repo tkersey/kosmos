@@ -54,7 +54,7 @@ jobs:
           - {lane: browser, build: check-browser}
           - {lane: consumer, build: emit-native-input}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       KOSMOS_HOST_TARGET: x86_64-linux.5.10...7.2-gnu.2.31
       KOSMOS_CACHE_SAVE: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -86,22 +86,8 @@ jobs:
           printf 'KOSMOS_HOST_CPU=%s\n' "$cpu" | tee -a "$GITHUB_ENV"
           printf 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0.17.1-%s-%s\n' \
             "$RUNNER_OS" "$RUNNER_ARCH" "$KOSMOS_HOST_TARGET" "$cpu" | tee -a "$GITHUB_ENV"
-      - name: Read the job's start and decide whether to restore the compiler cache
-        id: start
-        continue-on-error: true
-        timeout-minutes: 1
-        env:
-          GH_TOKEN: ${{ github.token }}
-          JOB_ID: ${{ job.check_run_id }}
-        run: |
-          started=$(timeout -k 1 10 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID" --jq '.started_at | fromdate') ||
-            started=
-          started=${started//[^0-9]/}
-          printf 'KOSMOS_JOB_STARTED=%s\n' "$started" | tee -a "$GITHUB_ENV"
-          KOSMOS_JOB_STARTED=$started bash tools/zig-cache.sh due
       - name: Restore complete compiler cache
         id: cache
-        if: steps.start.outputs.due == 'true'
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25

@@ -12,19 +12,15 @@ output=${GITHUB_OUTPUT:-/dev/null}
 unread_epoch=1
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
 build_runner_jobs_max=6
-job_seconds_max=600
-checked_seconds_min=150
 step_seconds_max=${KOSMOS_CACHE_STEP_SECONDS_MAX:-20}
 kill_seconds=1
-step_seconds=$(( step_seconds_max + kill_seconds ))
-action_seconds_max=70
-margin_seconds=5
+stop_seconds_max=$(( step_seconds_max / 2 ))
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
 mark=
 
 usage() {
     printf 'Usage: bash tools/zig-cache.sh host-cpu < /proc/cpuinfo\n' >&2
-    printf '       bash tools/zig-cache.sh due|tool\n' >&2
+    printf '       bash tools/zig-cache.sh tool\n' >&2
     printf '       bash tools/zig-cache.sh track success|failure|cancelled|skipped\n' >&2
     printf '       bash tools/zig-cache.sh stage|unstage|admit\n' >&2
     exit 64
@@ -56,7 +52,6 @@ pairs() {
 
 tool() {
     rm -f -- "$pairs_tool"
-    fits $(( step_seconds + margin_seconds ))
     mkdir -p -- "$tool_dir"
     zig build-exe -fstrip --cache-dir "$tool_dir/local" --global-cache-dir "$tool_dir/global" \
         ${KOSMOS_HOST_TARGET:+-target "$KOSMOS_HOST_TARGET"} \
@@ -165,11 +160,11 @@ arm() {
 }
 
 stop() {
-    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor names=
+    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor deadline names=
     local -A ours=()
     local -a strays=()
     if [[ -z "$id" ]]; then
-        skip '::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so track cannot stop what earlier steps left running'
+        skip "::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so $mode cannot stop what earlier steps left running"
     fi
     ancestor=$$
     while (( ancestor > 0 )); do
@@ -180,7 +175,7 @@ stop() {
     done
     grep -lsxzF -- "RUNNER_TRACKING_ID=$id" /proc/[0-9]*/environ > "$state/tracked" || :
     if ! grep -Fxq -- "/proc/$$/environ" "$state/tracked"; then
-        skip "::warning::Compiler cache: this job's processes cannot be listed, so track cannot stop what earlier steps left running"
+        skip "::warning::Compiler cache: this job's processes cannot be listed, so $mode cannot stop what earlier steps left running"
     fi
     while IFS= read -r line; do
         pid=${line#/proc/}
@@ -188,16 +183,21 @@ stop() {
         if [[ -n "${ours[$pid]:-}" ]] || ! grep -qsxzF -- "RUNNER_TRACKING_ID=$id" "/proc/$pid/environ"; then
             continue
         fi
-        if read -r name 2> /dev/null < "/proc/$pid/comm"; then
-            names+=" ${name}[${pid}]"
+        name=
+        read -r name 2> /dev/null < "/proc/$pid/comm" || :
+        if kill -KILL -- "$pid" 2> /dev/null; then
+            names+=" ${name:-?}[${pid}]"
+            strays+=("$pid")
         fi
-        kill -KILL -- "$pid" 2> /dev/null || :
-        strays+=("$pid")
     done < "$state/tracked"
+    deadline=$(( SECONDS + stop_seconds_max ))
     for pid in "${strays[@]}"; do
         while read -r line 2> /dev/null < "/proc/$pid/stat"; do
             line=${line##*) }
             [[ "$line" != [ZX]* ]] || break
+            if (( SECONDS >= deadline )); then
+                skip "::warning::Compiler cache: what earlier steps left running did not exit within ${stop_seconds_max} s of SIGKILL:${names}"
+            fi
             sleep 0.01
         done
     done
@@ -210,7 +210,6 @@ track() {
     local bytes tracking
     rm -rf -- "$state"
     mkdir -p -- "$state"
-    fits $(( 2 * step_seconds + margin_seconds ))
     if [[ -e "$saved" ]]; then
         mv -T -- "$saved" "$restored"
     fi
@@ -240,26 +239,6 @@ track() {
     tracking=$(< "$state/tracking")
     printf 'Compiler cache restored (%s): %s bytes; access tracking %s\n' "$1" "$bytes" "$tracking"
     give
-}
-
-fits() {
-    local needed=$1 started=${KOSMOS_JOB_STARTED:-} now left
-    if [[ ! "$started" =~ ^[0-9]+$ ]]; then
-        if [[ "$mode" == admit ]]; then
-            skip '::warning::Compiler cache: the job start is unknown, so a save might outlast the job'
-        fi
-        if [[ "$mode" == due ]]; then
-            printf '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run without a time check and the checked save is skipped\n'
-        fi
-        printf 'Compiler cache: the job start is unknown; %s runs without a time check\n' "$mode"
-        return 0
-    fi
-    now=$(date +%s)
-    left=$(( job_seconds_max - (now - started) ))
-    if (( left < needed )); then
-        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${needed} s needed"
-    fi
-    printf "Compiler cache: %s s of the job's %s s remain\n" "$left" "$job_seconds_max"
 }
 
 unit_program='
@@ -439,7 +418,6 @@ seal() {
 stage() {
     local unit
     take
-    fits $(( step_seconds + action_seconds_max + margin_seconds ))
     classify
     while IFS= read -r unit; do
         mkdir -p -- "$(dirname -- "$aside/$unit")"
@@ -455,10 +433,6 @@ unstage() {
         mv -T -- "$saved" "$cache"
     fi
     rm -f -- "$state/sealed" "$record" "$history"
-    held=$mark
-    mark=
-    fits $(( step_seconds + margin_seconds ))
-    mark=$held
     if [[ -f "$state/prune" ]]; then
         tac -- "$state/prune" > "$state/return"
         while IFS= read -r unit; do
@@ -474,6 +448,10 @@ unstage() {
         return 0
     fi
     if [[ -f "$state/used" ]]; then
+        held=$mark
+        mark=
+        stop
+        mark=$held
         cat -- "$state/used" >> "$state/earlier"
         arm
     fi
@@ -483,7 +461,6 @@ unstage() {
 admit() {
     local unit
     take
-    fits "$checked_seconds_min"
     classify
     while IFS= read -r unit; do
         rm -rf -- "${cache:?}/$unit"
@@ -495,14 +472,6 @@ case "${1:-}" in
     host-cpu)
         [[ $# -eq 1 ]] || usage
         host_cpu
-        ;;
-    due)
-        [[ $# -eq 1 ]] || usage
-        mode=$1
-        skipped='restore skipped'
-        printf 'due=false\n' >> "$output"
-        fits $(( action_seconds_max + margin_seconds ))
-        printf 'due=true\n' >> "$output"
         ;;
     tool)
         [[ $# -eq 1 ]] || usage
@@ -521,7 +490,7 @@ case "${1:-}" in
         ;;
     unstage)
         [[ $# -eq 1 ]] || usage
-        begin "$1" 'nothing set aside is returned and this job saves no further compiler cache' "$@"
+        begin "$1" 'this job saves no further compiler cache' "$@"
         unstage
         ;;
     *)

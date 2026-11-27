@@ -83,8 +83,6 @@ begin() {
     cd "$workspace"
     export KOSMOS_CACHE_STATE=$workspace/state
     export GITHUB_OUTPUT=$workspace/output
-    KOSMOS_JOB_STARTED=$(date +%s)
-    export KOSMOS_JOB_STARTED
     : > "$GITHUB_OUTPUT"
     local cache=$extraction
     restored_manifest $cache/h/$m1
@@ -173,6 +171,37 @@ failing() {
     } > "$workspace/failing/$1"
     chmod +x -- "$workspace/failing/$1"
     failing_path=$workspace/failing:$PATH
+}
+
+spawn_stray() {
+    (bash "$workspace/stray" &)
+    for _ in {1..500}; do
+        [[ ! -s "$workspace/stray.pid" ]] || break
+        sleep 0.01
+    done
+    stray=$(< "$workspace/stray.pid")
+}
+
+waiting_stray() {
+    cat > "$workspace/stray" << EOF
+${1:-}
+printf '%s\n' "\$\$" > '$workspace/stray.pid'
+while [[ ! -e '$workspace/release' ]]; do
+    sleep 0.01
+done
+${2:-}
+: > '$workspace/stray.done'
+EOF
+    spawn_stray
+}
+
+expect_stray_gone() {
+    : > "$workspace/release"
+    sleep 0.5
+    if [[ -e "$workspace/stray.done" ]] || kill -0 "$stray" 2> /dev/null; then
+        fail "$1"
+        kill "$stray" 2> /dev/null || :
+    fi
 }
 
 aside_moves() {
@@ -637,54 +666,6 @@ run admit
 expect_saved false
 expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
 
-begin late
-track
-use h/$m1 o/$f1/test
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run admit
-expect_saved false
-expect_report "of the job's 600 s remain, fewer than the 150 s needed; save skipped"
-expect_present h/$m4 o/$f4/test b/stale
-KOSMOS_JOB_STARTED='' run admit
-expect_saved false
-expect_report '::warning::Compiler cache: the job start is unknown'
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 440 )) run admit
-expect_saved true
-expect_absent h/$m4 o/$f4 b/stale
-
-begin due
-run due || fail "due exited $?"
-[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an on-time job does not restore"
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 515 )) run due || fail "a due at 515 s exited $?"
-[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "a job at 515 s does not restore"
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 530 )) run due || fail "a late due exited $?"
-[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=false ]] || fail "a late job restores"
-expect_report "of the job's 600 s remain, fewer than the 75 s needed; restore skipped"
-KOSMOS_JOB_STARTED='' run due || fail "due with an unknown start exited $?"
-[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an unknown start skips the restore"
-expect_report '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run'
-
-begin late-tool
-RUNNER_TEMP=$workspace/runner KOSMOS_JOB_STARTED=$(( $(date +%s) - 580 )) build_tool ||
-    fail "a late build of the pairing tool failed"
-expect_report "fewer than the 26 s needed; the pairing tool is not built"
-[[ ! -e "$workspace/runner/zig-cache-pairs" ]] || fail "a late job built the pairing tool"
-
-begin late-track
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 560 )) track
-expect_report "fewer than the 47 s needed; this job uses no restored tree and saves no compiler cache"
-[[ -d "$extraction" && ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a late track moved the extraction"
-run unstage
-[[ -d "$extraction" && ! -e .zig-cache ]] || fail "unstage moved an extraction that no stage renamed"
-compile o/$f1/test
-run stage
-expect_saved false
-expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
-run unstage
-run admit
-expect_saved false
-[[ -d "$extraction" ]] || fail "a step after a late track moved the extraction"
-expect_absent h/$m1 h/$m4 b/stale
-
 begin track-stuck-deletion
 printf 'x' > "$extraction/o/$f1/test"
 failing rm << 'EOF'
@@ -703,31 +684,13 @@ expect_report '::warning::Compiler cache: deleting the unverified restored tree 
 [[ ! -e .zig-cache ]] || fail "a track whose deletion was stopped left the unverified tree in use"
 
 begin stray-extraction
-cat > "$workspace/stray" << EOF
-exec 3>> '$extraction/o/$f1/test'
-printf '%s\n' "\$\$" > '$workspace/stray.pid'
-while [[ ! -e '$workspace/release' ]]; do
-    sleep 0.01
-done
-printf 'stray' >&3
+waiting_stray "exec 3>> '$extraction/o/$f1/test'" "printf 'stray' >&3
 mkdir -p '$extraction/o/stray'
-printf 'stray' > '$extraction/o/stray/test'
-: > '$workspace/stray.done'
-EOF
-(bash "$workspace/stray" &)
-for _ in {1..500}; do
-    [[ ! -s "$workspace/stray.pid" ]] || break
-    sleep 0.01
-done
+printf 'stray' > '$extraction/o/stray/test'"
 track
-: > "$workspace/release"
-sleep 0.5
-expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$(< "$workspace/stray.pid")]"
+expect_stray_gone "an extraction left running outlived track"
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$stray]"
 expect_kept
-if [[ -e "$workspace/stray.done" ]] || kill -0 "$(< "$workspace/stray.pid")" 2> /dev/null; then
-    fail "an extraction left running outlived track"
-    kill "$(< "$workspace/stray.pid")" 2> /dev/null || :
-fi
 if grep -q stray ".zig-cache/o/$f1/test"; then
     fail "an extraction left running wrote into .zig-cache through a file it held open"
 fi
@@ -748,52 +711,69 @@ compile o/$f1/test
 run stage
 expect_saved false
 
-begin late-stage
-track
+begin late-compile
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 560 )) build_tool || fail "a pairing tool build at 560 s failed"
+expect_report 'Compiler cache: built the pairing tool'
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 570 )) track
+expect_report 'Compiler cache restored (success)'
+expect_kept
+[[ -d .zig-cache && ! -e "$extraction" && ! -e .zig-cache.restored ]] ||
+    fail "a track at 570 s did not move the verified tree into place"
 use h/$m1 o/$f1/test
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 510 )) run stage
-expect_saved false
-expect_report "fewer than the 96 s needed; save skipped"
-expect_present h/$m2 o/$f2/test h/$m4 o/$f4/test b/stale p/stale.tar.gz
-[[ ! -e "$KOSMOS_CACHE_STATE/aside" ]] || fail "a late stage set units aside"
-: > "$GITHUB_OUTPUT"
-run unstage
-run admit
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 590 )) run stage
 expect_saved true
-expect_present h/$m1 o/$f1/test
-expect_absent h/$m4 o/$f4 b/stale
-
-begin slow-compile
-track
-use h/$m1 o/$f1/test
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 500 )) run stage
-expect_saved true
-expect_present h/$m1 o/$f1/test
+expect_recorded
 expect_absent h/$m4 o/$f4 b/stale
 : > "$GITHUB_OUTPUT"
 archive h/$m1 o/$f1/test
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 520 )) run unstage
-[[ -d .zig-cache && ! -e "$extraction" ]] || fail "unstage did not return the saved tree to .zig-cache"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 595 )) run unstage
+[[ -d .zig-cache && ! -e "$extraction" ]] || fail "an unstage at 595 s did not return the saved tree to .zig-cache"
 expect_present h/$m4 o/$f4/test b/stale
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 540 )) run admit
-expect_saved false
-expect_report "fewer than the 150 s needed; save skipped"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 900 )) run admit
+expect_saved true
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m4 o/$f4 b/stale
 
-begin late-unstage
+begin stray-already-gone
+waiting_stray
+printf 'kill() { return 1; }\n' > "$scratch/kill-finds-nothing"
+BASH_ENV=$scratch/kill-finds-nothing KOSMOS_CACHE_STEP_SECONDS_MAX=4 track ||
+    fail "track failed when its kill found no process"
+expect_report 'Compiler cache restored (success)'
+expect_kept
+! grep -Fq 'left running' "$workspace/report" || fail "track waited for or named a process it did not stop"
+: > "$workspace/release"
+
+begin stray-outlives-kill
+waiting_stray
+printf 'kill() { return 0; }\n' > "$scratch/kill-ignored"
+started=$(date +%s)
+BASH_ENV=$scratch/kill-ignored KOSMOS_CACHE_STEP_SECONDS_MAX=4 track ||
+    fail "track failed when a process outlived its kill"
+(( $(date +%s) - started <= 3 )) || fail "track waited $(( $(date +%s) - started )) s for a 2 s cap"
+expect_report "::warning::Compiler cache: what earlier steps left running did not exit within 2 s of SIGKILL: bash[$stray]"
+expect_report 'this job uses no restored tree and saves no compiler cache'
+expect_report 'Compiler cache: deleted the unverified restored tree'
+[[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a track that could not stop a process kept the restored tree"
+: > "$workspace/release"
+compile o/$f1/test
+run stage
+expect_saved false
+
+begin stray-compile-save
 track
 use h/$m1 o/$f1/test
 run stage
 expect_saved true
 : > "$GITHUB_OUTPUT"
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 580 )) run unstage
-expect_report "fewer than the 26 s needed; nothing set aside is returned and this job saves no further compiler cache"
-[[ -d .zig-cache && ! -e "$extraction" ]] || fail "a late unstage did not return the saved tree to .zig-cache"
-expect_present h/$m1 o/$f1/test
-expect_absent h/$m2 o/$f2 h/$m4 o/$f4 b/stale
-expect_paired
+waiting_stray "cd '$extraction/h'" "cat -- '$m4' '../o/$f4/test' > /dev/null"
+run unstage
+expect_stray_gone "a compile save left running outlived unstage"
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$stray]"
 run admit
-expect_saved false
-expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+expect_saved true
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m4 o/$f4
 
 printf "trap '' TERM\n" > "$scratch/ignore-term"
 for signal in term kill; do
@@ -848,7 +828,7 @@ awk '
     job == "qualify:" && /^        if: / { condition[steps] = $0 }
     job == "qualify:" && /^        continue-on-error: / { tolerated[steps] = $2 }
     job == "qualify:" && /^        timeout-minutes: / { minutes[steps] = $2 }
-    job == "qualify:" && /tools\/zig-cache\.sh (due|tool|track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
+    job == "qualify:" && /tools\/zig-cache\.sh (tool|track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
     END {
         for (i = 1; i <= steps; i++) {
             printf "%d\t%s\t%s\t%s\t%s\t%d\n", i, name[i], condition[i], tolerated[i], minutes[i], cache[i]
@@ -857,49 +837,36 @@ awk '
 ' "$workflow" > "$scratch/steps.tsv"
 awk -F '\t' '($6 || $2 ~ /^Record native compiler/) && !($4 == "true" && $5 == 1) { print $2 }' \
     "$scratch/steps.tsv" > "$scratch/intolerant.txt"
-(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 9 )) || fail "the qualification job does not have nine cache steps"
+(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 8 )) || fail "the qualification job does not have eight cache steps"
 [[ ! -s "$scratch/intolerant.txt" ]] ||
     fail "a cache step can fail the lane or outlast a minute: $(tr '\n' ';' < "$scratch/intolerant.txt")"
 job_minutes=$(awk '/^  qualify:$/ { active = 1 } active && /^    timeout-minutes: / { print $2; exit }' "$workflow")
-job_seconds=$(sed -n 's/^job_seconds_max=//p' "$script")
-checked=$(sed -n 's/^checked_seconds_min=//p' "$script")
 step_limit=$(sed -n 's/^step_seconds_max=.{KOSMOS_CACHE_STEP_SECONDS_MAX:-\([0-9]*\)}$/\1/p' "$script")
 kill_after=$(sed -n 's/^kill_seconds=//p' "$script")
-action=$(sed -n 's/^action_seconds_max=//p' "$script")
-margin=$(sed -n 's/^margin_seconds=//p' "$script")
-(( job_seconds == job_minutes * 60 && checked >= (step_limit + kill_after) + action + 30 && action == 60 + 10 &&
-    margin > 0 )) || fail "the checked save's guard does not cover the admission, the checked save and the job's end"
-step_total=$(( step_limit + kill_after ))
-cutoffs="the restore by $(( job_seconds - action - margin )) s, the pairing tool's build by"
-cutoffs+=" $(( job_seconds - step_total - margin )) s, \`track\` by $(( job_seconds - 2 * step_total - margin )) s,"
-cutoffs+=" the stage by $(( job_seconds - step_total - action - margin )) s, \`unstage\` by"
-cutoffs+=" $(( job_seconds - step_total - margin )) s and the admission by $(( job_seconds - checked )) s"
-[[ "$(tr '\n' ' ' < "$tools/../docs/verification.md")" == *"$cutoffs"* ]] ||
-    fail "docs/verification.md does not state the cutoffs: $cutoffs"
-(( job_seconds - step_total - action - margin >= 500 )) || fail "a compilation ending at 500 s gets no compile save"
 for mode in tool stage unstage admit; do
     grep -Fxq "        run: bash tools/zig-cache.sh $mode" "$workflow" || fail "$mode does not run under the tool's limit"
 done
 grep -Fxq "        run: bash tools/zig-cache.sh track \"\$RESTORE\"" "$workflow" ||
     fail "track does not run under the tool's limit"
-grep -Fq "started=\$(timeout -k 1 10 gh api " "$workflow" || fail "reading the job start has no 10 s limit"
-grep -Fxq "        if: steps.start.outputs.due == 'true'" "$workflow" || fail "the restore does not wait for the time check"
+if grep -Eq 'KOSMOS_JOB_STARTED|date ' "$script" || grep -Eq 'KOSMOS_JOB_STARTED|check_run_id|zig-cache\.sh due' "$workflow"; then
+    fail "a compiler cache step reads the job's clock"
+fi
 if (( $(grep -c "^          path: $extraction\$" "$workflow") != 3 )) || grep -q '^          path: \.zig-cache$' "$workflow" ||
     ! grep -Fxq "saved=\$cache.saved" "$script" || ! grep -Fxq 'cache=.zig-cache' "$script"; then
     fail "the restore and both saves do not all use $extraction, apart from the working cache"
 fi
-bound=$(( (10 + 1) + 2 * (60 + 10) + 5 * (step_limit + kill_after) ))
-(( bound == 256 )) || fail "cache work before the checks may take $bound s, not the documented 256 s"
-grep -Fq '11 + 70 + 21 + (21 + 21) + 21 + 70 + 21 = 256 s' "$tools/../docs/verification.md" ||
-    fail "docs/verification.md does not state the 256 s bound"
+before=$(( 2 * (60 + 10) + 5 * (step_limit + kill_after) ))
+after=$(( (step_limit + kill_after) + (60 + 10) ))
+(( before == 245 && after == 91 )) ||
+    fail "cache work may take $before s before the checks and $after s after them, not the documented 245 s and 91 s"
+grep -Fq '70 + 21 + (21 + 21) + 21 + 70 + 21 = 245 s' "$tools/../docs/verification.md" ||
+    fail "docs/verification.md does not state the 245 s bound"
+(( job_minutes == 20 && job_minutes * 60 - before - after >= 600 )) ||
+    fail "the ${job_minutes}-minute job limit can stop a lane whose other steps fit the 600 s gate"
 if ! grep -Fq "grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::" "$workflow" ||
     ! grep -Fq "if ! cpu=\$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then" "$workflow" ||
     ! grep -Fxq '            cpu=baseline' "$workflow"; then
     fail "the CPU diagnostic or choice can fail the lane"
-fi
-if ! grep -Fq "JOB_ID: \${{ job.check_run_id }}" "$workflow" ||
-    ! grep -Fq "printf 'KOSMOS_JOB_STARTED=%s\\n'" "$workflow"; then
-    fail "the job start is not read from the job's own record"
 fi
 step() {
     awk -F '\t' -v pattern="$1" '$2 ~ pattern { print $1 }' "$scratch/steps.tsv"
