@@ -8,8 +8,6 @@ const manifest_directory = "h/";
 const output_directories = [_][]const u8{ "o/", "c/" };
 const path_bytes_max: usize = 4096;
 
-/// For each manifest path read from standard input, prints the manifest, the output Zig derives
-/// from it when that output exists, and every input it records under a cache directory.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -75,8 +73,6 @@ fn rootOf(manifest_path: []const u8) ?[]const u8 {
     return manifest_path[0..root_end];
 }
 
-/// Computes the output digest as `Cache.Manifest.finalDigest` does, and writes, each after a
-/// tab, the path of every recorded input that lies under the local or global cache directory.
 fn scan(
     name: []const u8,
     contents: []const u8,

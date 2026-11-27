@@ -30,7 +30,6 @@ jobs:
           done < "$RUNNER_TEMP/closed.tsv"
           jq -rs --arg ref "$CACHE_REF" '"\($ref): deleted \(length) entries, \(map(.size_in_bytes) | add // 0) bytes"' \
             "$RUNNER_TEMP/closed.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          # The list can trail a deletion briefly.
           for _ in 1 2 3 4 5 6; do
             grep -Fxq -f <(cut -f1 "$RUNNER_TEMP/closed.tsv") <(ref_caches | jq -r .id) || exit 0
             sleep 5

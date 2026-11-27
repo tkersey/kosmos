@@ -41,7 +41,6 @@ jobs:
       fail-fast: false
       matrix:
         lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, recovery-specialization, publication, source, source-second, portable, browser, consumer]
-        # Each lane's `zig build` arguments, compiled and saved for a rerun before they run.
         include:
           - {lane: sessions, build: build-session-check -Dsession-group=behavior, tests: 59}
           - {lane: session-ownership, build: build-session-check -Dsession-group=ownership, tests: 17}
@@ -51,8 +50,6 @@ jobs:
           - {lane: publication, build: check-publication}
           - {lane: source, build: check-source -Dsource-group=first -Dfixture-profile=prepared_only}
           - {lane: source-second, build: check-source -Dsource-group=second -Dfixture-profile=prepared_only}
-          # The independent lanes cover every dependency of `check` once.
-          # Native qualification rebuilds and compares the exact packaged core.
           - {lane: portable, build: check-activation-storage-wasm check-kernel check-capacity check-codecs check-package build-runtime}
           - {lane: browser, build: check-browser}
           - {lane: consumer, build: emit-native-input}
@@ -60,7 +57,6 @@ jobs:
     timeout-minutes: 10
     env:
       KOSMOS_HOST_TARGET: x86_64-linux.5.10...7.2-gnu.2.31
-      # Only `main` and same-repository pull requests save; forks only restore.
       KOSMOS_CACHE_SAVE: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -183,7 +179,6 @@ jobs:
         if: env.KOSMOS_CACHE_SAVE == 'true'
         continue-on-error: true
         run: bash tools/zig-cache.sh stage
-      # A lane cancelled at its job limit after this point leaves its compilation for a rerun.
       - name: Save the compiled lane's cache before running it
         if: steps.compiled.outputs.save == 'true'
         continue-on-error: true
@@ -241,7 +236,6 @@ jobs:
       - name: Consume the actual native source package without a JS producer
         if: matrix.lane == 'consumer'
         run: |
-          # A fixed path lets the consumer's compilation, pinned to the host target, hit the cache.
           scratch=$RUNNER_TEMP/native-consumer
           rm -rf "$scratch"
           trap 'rm -rf "$scratch"' EXIT
@@ -273,7 +267,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      # Without a status function these run only after every earlier step of the lane succeeded.
       - name: Prune the compiler cache to what the job used
         id: checked
         if: env.KOSMOS_CACHE_SAVE == 'true'
@@ -335,8 +328,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CACHE_REF: ${{ github.ref }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
-          # Per host target, CPU and lane, keep the entry of the latest run number, attempt and
-          # phase (checked after compiled); delete the rest and every other compiler cache layout.
           SUPERSEDED: |
             if $state != "open" then .
             else map(select(.key | startswith("kosmos-native-")))
@@ -364,7 +355,6 @@ jobs:
             gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" --silent ||
               echo "::warning::Deleting $key failed"
           done < "$RUNNER_TEMP/superseded.tsv"
-          # The list can trail a deletion briefly.
           for attempt in 1 2 3 4 5 6; do
             ref_caches > "$RUNNER_TEMP/remaining.json"
             grep -Fxq -f <(cut -f1 "$RUNNER_TEMP/superseded.tsv") \

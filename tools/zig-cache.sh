@@ -2,18 +2,14 @@
 set -euo pipefail
 
 cache=.zig-cache
-# Every saved tree carries the size and path of each of its other files.
 record=$cache/kosmos-cache-record
 work_directory=${RUNNER_TEMP:?}
 state=${KOSMOS_CACHE_STATE:-$work_directory/zig-cache-access}
 aside=$state/aside
-# The pairing tool keeps its compilation in this subcache; its use is not the job's.
 tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 unread_epoch=1
-# About twice the largest saved tree measured (native-driver, 498,240,971 bytes).
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
-# Zig 0.17.1's x86_64_v3 ISA features beyond baseline, plus SHA, in Linux's cpuinfo names.
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
 
 usage() {
@@ -43,7 +39,6 @@ host_cpu() {
     printf 'x86_64_v3+sha\n'
 }
 
-# Build or reuse the pairing tool in the lane's own cache, for the lane's host target.
 pairs() {
     zig run -fstrip --cache-dir "$cache/$tool_root" \
         ${KOSMOS_HOST_TARGET:+-target "$KOSMOS_HOST_TARGET"} \
@@ -66,8 +61,6 @@ access_time_tracking() {
     fi
 }
 
-# Mark every file unread, then mark on the cache's own change-time clock and wait out its tick
-# so every later write follows the mark.
 arm() {
     mkdir -p -- "$cache/tmp"
     access_time_tracking > "$state/tracking"
@@ -86,8 +79,6 @@ arm() {
 }
 
 track() {
-    # A failed restore or a tree that differs from its record (a partial extraction reports
-    # success) is discarded; the lane compiles from nothing instead.
     if [[ "$1" != success ]]; then
         rm -rf -- "$cache"
     elif [[ -e "$cache" ]] && ! { [[ -f "$record" ]] && cmp -s -- "$record" <(tree_record); }; then
@@ -105,8 +96,6 @@ track() {
     fi
 }
 
-# A unit is a manifest, output, configuration, ZIR file, builtin module, package archive or
-# extracted package of the cache root ("" or a named subcache such as "native-owners/").
 unit_program='
     function unit(path,    part, n, k) {
         n = split(path, part, "/")
@@ -121,10 +110,6 @@ unit_program='
 '
 unit_kinds='^(h|o|c|z|b|p|zig-pkg)$'
 
-# Keep a manifest and its output together when the job read or wrote either, or when the output
-# is Zig's build runner (one per runner CPU), and keep the cache files such a manifest records as
-# inputs; keep any other unit the job read or wrote; prune the rest and every manifest that names
-# no existing output.
 classify_units() {
     awk -F '\t' \
         -v kinds="$unit_kinds" \
@@ -166,8 +151,6 @@ classify_units() {
                 broken[name] = (group[name] in output_of) && output_of[group[name]] == ""
                 kept[name] = !broken[name] && (group[name] in group_used || group[name] in group_runner)
             }
-            # An input path is relative to the local or the global cache: the root of its
-            # manifest, or the root cache that every subcache shares as its global cache.
             for (name in output_of) {
                 if (!(name in unit_root) || !kept[name]) continue
                 if ((name in group_used) && unit_root[name] != tool_root) used_pairs++
@@ -206,7 +189,6 @@ classify_units() {
     ' "$state/listing"
 }
 
-# Decide what to keep, or report why nothing will be saved.
 classify() {
     local output=${GITHUB_OUTPUT:-/dev/null}
     printf 'save=false\n' >> "$output"
@@ -222,7 +204,6 @@ classify() {
         printf 'Compiler cache: nonregular file; save skipped\n'
         return 1
     fi
-    # List before pairing: the pairing tool reads manifests and would mark them read.
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
     awk -F '\t' -v kinds="$unit_kinds" "$unit_program"'{ if (unit($4) != "" && kind == "h") print unit($4) }' \
         "$state/listing" > "$state/manifests"
@@ -241,7 +222,6 @@ classify() {
     return "$status"
 }
 
-# Empty temporary directories, then record the tree unless it exceeds the ceiling.
 seal() {
     local directory bytes
     for directory in "$cache/tmp" "$cache"/*/tmp; do
@@ -260,7 +240,6 @@ seal() {
     printf 'save=true\n' >> "${GITHUB_OUTPUT:-/dev/null}"
 }
 
-# Set aside what the compilation did not use, so the save holds only what it used.
 stage() {
     classify || return 0
     local unit
@@ -271,8 +250,6 @@ stage() {
     seal
 }
 
-# Return what the stage set aside and, since the save read what it kept, track the checks from
-# a new mark while remembering what the compilation used. A stage that kept nothing changes nothing.
 unstage() {
     rm -f -- "$record"
     if [[ ! -f "$state/kept" ]]; then

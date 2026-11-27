@@ -66,9 +66,6 @@ pub fn build(b: *std.Build) void {
     if (options.compile_only) configureCompileOnly(b);
 }
 
-/// With `-Dcompile-only`, each top-level step depends only on the compilations it reaches,
-/// so CI can save a lane's compiler cache after compiling and before running any check.
-/// Zig still runs the steps that generate a compilation's sources.
 fn configureCompileOnly(b: *std.Build) void {
     for (b.top_level_steps.values()) |top_level| {
         var reached: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;

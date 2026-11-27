@@ -25,7 +25,6 @@ fail() {
     failures=$((failures + 1))
 }
 
-# Build the pairing tool once; every restored tree carries its cache, as a saved lane's does.
 mkdir -p -- "$scratch/tools-cache"
 (cd "$scratch/tools-cache" && zig run -fstrip --cache-dir .zig-cache/tools "$tools/zig-cache-pairs.zig" -- . < /dev/null)
 
@@ -47,9 +46,6 @@ record_tree() {
     mv -- "$scratch/record" .zig-cache/kosmos-cache-record
 }
 
-# A restored entry in Zig's layout: the build cache and Zig's global cache share .zig-cache, and
-# the independent core rebuild keeps its own global cache and extracted packages beside them.
-# A nested build keeps its own local cache, and the tree carries its completeness record.
 begin() {
     scenario=$1
     workspace=$scratch/$scenario
@@ -157,8 +153,6 @@ expect_recorded() {
     fi
 }
 
-# Pairs keep a manifest with its output when the job read either; global units (builtins,
-# package archives, compiler_rt and extracted packages) are pruned by use like build units.
 begin pairs
 track
 if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
@@ -191,7 +185,6 @@ expect_saved true
 expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test z/stale-zir
 expect_absent h/$m2 o/$f2 z/used-zir b/used p/used.tar.gz
 
-# A failed restore is discarded; the compilation that follows writes, and saves, a complete set.
 begin failed-restore
 track failure
 expect_report 'Compiler cache restored (failure): 0 bytes'
@@ -205,8 +198,6 @@ expect_saved true
 expect_present h/$m1 o/$f1/test b/fresh/builtin.zig p/fresh.tar.gz
 expect_report 'Compiler cache root: 4 units; 1 manifest-output pairs; 0 manifests without output dropped; 0 build runners kept; pruned 0 units'
 
-# An extraction that stops early still reports success; the tree then differs from its record
-# and is discarded, whether a file is short, missing or the record itself is missing.
 for damage in truncated missing unrecorded; do
     begin "partial-$damage"
     case $damage in
@@ -220,7 +211,6 @@ for damage in truncated missing unrecorded; do
     expect_absent h/$m1 o/$f1 z/used-zir kosmos-cache-record
 done
 
-# A saved tree is restored whole.
 begin round-trip
 track
 use h/$m1 o/$f1/test
@@ -252,7 +242,6 @@ expect_saved false
 expect_present h/$m4 o/$f4/test b/stale p/stale.tar.gz
 expect_report '::warning::Compiler cache: reads leave no access time here'
 
-# A job that used no compiled output saves nothing rather than an empty set.
 begin degenerate
 track
 run admit
@@ -268,7 +257,6 @@ expect_saved false
 expect_absent kosmos-cache-record
 expect_report '-byte ceiling; save skipped'
 
-# A pairing tool that cannot build or run warns and skips the save instead of failing the lane.
 begin tool-failure
 mkdir -p -- "$scratch/broken-zig"
 printf '#!/bin/sh\nexit 1\n' > "$scratch/broken-zig/zig"
@@ -281,8 +269,6 @@ expect_saved false
 expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
 expect_present h/$m4 o/$f4/test
 
-# The compile save holds what the compilation used; the checks still find everything restored,
-# and the end of the job keeps what the compilation and the checks used.
 begin stage
 track
 use h/$m1 o/$f1/test b/used/builtin.zig
@@ -308,8 +294,6 @@ expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test b/used/builtin.zig source-examp
     source-examples/o/$f2/test z/checked-zir tools
 expect_absent h/$m2 o/$f2 h/$m4 o/$f4 z/used-zir p/used.tar.gz
 
-# Zig's build runner is kept for every runner CPU that built it, with the builtin modules its
-# manifest records; any other unused pair is pruned. A real manifest supplies those inputs.
 scenario=build-runner
 find "$scratch/tools-cache/.zig-cache/tools/h" "$ZIG_GLOBAL_CACHE_DIR/h" -type f ! -name timestamp \
     -size +0c > "$scratch/real-manifests"
@@ -327,7 +311,6 @@ else
     runner_name=$(basename "$runner_manifest")
     cp -- "$runner_manifest" .zig-cache/h/"$runner_name"
     cp -- "$runner_manifest" .zig-cache/native-driver-core/h/"$runner_name"
-    # The output digest depends only on the manifest, so its own cache names it.
     pairing=$(printf 'h/%s\n' "$runner_name" |
         zig run -fstrip --cache-dir "$scratch/tools-cache/.zig-cache/tools" "$tools/zig-cache-pairs.zig" -- \
             "$(dirname "$(dirname "$runner_manifest")")")
@@ -367,9 +350,6 @@ for flag in pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c 
 done
 [[ "$(host_cpu)" == baseline ]] || fail "a runner without flags is not baseline"
 
-# GitHub runs a step without a status function only after every earlier step succeeded: the
-# compile save follows the last compilation and precedes every check, the job's save is its
-# last step, and every key names the host target, the chosen CPU, the run and the phase.
 scenario=workflow
 awk '
     /^  [a-z-]+:$/ { job = $1 }
@@ -412,8 +392,6 @@ if ! grep -Eq 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0\.17\.1-%s-%s' "$work
     fail "the key prefix does not name the host target and the chosen CPU"
 fi
 
-# Retention keeps, per host target, CPU and lane, the latest run, attempt and phase by the
-# numbers in the key, whatever order the entries were created in.
 scenario=retention
 awk '
     /^          SUPERSEDED: \|$/ { active = 1; next }
@@ -441,8 +419,6 @@ superseded() {
 [[ "$(superseded open)" == "3 4 6 7 " ]] || fail "open retention deleted: $(superseded open)"
 [[ "$(superseded closed)" == "1 2 3 4 5 6 7 8 " ]] || fail "closed retention deleted: $(superseded closed)"
 
-# Pairing agrees with Zig's own caches: every finalized manifest names an existing output, and
-# every input it records under a cache exists in the local or the global cache.
 scenario=zig-pairs
 for directory in "$scratch/tools-cache/.zig-cache/tools" "$ZIG_GLOBAL_CACHE_DIR"; do
     find "$directory/h" -type f ! -name timestamp -size +0c -printf 'h/%P\n' > "$scratch/finalized.txt"
