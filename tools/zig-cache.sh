@@ -11,7 +11,7 @@ aside=$state/aside
 tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 unread_epoch=1
-# About 2.5 times the largest saved tree measured (native-driver, 393,197,075 bytes).
+# About twice the largest saved tree measured (native-driver, 498,240,971 bytes).
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
 # Zig 0.17.1's x86_64_v3 ISA features beyond baseline, plus SHA, in Linux's cpuinfo names.
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
