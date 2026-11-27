@@ -326,11 +326,16 @@ other unit, and
 `unstage` returns every other unit before any manifest, so wherever either stops, no
 manifest is present without its output. A cache-tool failure skips every later save
 instead of continuing on partial data: `tools/zig-cache.sh` stops at the first failing
-command and writes `save=true` last; `track` writes its access mark last; the stage,
-`unstage` and the admission take the mark when they start and put it back (`unstage` a
-new one) only when they finish or skip cleanly, not when they skip because they could
-not stop what earlier steps left running, so after a failed or killed step no later step
-finds a mark and none saves.
+command, and each of its steps does its work in a limited run (below) and hands back what
+later steps depend on only after that run has exited 0. Before the run, the step sets the
+access mark aside; the run works from it, and only once the run has exited 0 does the
+step put a mark back (`track` and a re-arming `unstage` a new one), write `save=true`
+for the stage and the admission, and install the pairing tool after its build. A run
+that skips gives a mark back only when it held one and skipped cleanly, not when it
+could not stop what earlier steps left running. A run that fails, is stopped by its
+limit or is killed hands back nothing, however far it got: after the tool's build no
+later step finds the pairing tool, after any other step none finds a mark, and none
+saves.
 Every cache step has a time limit chosen from measured durations. In the 84 lane runs of
 runs 45946785256, 45948208955, 45957239435 (both attempts) and 45976374805 (both
 attempts), timed from the job logs, the restore took at most 3.9 s, `track` 4.3 s (while
@@ -340,8 +345,8 @@ pairing tool's cold build, timed in the 14 lanes of run 45946785256, none of whi
 restored a cache, took 2.5–4.3 s. `tools/zig-cache.sh` runs the tool's build, `track`,
 the stage, `unstage` and the admission each under its own `timeout`, which stops it after
 20 s, about four times the longest measured, with SIGTERM and 1 s later SIGKILL. It then
-warns by the step's exit status: 124, `timeout`'s own, as exceeding its 20 s limit and
-being stopped; 137, a SIGKILL from `timeout` or from elsewhere (the kernel's OOM
+warns by the limited run's exit status: 124, `timeout`'s own, as exceeding its 20 s
+limit and being stopped; 137, a SIGKILL from `timeout` or from elsewhere (the kernel's OOM
 killer), as exceeding its limit and being killed when 20 s had passed, and otherwise as
 killed after the seconds it ran, before its limit; any other nonzero status as failed
 with that status. In each case no later step saves. When `track` skips, fails or is
@@ -357,7 +362,8 @@ the cache work before a lane's checks (the restore, the tool's build, `track` an
 deletion, the stage, the compile save and `unstage`) adds at most
 70 + 21 + (21 + 21) + 21 + 70 + 21 = 245 s,
 and the cache work after them (the admission and the checked save) at most 21 + 70 = 91 s,
-beside GitHub's start-up of each step (under 0.1 s in these logs). The target identity
+beside GitHub's start-up of each step (under 0.1 s in these logs) and the few small files
+each script step renames or writes around its limited run. The target identity
 diagnostic, which `main` already ran on the native and source lanes, is not cache work
 and keeps its own one-minute timeout (0.2 s measured).
 No cache step reads the job's clock or skips for how far the job has got: each is

@@ -52,22 +52,49 @@ pairs() {
 }
 
 tool() {
-    rm -f -- "$pairs_tool"
     mkdir -p -- "$tool_dir"
     zig build-exe -fstrip --cache-dir "$tool_dir/local" --global-cache-dir "$tool_dir/global" \
         ${KOSMOS_HOST_TARGET:+-target "$KOSMOS_HOST_TARGET"} \
         ${KOSMOS_HOST_CPU:+-mcpu "$KOSMOS_HOST_CPU"} \
         -femit-bin="$tool_dir/building" "$pairs_source"
-    mv -- "$tool_dir/building" "$pairs_tool"
-    printf 'Compiler cache: built the pairing tool\n'
+}
+
+hold() {
+    if [[ "$mode" == tool ]]; then
+        rm -f -- "$pairs_tool" "$tool_dir/building"
+        return 0
+    fi
+    mkdir -p -- "$state"
+    rm -f -- "$state/held" "$state/given" "$state/save"
+    if [[ -e "$state/armed" ]]; then
+        mv -- "$state/armed" "$state/held"
+    fi
+}
+
+hand_back() {
+    if [[ "$mode" == tool ]]; then
+        mv -- "$tool_dir/building" "$pairs_tool"
+        printf 'Compiler cache: built the pairing tool\n'
+        return 0
+    fi
+    if [[ -e "$state/given" ]]; then
+        mv -- "$state/given" "$state/armed"
+    fi
+    if [[ -e "$state/save" ]]; then
+        printf 'Compiler cache: save %s bytes\n' "$(< "$state/save")"
+        printf 'save=true\n' >> "$output"
+    fi
 }
 
 limit() {
     local status=0 started=$SECONDS elapsed
+    hold
     KOSMOS_CACHE_LIMITED=1 timeout -k "$kill_seconds" "$step_seconds_max" bash "${BASH_SOURCE[0]}" "$@" ||
         status=$?
     elapsed=$(( SECONDS - started ))
-    if (( status == 124 )); then
+    if (( status == 0 )); then
+        hand_back
+    elif (( status == 124 )); then
         printf '::warning::Compiler cache: %s exceeded its %d s limit and was stopped; this job saves no further compiler cache\n' \
             "$mode" "$step_seconds_max"
     elif (( status == 137 && elapsed >= step_seconds_max )); then
@@ -124,17 +151,15 @@ skip() {
 take() {
     local held=
     mkdir -p -- "$state"
-    if [[ -e "$state/armed" ]]; then
-        held=$(< "$state/armed")
-        rm -f -- "$state/armed"
+    if [[ -e "$state/held" ]]; then
+        held=$(< "$state/held")
     fi
     stop
     mark=$held
 }
 
 give() {
-    printf '%s\n' "$mark" > "$state/armed.next"
-    mv -- "$state/armed.next" "$state/armed"
+    printf '%s\n' "$mark" > "$state/given"
 }
 
 access_time_tracking() {
@@ -441,8 +466,7 @@ seal() {
     : > "$state/sealed"
     mv -T -- "$cache" "$saved"
     give
-    printf 'Compiler cache: save %s bytes\n' "$bytes"
-    printf 'save=true\n' >> "$output"
+    printf '%s\n' "$bytes" > "$state/save"
 }
 
 stage() {

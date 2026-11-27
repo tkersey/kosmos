@@ -466,6 +466,34 @@ expect_saved false
 expect_report "::warning::Compiler cache: o/$f1/link is neither a regular file nor a directory; save skipped"
 expect_present h/$m4 o/$f4/test
 
+cat > "$scratch/limited-starts-late" << 'EOF'
+[[ -z "${KOSMOS_CACHE_LIMITED:-}" ]] || sleep 5
+EOF
+cat > "$scratch/limited-ends-late" << 'EOF'
+trap '[[ -z "${KOSMOS_CACHE_LIMITED:-}" ]] || sleep 5' EXIT
+EOF
+for late in starts ends; do
+    begin "stage-stopped-$late"
+    track
+    use h/$m1 o/$f1/test
+    if BASH_ENV=$scratch/limited-$late-late KOSMOS_CACHE_STEP_SECONDS_MAX=2 run stage; then
+        fail "a stage stopped by its limit succeeded"
+    fi
+    expect_report '::warning::Compiler cache: stage exceeded its 2 s limit and was stopped; this job saves no further compiler cache'
+    ! grep -Fq 'Compiler cache: save ' "$workspace/report" || fail "a stopped stage reported a save"
+    expect_saved false
+    if [[ "$late" == ends ]]; then
+        [[ -d "$extraction" && ! -e .zig-cache ]] || fail "the stage was stopped before it sealed the tree"
+    fi
+    run unstage
+    expect_report 'Compiler cache: untracked, or an earlier compiler cache step failed'
+    [[ -d .zig-cache && ! -e "$extraction" ]] || fail "unstage did not return the tree after a stopped stage"
+    expect_present h/$m4 o/$f4/test
+    run admit
+    expect_saved false
+    expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+done
+
 for failure in failed stopped; do
     begin "tool-$failure"
     if [[ "$failure" == failed ]]; then
@@ -504,6 +532,21 @@ for failure in failed stopped; do
     run admit
     expect_saved true
 done
+
+begin tool-stopped-built
+if BASH_ENV=$scratch/limited-ends-late KOSMOS_CACHE_STEP_SECONDS_MAX=4 build_tool; then
+    fail "a tool build stopped by its limit succeeded"
+fi
+expect_report '::warning::Compiler cache: tool exceeded its 4 s limit and was stopped; this job saves no further compiler cache'
+! grep -Fq 'built the pairing tool' "$workspace/report" || fail "a stopped tool build reported the tool built"
+[[ -x "$tool_cache/building" ]] || fail "the tool build was stopped before it finished"
+[[ ! -e "$pairs_tool" ]] || fail "a stopped tool build left a pairing tool"
+track
+use h/$m1 o/$f1/test
+run stage
+expect_saved false
+expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
+build_tool || fail "the pairing tool could not be built after a stopped build"
 
 begin stage
 track
