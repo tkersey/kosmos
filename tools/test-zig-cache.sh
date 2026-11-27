@@ -3,6 +3,7 @@ set -euo pipefail
 
 tools=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script=$tools/zig-cache.sh
+workflow=$tools/../.github/workflows/runtime-bundle.yml
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/zig-cache-test.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 export RUNNER_TEMP=$scratch
@@ -34,6 +35,8 @@ restored_manifest() {
     touch -d @1000000000 -- "$1"
 }
 
+# A restored entry in Zig's layout: the build cache and Zig's global cache share .zig-cache, and
+# the independent core rebuild keeps its own global cache and extracted packages beside them.
 begin() {
     scenario=$1
     workspace=$scratch/$scenario
@@ -42,25 +45,32 @@ begin() {
     export KOSMOS_CACHE_STATE=$workspace/state
     export GITHUB_OUTPUT=$workspace/output
     : > "$GITHUB_OUTPUT"
-    restored_manifest .zig-cache/h/$m8
-    restored_file .zig-cache/o/$f8/libcompiler_rt.a
-    restored_file .zig-cache/p/package.tar.gz
-    restored_file .zig-cache/tmp/.tmp-leftover/file
-    local build=.zig-cache/local/build
-    restored_manifest $build/h/$m1
-    restored_manifest $build/h/$m2
-    restored_manifest $build/h/$m3
-    restored_manifest $build/h/$m4
-    restored_manifest $build/h/$m5
-    restored_file $build/h/$m6 ''
-    restored_file $build/h/timestamp
-    restored_file $build/o/$f1/test
-    restored_file $build/o/$f2/test
-    restored_file $build/c/$f3
-    restored_file $build/o/$f4/test
-    restored_file $build/o/orphan/test
-    restored_file $build/z/used-zir
-    restored_file $build/z/stale-zir
+    local cache=.zig-cache
+    restored_manifest $cache/h/$m1
+    restored_manifest $cache/h/$m2
+    restored_manifest $cache/h/$m3
+    restored_manifest $cache/h/$m4
+    restored_manifest $cache/h/$m5
+    restored_file $cache/h/$m6 ''
+    restored_manifest $cache/h/$m8
+    restored_file $cache/h/timestamp
+    restored_file $cache/o/$f1/test
+    restored_file $cache/o/$f2/test
+    restored_file $cache/c/$f3
+    restored_file $cache/o/$f4/test
+    restored_file $cache/o/$f8/libcompiler_rt.a
+    restored_file $cache/o/orphan/test
+    restored_file $cache/z/used-zir
+    restored_file $cache/z/stale-zir
+    restored_file $cache/b/used/builtin.zig
+    restored_file $cache/b/stale/builtin.zig
+    restored_file $cache/p/used.tar.gz
+    restored_file $cache/p/stale.tar.gz
+    restored_file $cache/tmp/.tmp-leftover/file
+    restored_manifest $cache/native-driver-core/h/$m1
+    restored_file $cache/native-driver-core/o/$f1/test
+    restored_file $cache/native-driver-core/zig-pkg/used/build.zig
+    restored_file $cache/native-driver-core/zig-pkg/stale/build.zig
 }
 
 use() {
@@ -75,6 +85,11 @@ compile() {
     printf '%s' "${2:-$1}" > ".zig-cache/$1"
 }
 
+write_manifest() {
+    mkdir -p -- .zig-cache/h
+    printf '\0' > ".zig-cache/h/$1"
+}
+
 rewrite_unread() {
     compile "$1"
     touch -a -d @1 -- ".zig-cache/$1"
@@ -82,7 +97,7 @@ rewrite_unread() {
 }
 
 admit() {
-    bash "$script" admit "${2:-1000000000}" "$1" > "$workspace/report"
+    bash "$script" admit > "$workspace/report"
 }
 
 expect_saved() {
@@ -95,14 +110,14 @@ expect_saved() {
 expect_present() {
     local path
     for path in "$@"; do
-        [[ -e ".zig-cache-upload/$path" ]] || fail "missing $path"
+        [[ -e ".zig-cache/$path" ]] || fail "missing $path"
     done
 }
 
 expect_absent() {
     local path
     for path in "$@"; do
-        [[ ! -e ".zig-cache-upload/$path" ]] || fail "retained $path"
+        [[ ! -e ".zig-cache/$path" ]] || fail "retained $path"
     done
 }
 
@@ -113,150 +128,110 @@ expect_report() {
     }
 }
 
-expect_restored() {
-    expect_present local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 \
-        local/build/o/$f2/test local/build/h/$m3 local/build/c/$f3 local/build/h/$m4 \
-        local/build/o/$f4/test local/build/o/orphan/test local/build/z/used-zir \
-        local/build/z/stale-zir local/build/h/timestamp h/$m8 o/$f8/libcompiler_rt.a \
-        p/package.tar.gz
-}
-
-# A saved entry holds no manifest without output. Zig leaves an empty manifest for the
-# build runner it failed to compile and refreshes h/timestamp.
-configure_failure() {
-    rm -- .zig-cache/local/build/h/$m5 .zig-cache/local/build/h/$m6
-    bash "$script" track > /dev/null
-    : > .zig-cache/local/build/h/00000000000000000000000000000009
-    printf 'now' > .zig-cache/local/build/h/timestamp
-}
-
-partial_build() {
-    bash "$script" track > /dev/null
-    use local/build/h/$m1 local/build/o/$f1/test
-    printf '\0' > .zig-cache/local/build/h/$m7
-    compile local/build/o/$f7/test
-    rewrite_unread local/build/z/stale-zir
-}
-
+# Pairs keep a manifest with its output when the compilation read either; global units (builtins,
+# package archives, compiler_rt and extracted packages) are pruned by use like build units.
 begin pairs
-bash "$script" track > /dev/null
+bash "$script" track success > /dev/null
 if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
     printf 'Access-time tracking is unavailable on this filesystem; cannot test pruning.\n' >&2
     exit 1
 fi
-use local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 local/build/c/$f3 \
-    local/build/z/used-zir
-admit success
+use h/$m1 h/$m2 o/$f2/test c/$f3 z/used-zir b/used/builtin.zig p/used.tar.gz \
+    native-driver-core/h/$m1 native-driver-core/zig-pkg/used/build.zig
+admit
 expect_saved true
-expect_present local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 \
-    local/build/o/$f2/test local/build/h/$m3 local/build/c/$f3 local/build/z/used-zir \
-    local/build/h/timestamp h/$m8 o/$f8/libcompiler_rt.a p/package.tar.gz
-expect_absent local/build/h/$m4 local/build/o/$f4 local/build/o/orphan \
-    local/build/z/stale-zir local/build/h/$m5 local/build/h/$m6 tmp/.tmp-leftover
-expect_report 'local/build/: 13 units; 4 manifest-output pairs; 2 manifests without output dropped; pruned 6 units'
+expect_present h/$m1 o/$f1/test h/$m2 o/$f2/test h/$m3 c/$f3 z/used-zir h/timestamp \
+    b/used/builtin.zig p/used.tar.gz native-driver-core/h/$m1 native-driver-core/o/$f1/test \
+    native-driver-core/zig-pkg/used/build.zig
+expect_absent h/$m4 o/$f4 o/orphan z/stale-zir h/$m5 h/$m6 h/$m8 o/$f8 b/stale p/stale.tar.gz \
+    native-driver-core/zig-pkg/stale tmp/.tmp-leftover
+expect_report 'Compiler cache root: 19 units; 5 manifest-output pairs; 2 manifests without output dropped; pruned 10 units'
+expect_report 'Compiler cache native-driver-core/: 4 units; 1 manifest-output pairs; 0 manifests without output dropped; pruned 1 units'
 
 begin written
-partial_build
-admit success
+bash "$script" track success > /dev/null
+use h/$m1 o/$f1/test
+write_manifest $m7
+compile o/$f7/test
+rewrite_unread z/stale-zir
+admit
 expect_saved true
-expect_present local/build/h/$m7 local/build/o/$f7/test local/build/z/stale-zir
-expect_absent local/build/h/$m2 local/build/o/$f2 local/build/z/used-zir
+expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test z/stale-zir
+expect_absent h/$m2 o/$f2 z/used-zir b/used p/used.tar.gz
 
-begin partial-failure
-partial_build
-admit failure
+# A failed restore is discarded; the compilation that follows writes, and saves, a complete set.
+begin failed-restore
+bash "$script" track failure > "$workspace/report"
+expect_report 'Compiler cache restored (failure): 0 bytes'
+expect_absent h/$m1 o/$f1 b/used p/used.tar.gz native-driver-core
+write_manifest $m1
+compile o/$f1/test
+compile b/fresh/builtin.zig
+compile p/fresh.tar.gz
+admit
 expect_saved true
-expect_restored
-expect_present local/build/h/$m7 local/build/o/$f7/test
-expect_absent local/build/h/$m5 local/build/h/$m6 tmp/.tmp-leftover
-expect_report '(no caches pruned)'
-expect_report 'manifests without output dropped; pruned 2 units'
-expect_report 'kept 3 written units'
-
-begin configure-failure
-configure_failure
-admit failure
-expect_saved false
-expect_report 'Compiler cache: lane failed without writing a kept unit or dropping a restored manifest; save skipped'
-
-begin configure-success
-configure_failure
-admit success
-expect_saved true
-expect_absent local/build/h/$m1 local/build/o/$f1 local/build/h/$m3 local/build/c/$f3
-
-begin failed-broken
-bash "$script" track > /dev/null
-admit failure
-expect_saved true
-expect_restored
-expect_absent local/build/h/$m5 local/build/h/$m6
-expect_report '2 manifests without output dropped; pruned 2 units'
+expect_present h/$m1 o/$f1/test b/fresh/builtin.zig p/fresh.tar.gz
+expect_report 'Compiler cache root: 4 units; 1 manifest-output pairs; 0 manifests without output dropped; pruned 0 units'
 
 begin broken
-rm -rf .zig-cache/local/build/o/$f2
-bash "$script" track > /dev/null
-use local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2
-admit success
+rm -rf .zig-cache/o/$f2
+bash "$script" track success > /dev/null
+use h/$m1 o/$f1/test h/$m2
+admit
 expect_saved true
-expect_absent local/build/h/$m2 local/build/o/$f2
-expect_present local/build/h/$m1 local/build/o/$f1/test
+expect_absent h/$m2 o/$f2
+expect_present h/$m1 o/$f1/test
 expect_report '3 manifests without output dropped'
 
 begin untracked
-bash "$script" track > /dev/null
+bash "$script" track success > /dev/null
 printf 'off\n' > "$KOSMOS_CACHE_STATE/tracking"
-admit success
-expect_saved true
-expect_present local/build/h/$m4 local/build/o/$f4/test local/build/o/orphan/test \
-    local/build/z/stale-zir
-expect_absent local/build/h/$m5 local/build/h/$m6
-expect_report 'local/build/: 13 units; 4 manifest-output pairs; 2 manifests without output dropped; pruned 2 units'
-
-begin ceiling
-head -c 4194304 /dev/urandom > .zig-cache/o/$f8/libcompiler_rt.a
-bash "$script" track > /dev/null
-use local/build/h/$m1 local/build/o/$f1/test
-admit success 3145728
-expect_saved true
-expect_present p/package.tar.gz local/build/h/$m1 local/build/o/$f1/test
-expect_absent h/$m8 o/$f8
-expect_report '(all caches pruned)'
-admit success 1
+admit
 expect_saved false
-expect_report '::warning::Compiler cache: the snapshot of what this run used exceeds the lane maximum'
+expect_present h/$m4 o/$f4/test b/stale p/stale.tar.gz
+expect_report '::warning::Compiler cache: reads leave no access time here'
 
-begin ceiling-failure
-head -c 4194304 /dev/urandom > .zig-cache/o/$f8/libcompiler_rt.a
-partial_build
-admit failure 3145728
-expect_saved false
-expect_report '::warning::Compiler cache: the snapshot of restored entry and every write exceeds the lane maximum'
+scenario=host-cpu
+flags=(fpu cx8 cmov mmx fxsr sse sse2 lm pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2
+    bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
+host_cpu() {
+    printf 'processor\t: 0\nmodel name\t: test\nflags\t\t: %s\n\n' "$*" | bash "$script" host-cpu
+}
+[[ "$(host_cpu "${flags[@]}")" == x86_64_v3+sha ]] || fail "a runner with every flag is not x86_64_v3+sha"
+for flag in pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni; do
+    without=()
+    for present in "${flags[@]}"; do
+        [[ "$present" == "$flag" ]] || without+=("$present")
+    done
+    [[ "$(host_cpu "${without[@]}")" == baseline ]] || fail "a runner without $flag is not baseline"
+done
+[[ "$(host_cpu)" == baseline ]] || fail "a runner without flags is not baseline"
 
-begin deadline
-printf 'false\nexit 0\n' > "$workspace/errexit.sh"
-printf 'exit 3\n' > "$workspace/status.sh"
-printf 'sleep 30\n' > "$workspace/slow.sh"
-printf ': > "%s/ran"\n' "$workspace" > "$workspace/late.sh"
-export KOSMOS_LANE_DEADLINE=$(( $(date +%s) + 600 ))
-status=0
-bash "$script" work "$workspace/errexit.sh" > "$workspace/report" || status=$?
-(( status == 1 )) || fail "a failing command returned $status, not 1"
-status=0
-bash "$script" work "$workspace/status.sh" > "$workspace/report" || status=$?
-(( status == 3 )) || fail "the step status became $status, not 3"
-KOSMOS_LANE_DEADLINE=$(( $(date +%s) + 2 ))
-status=0
-started=$SECONDS
-bash "$script" work "$workspace/slow.sh" > "$workspace/report" || status=$?
-(( status == 124 )) || fail "a step past the deadline returned $status, not 124"
-(( SECONDS - started < 15 )) || fail "a step ran $((SECONDS - started)) s past a 2 s deadline"
-expect_report '::error::Lane work reached its deadline'
-KOSMOS_LANE_DEADLINE=$(( $(date +%s) - 1 ))
-status=0
-bash "$script" work "$workspace/late.sh" > "$workspace/report" || status=$?
-(( status == 124 )) || fail "a step after the deadline returned $status, not 124"
-[[ ! -e "$workspace/ran" ]] || fail "a step after the deadline ran"
+# GitHub runs a step without a status function only after every earlier step succeeded, so a
+# failed compilation saves nothing, and every key names the host target and the chosen CPU.
+scenario=workflow
+awk '
+    /^  [a-z-]+:$/ { job = $1 }
+    job == "qualify:" && /^      - / { steps++ }
+    job == "qualify:" && /^      - name: / { sub(/^      - name: /, ""); name[steps] = $0 }
+    job == "qualify:" && /^        name: / { sub(/^        name: /, ""); name[steps] = $0 }
+    job == "qualify:" && /^        if: / { condition[steps] = $0 }
+    END { for (i = 1; i <= steps; i++) printf "%d\t%s\t%s\n", i, name[i], condition[i] }
+' "$workflow" > "$scratch/steps.tsv"
+admission=$(awk -F '\t' '$2 ~ /^Prune the compiler cache/ { print $1 }' "$scratch/steps.tsv")
+save=$(awk -F '\t' '$2 ~ /^Save the compiled lane/ { print $1 }' "$scratch/steps.tsv")
+[[ -n "$admission" && "$save" == $((admission + 1)) ]] || fail "the save does not follow the admission"
+if awk -F '\t' -v a="$admission" -v s="$save" '($1 == a || $1 == s) && $3 ~ /always\(\)|cancelled\(\)|failure\(\)/' \
+    "$scratch/steps.tsv" | grep -q .; then
+    fail "the admission or save runs after a failed step"
+fi
+if awk -F '\t' -v a="$admission" '$2 ~ /^Compile/ && $1 + 0 > a + 0' "$scratch/steps.tsv" | grep -q .; then
+    fail "a compilation follows the save"
+fi
+grep -E '^ +(key: )?kosmos-native-' "$workflow" > "$scratch/keys.txt"
+keys=$(wc -l < "$scratch/keys.txt")
+complete=$(grep -F 'env.KOSMOS_HOST_TARGET' "$scratch/keys.txt" | grep -Fc 'env.KOSMOS_HOST_CPU')
+(( keys == 7 && complete == keys )) || fail "$complete of $keys compiler cache keys name the host target and CPU"
 
 scenario=zig-pairs
 for directory in "$scratch/zig-cache-pairs/local" "$scratch/zig-cache-pairs/global"; do
@@ -271,7 +246,7 @@ for directory in "$scratch/zig-cache-pairs/local" "$scratch/zig-cache-pairs/glob
 done
 
 if (( failures > 0 )); then
-    printf '%d compiler cache admission checks failed.\n' "$failures" >&2
+    printf '%d compiler cache checks failed.\n' "$failures" >&2
     exit 1
 fi
 printf 'Compiler cache admission: all scenarios passed.\n'
