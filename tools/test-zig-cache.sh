@@ -82,7 +82,7 @@ rewrite_unread() {
 }
 
 admit() {
-    bash "$script" admit "${1:-1000000000}" > "$workspace/report"
+    bash "$script" admit "${2:-1000000000}" "$1" > "$workspace/report"
 }
 
 expect_saved() {
@@ -113,6 +113,31 @@ expect_report() {
     }
 }
 
+expect_restored() {
+    expect_present local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 \
+        local/build/o/$f2/test local/build/h/$m3 local/build/c/$f3 local/build/h/$m4 \
+        local/build/o/$f4/test local/build/o/orphan/test local/build/z/used-zir \
+        local/build/z/stale-zir local/build/h/timestamp h/$m8 o/$f8/libcompiler_rt.a \
+        p/package.tar.gz
+}
+
+# A saved entry holds no manifest without output. Zig leaves an empty manifest for the
+# build runner it failed to compile and refreshes h/timestamp.
+configure_failure() {
+    rm -- .zig-cache/local/build/h/$m5 .zig-cache/local/build/h/$m6
+    bash "$script" track > /dev/null
+    : > .zig-cache/local/build/h/00000000000000000000000000000009
+    printf 'now' > .zig-cache/local/build/h/timestamp
+}
+
+partial_build() {
+    bash "$script" track > /dev/null
+    use local/build/h/$m1 local/build/o/$f1/test
+    printf '\0' > .zig-cache/local/build/h/$m7
+    compile local/build/o/$f7/test
+    rewrite_unread local/build/z/stale-zir
+}
+
 begin pairs
 bash "$script" track > /dev/null
 if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
@@ -121,7 +146,7 @@ if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
 fi
 use local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 local/build/c/$f3 \
     local/build/z/used-zir
-admit
+admit success
 expect_saved true
 expect_present local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2 \
     local/build/o/$f2/test local/build/h/$m3 local/build/c/$f3 local/build/z/used-zir \
@@ -131,21 +156,48 @@ expect_absent local/build/h/$m4 local/build/o/$f4 local/build/o/orphan \
 expect_report 'local/build/: 13 units; 4 manifest-output pairs; 2 manifests without output dropped; pruned 6 units'
 
 begin written
-bash "$script" track > /dev/null
-use local/build/h/$m1 local/build/o/$f1/test
-printf '\0' > .zig-cache/local/build/h/$m7
-compile local/build/o/$f7/test
-rewrite_unread local/build/z/stale-zir
-admit
+partial_build
+admit success
 expect_saved true
 expect_present local/build/h/$m7 local/build/o/$f7/test local/build/z/stale-zir
 expect_absent local/build/h/$m2 local/build/o/$f2 local/build/z/used-zir
+
+begin partial-failure
+partial_build
+admit failure
+expect_saved true
+expect_restored
+expect_present local/build/h/$m7 local/build/o/$f7/test
+expect_absent local/build/h/$m5 local/build/h/$m6 tmp/.tmp-leftover
+expect_report '(no caches pruned)'
+expect_report 'manifests without output dropped; pruned 2 units'
+expect_report 'kept 3 written units'
+
+begin configure-failure
+configure_failure
+admit failure
+expect_saved false
+expect_report 'Compiler cache: lane failed without writing a kept unit or dropping a restored manifest; save skipped'
+
+begin configure-success
+configure_failure
+admit success
+expect_saved true
+expect_absent local/build/h/$m1 local/build/o/$f1 local/build/h/$m3 local/build/c/$f3
+
+begin failed-broken
+bash "$script" track > /dev/null
+admit failure
+expect_saved true
+expect_restored
+expect_absent local/build/h/$m5 local/build/h/$m6
+expect_report '2 manifests without output dropped; pruned 2 units'
 
 begin broken
 rm -rf .zig-cache/local/build/o/$f2
 bash "$script" track > /dev/null
 use local/build/h/$m1 local/build/o/$f1/test local/build/h/$m2
-admit
+admit success
 expect_saved true
 expect_absent local/build/h/$m2 local/build/o/$f2
 expect_present local/build/h/$m1 local/build/o/$f1/test
@@ -154,7 +206,7 @@ expect_report '3 manifests without output dropped'
 begin untracked
 bash "$script" track > /dev/null
 printf 'off\n' > "$KOSMOS_CACHE_STATE/tracking"
-admit
+admit success
 expect_saved true
 expect_present local/build/h/$m4 local/build/o/$f4/test local/build/o/orphan/test \
     local/build/z/stale-zir
@@ -165,14 +217,21 @@ begin ceiling
 head -c 4194304 /dev/urandom > .zig-cache/o/$f8/libcompiler_rt.a
 bash "$script" track > /dev/null
 use local/build/h/$m1 local/build/o/$f1/test
-admit 3145728
+admit success 3145728
 expect_saved true
 expect_present p/package.tar.gz local/build/h/$m1 local/build/o/$f1/test
 expect_absent h/$m8 o/$f8
 expect_report '(all caches pruned)'
-admit 1
+admit success 1
 expect_saved false
-expect_report '::warning::Compiler cache: even what this run used exceeds the lane maximum'
+expect_report '::warning::Compiler cache: the snapshot of what this run used exceeds the lane maximum'
+
+begin ceiling-failure
+head -c 4194304 /dev/urandom > .zig-cache/o/$f8/libcompiler_rt.a
+partial_build
+admit failure 3145728
+expect_saved false
+expect_report '::warning::Compiler cache: the snapshot of restored entry and every write exceeds the lane maximum'
 
 begin deadline
 printf 'false\nexit 0\n' > "$workspace/errexit.sh"

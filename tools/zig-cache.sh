@@ -13,7 +13,7 @@ deadline_kill_seconds=10
 usage() {
     printf 'Usage: bash tools/zig-cache.sh track\n' >&2
     printf '       KOSMOS_LANE_DEADLINE=EPOCH_SECONDS bash tools/zig-cache.sh work STEP_SCRIPT\n' >&2
-    printf '       bash tools/zig-cache.sh admit ARCHIVE_BYTES_MAX\n' >&2
+    printf '       bash tools/zig-cache.sh admit ARCHIVE_BYTES_MAX success|failure|cancelled\n' >&2
     exit 64
 }
 
@@ -49,7 +49,16 @@ track() {
     if [[ "$(< "$state/tracking")" == on ]]; then
         find "$cache" -type f -exec touch -a -d "@$unread_epoch" -- {} +
     fi
-    date +%s.%N > "$state/armed"
+    # Mark on the cache's own change-time clock, then wait out its tick so every later write follows.
+    local mark=$cache/tmp/armed-mark
+    touch -- "$mark"
+    find "$mark" -printf '%C@\n' > "$state/armed"
+    touch -- "$mark"
+    while [[ "$(find "$mark" -printf '%C@')" == "$(< "$state/armed")" ]]; do
+        sleep 0.001
+        touch -- "$mark"
+    done
+    rm -f -- "$mark"
 }
 
 work() {
@@ -95,7 +104,8 @@ classify_units() {
         -v tracking="$(< "$state/tracking")" \
         -v unread="$unread_epoch" \
         -v pairs_in="$state/pairs" \
-        -v prune_out="$state/prune" "$unit_program"'
+        -v prune_out="$state/prune" \
+        -v changes_out="$state/changes" "$unit_program"'
         BEGIN {
             while ((getline line < pairs_in) > 0) {
                 split(line, field, "\t")
@@ -109,7 +119,8 @@ classify_units() {
             if (name == "") next
             unit_root[name] = root
             unit_bytes[name] += $3
-            if ($2 + 0 > armed + 0 || (tracking == "on" && $1 + 0 > unread + 0.5)) used[name] = 1
+            if ($2 + 0 > armed + 0) written[name] = 1
+            if ((name in written) || (tracking == "on" && $1 + 0 > unread + 0.5)) used[name] = 1
         }
         END {
             printf "" > prune_out
@@ -122,20 +133,26 @@ classify_units() {
                 units[root]++
                 manifest = (name in output_of)
                 broken = (group[name] in output_of) && output_of[group[name]] == ""
-                prunable = tracking == "on" && (scope == "all" || root ~ /^local\//)
+                prunable = tracking == "on" && scope != "no" && (scope == "all" || root ~ /^local\//)
                 if (manifest && !broken) pairs[root]++
                 if (manifest && broken) dropped[root]++
-                if (!broken && (!prunable || (group[name] in group_used))) continue
+                if (manifest && broken && !(name in written)) changes++
+                if (!broken && (!prunable || (group[name] in group_used))) {
+                    if (name in written) kept_written[root]++
+                    continue
+                }
                 print name > prune_out
                 if (manifest && output_of[name] != "") print output_of[name] > prune_out
                 pruned[root]++
                 pruned_bytes[root] += unit_bytes[name]
             }
             for (root in units) {
-                printf "Compiler cache %s: %d units; %d manifest-output pairs; %d manifests without output dropped; pruned %d units (%.0f bytes)\n", \
+                printf "Compiler cache %s: %d units; %d manifest-output pairs; %d manifests without output dropped; pruned %d units (%.0f bytes); kept %d written units\n", \
                     root == "" ? "global" : root, units[root], pairs[root], dropped[root], \
-                    pruned[root], pruned_bytes[root]
+                    pruned[root], pruned_bytes[root], kept_written[root]
+                changes += kept_written[root]
             }
+            print changes + 0 > changes_out
         }
     ' "$state/listing"
 }
@@ -155,7 +172,7 @@ take_snapshot() {
 }
 
 admit() {
-    local archive_bytes_max=$1
+    local archive_bytes_max=$1 lane=$2
     local output=${GITHUB_OUTPUT:-/dev/null}
     printf 'save=false\n' >> "$output"
     if [[ ! -e "$state/armed" || ! -d "$cache" ]]; then
@@ -168,9 +185,19 @@ admit() {
     fi
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
     pair_manifests
+    # A failed lane may stop before reading what its rerun needs, so only a successful lane's reads prune.
+    local scopes=(no) admitted='restored entry and every write'
+    if [[ "$lane" == success ]]; then
+        scopes=(build all)
+        admitted='what this run used'
+    fi
     local scope archive_bytes
-    for scope in build all; do
+    for scope in "${scopes[@]}"; do
         classify_units "$scope"
+        if [[ "$lane" != success && "$(< "$state/changes")" == 0 ]]; then
+            printf 'Compiler cache: lane failed without writing a kept unit or dropping a restored manifest; save skipped, previous entry kept\n'
+            return 0
+        fi
         take_snapshot
         archive_bytes=$(tar --posix -cf - -P -C "$PWD" "$snapshot" | zstd -T0 -q -c | wc -c)
         printf 'Compiler cache (%s caches pruned): cache %s bytes; snapshot %s bytes (%s local); archive %s bytes (maximum %s)\n' \
@@ -182,8 +209,8 @@ admit() {
             return 0
         fi
     done
-    printf '::warning::Compiler cache: even what this run used exceeds the lane maximum of %s bytes; save skipped, previous entry kept\n' \
-        "$archive_bytes_max"
+    printf '::warning::Compiler cache: the snapshot of %s exceeds the lane maximum of %s bytes; save skipped, previous entry kept\n' \
+        "$admitted" "$archive_bytes_max"
 }
 
 case "${1:-}" in
@@ -196,8 +223,8 @@ case "${1:-}" in
         work "$2"
         ;;
     admit)
-        [[ $# -eq 2 && "$2" =~ ^[0-9]+$ ]] || usage
-        admit "$2"
+        [[ $# -eq 3 && "$2" =~ ^[0-9]+$ && "$3" =~ ^(success|failure|cancelled)$ ]] || usage
+        admit "$2" "$3"
         ;;
     *)
         usage

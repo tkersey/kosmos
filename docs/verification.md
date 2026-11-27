@@ -169,9 +169,12 @@ saved whole while they fit the lane's ceiling (below), so a lane keeps a build r
 for every runner CPU model it has used and a new commit never recompiles the runtime
 libraries.
 After restoring, `tools/zig-cache.sh track` checks on the workspace filesystem that
-reading a file updates its access time and marks every cached file unread. Before the
-save, `tools/zig-cache.sh admit` hard-links the cache into a snapshot and prunes the
-build caches by Zig's own manifest-output pairs.
+reading a file updates its access time, marks every cached file unread, and records
+the change time of a file it touches, waiting until a second touch reads a later
+change time, so that every later write follows the mark even on a filesystem whose
+timestamps advance by clock ticks. Before the save, `tools/zig-cache.sh admit`
+hard-links the cache into a snapshot and, after a lane whose every step succeeded,
+prunes the build caches by Zig's own manifest-output pairs.
 Zig 0.17.1 finalizes a manifest under `h/` for each step it caches and stores the
 step's output in `o/F` or its configuration in `c/F`, where F is the digest
 `std/Build/Cache.zig` computes from the manifest's file name and the file digests the
@@ -184,7 +187,7 @@ output arguments and no captured output, records its inputs and creates no `o/F`
 layout. The admission keeps a manifest together with its output when the run read or
 wrote either, and removes both otherwise. Outputs that no manifest names and ZIR files
 stay when the run read or wrote them. A file counts as written when its change time
-follows tracking, since extraction can preserve its access and modification times but
+follows the mark, since extraction can preserve its access and modification times but
 not its change time. A kept manifest therefore always keeps its output. A manifest that
 names no existing output is removed from every snapshot, read or not, and reported
 among the manifests without output dropped. For a compile or configuration step, whose
@@ -195,9 +198,20 @@ rebuilds that step. For an output-less Run step, dropping its manifest makes eve
 execute that step again. Kosmos has no such step: every admission in runs 45909879869
 and 45910441500 dropped none, and the four found so far came from a PAREDROS cache.
 Without working access times nothing else is removed.
-Temporary directories are emptied. Every file the run read or wrote stays, so the full
-rerun after a failed run finds every artifact a lane used once that lane reached its
-admission.
+Temporary directories are emptied. Every file the run read or wrote stays.
+What a run read decides what is kept only when every step of its lane succeeded
+(`job.status` at the admission). A lane that failed, whether at configuration, at its
+first compile error or at its deadline, may have stopped before reading what its
+rerun needs, and pruning by its reads would replace a complete entry with a nearly
+empty one. After any failed step the admission prunes nothing by use: it saves the
+restored entry and everything the run wrote, less manifests without output and
+temporary directories, provided the archive fits the lane's ceiling. If the run wrote
+no kept unit (a manifest with its output, an output no manifest names or a ZIR file;
+`h/timestamp`, builtin modules and package archives do not count) and dropped no
+restored manifest, it saves nothing, so the previous entry stays the ref's newest and
+the budget job never retires it for a newer one. A failed lane's save therefore
+holds every paired unit its restored entry held, and the full rerun finds every
+artifact the lane used or wrote.
 Every step of a lane after its setup actions, including its build and test steps and
 the portable lane's packaging, runs through `tools/zig-cache.sh work` (logged as
 `shell: /usr/bin/bash tools/zig-cache.sh work {0}`). It runs the step's script with
@@ -236,10 +250,11 @@ lane: the five archives that grew between runs 45909879869 and 45910441500 grew 
 been observed (graniterapids, emeraldrapids, icelake, znver3, znver4 and znver5). With
 eight, at 7.8 MB per build runner, the measured archives would reach at most 127 MB for
 the other lanes and 196 MB for native-driver, whose core rebuild keeps a second global
-cache. If an archive exceeds its ceiling, the admission prunes the global
-caches by the same pairs and saves what the run used; the global caches then grow
-again from the current model. Only if that archive also exceeds the ceiling does the
-lane skip its save, with a warning, and keep its previous entry. Each lane saves at
+cache. If a successful lane's archive exceeds its ceiling, the admission prunes the
+global caches by the same pairs and saves what the run used; the global caches then
+grow again from the current model. Only if that archive also exceeds the ceiling, or a
+failed lane's unpruned archive does, does the lane skip its save, with a warning, and
+keep its previous entry. Each lane saves at
 most once per run attempt, so one ref's 14 lane entries total at most
 S = 2,197,815,296 bytes. A run also saves the setup-zig action's Zig tarball when no
 cache visible to its ref holds it (57,413,921 bytes for 0.17.1 on x86_64 Linux), so one

@@ -317,7 +317,9 @@ jobs:
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         continue-on-error: true
         timeout-minutes: 1
-        run: timeout --kill-after=5 30 bash tools/zig-cache.sh admit "$KOSMOS_CACHE_ENTRY_BYTES_MAX"
+        env:
+          LANE_STATUS: ${{ job.status }}
+        run: timeout --kill-after=5 30 bash tools/zig-cache.sh admit "$KOSMOS_CACHE_ENTRY_BYTES_MAX" "$LANE_STATUS"
       - name: Retain the lane's bounded compiler cache
         if: ${{ !cancelled() && steps.cache_admission.outputs.save == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         continue-on-error: true
