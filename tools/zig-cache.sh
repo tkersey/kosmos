@@ -160,9 +160,8 @@ arm() {
 }
 
 stop() {
-    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor deadline names=
-    local -A ours=()
-    local -a strays=()
+    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor deadline killed names=
+    local -A ours=() stopped=()
     if [[ -z "$id" ]]; then
         skip "::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so $mode cannot stop what earlier steps left running"
     fi
@@ -173,35 +172,36 @@ stop() {
         line=${line##*) }
         read -r _ ancestor _ <<< "$line"
     done
-    grep -lsxzF -- "RUNNER_TRACKING_ID=$id" /proc/[0-9]*/environ > "$state/tracked" || :
-    if ! grep -Fxq -- "/proc/$$/environ" "$state/tracked"; then
-        skip "::warning::Compiler cache: this job's processes cannot be listed, so $mode cannot stop what earlier steps left running"
-    fi
-    while IFS= read -r line; do
-        pid=${line#/proc/}
-        pid=${pid%/environ}
-        if [[ -n "${ours[$pid]:-}" ]] || ! grep -qsxzF -- "RUNNER_TRACKING_ID=$id" "/proc/$pid/environ"; then
-            continue
-        fi
-        name=
-        read -r name 2> /dev/null < "/proc/$pid/comm" || :
-        if kill -KILL -- "$pid" 2> /dev/null; then
-            names+=" ${name:-?}[${pid}]"
-            strays+=("$pid")
-        fi
-    done < "$state/tracked"
     deadline=$(( SECONDS + stop_seconds_max ))
-    for pid in "${strays[@]}"; do
-        while read -r line 2> /dev/null < "/proc/$pid/stat"; do
-            line=${line##*) }
-            [[ "$line" != [ZX]* ]] || break
-            if (( SECONDS >= deadline )); then
-                skip "::warning::Compiler cache: what earlier steps left running did not exit within ${stop_seconds_max} s of SIGKILL:${names}"
+    while :; do
+        grep -lsxzF -- "RUNNER_TRACKING_ID=$id" /proc/[0-9]*/environ > "$state/tracked" || :
+        if ! grep -Fxq -- "/proc/$$/environ" "$state/tracked"; then
+            skip "::warning::Compiler cache: this job's processes cannot be listed, so $mode cannot stop what earlier steps left running"
+        fi
+        killed=0
+        while IFS= read -r line; do
+            pid=${line#/proc/}
+            pid=${pid%/environ}
+            if [[ -n "${ours[$pid]:-}" ]] || ! grep -qsxzF -- "RUNNER_TRACKING_ID=$id" "/proc/$pid/environ"; then
+                continue
             fi
-            sleep 0.01
-        done
+            name=
+            read -r name 2> /dev/null < "/proc/$pid/comm" || :
+            if kill -KILL -- "$pid" 2> /dev/null; then
+                killed=1
+                if [[ -z "${stopped[$pid]:-}" ]]; then
+                    stopped[$pid]=1
+                    names+=" ${name:-?}[${pid}]"
+                fi
+            fi
+        done < "$state/tracked"
+        (( killed )) || break
+        if (( SECONDS >= deadline )); then
+            skip "::warning::Compiler cache: what earlier steps left running did not exit within ${stop_seconds_max} s of SIGKILL:${names}"
+        fi
+        sleep 0.01
     done
-    if (( ${#strays[@]} > 0 )); then
+    if [[ -n "$names" ]]; then
         printf '::warning::Compiler cache: stopped what earlier steps left running:%s\n' "$names"
     fi
 }

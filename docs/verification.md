@@ -223,18 +223,20 @@ the `tar` it started, and terminates whatever still carries the job's
 `RUNNER_TRACKING_ID` only when the job ends. Such a process writes below
 `.zig-cache.saved` by path, or into a file it already holds open. After restoring,
 `tools/zig-cache.sh track` therefore first renames `.zig-cache.saved` to
-`.zig-cache.restored`; then it sends SIGKILL to every process that carries the job's
-`RUNNER_TRACKING_ID` and is neither `track` nor one of its ancestors, waits until each
-process the signal reached has exited, warns with their names when there were any, and
-deletes whatever they wrote to `.zig-cache.saved` before they stopped. A process that
-exited before its signal is neither waited for nor named. Only then does it verify the
+`.zig-cache.restored`; then it lists every process that carries the job's
+`RUNNER_TRACKING_ID` and is neither `track` nor one of its ancestors, sends each SIGKILL,
+and repeats the listing until it finds none left, so it waits until each process the
+signal reached has exited and also stops a process one of them started after a listing.
+It warns with their names when there were any, and deletes whatever they wrote to
+`.zig-cache.saved` before they stopped. A process that exited before its signal is
+neither waited for nor named. Only then does it verify the
 tree, so nothing an earlier step started can write anywhere afterwards, and a file such
 a process held open reaches `.zig-cache` only as part of a tree that matches its record.
-When `RUNNER_TRACKING_ID` is unset, the job's processes cannot be listed, or a signalled
-process has not exited 10 s (half the step's 20 s limit) after the signal, `track` warns,
-naming such processes, deletes the tree and the job saves nothing. `track` has no time
-check, so it never leaves an extraction unverified in `.zig-cache.saved` with its `tar`
-still running.
+When `RUNNER_TRACKING_ID` is unset, the job's processes cannot be listed, or such a
+process is still listed 10 s (half the step's 20 s limit) after the first listing,
+`track` warns, naming such processes, deletes the tree and the job saves nothing.
+`track` has no time check, so it never leaves an extraction unverified in
+`.zig-cache.saved` with its `tar` still running.
 `track` renames the tree to `.zig-cache` only
 when the restore succeeded and the tree matches its record (an extraction that stops
 early can still report success), and deletes it otherwise, so a partial extraction never

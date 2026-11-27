@@ -701,6 +701,38 @@ expect_saved true
 expect_present h/$m1 o/$f1/test
 expect_absent o/stray
 
+begin stray-started-after-listing
+waiting_stray
+cat > "$workspace/late" << EOF
+printf '%s\n' "\$\$" > '$workspace/late.pid'
+while [[ ! -e '$workspace/release' ]]; do
+    sleep 0.01
+done
+: > '$workspace/late.done'
+EOF
+cat > "$scratch/kill-starts-another" << EOF
+kill() {
+    if [[ ! -e '$workspace/late.pid' ]]; then
+        (bash '$workspace/late' &)
+        while [[ ! -s '$workspace/late.pid' ]]; do
+            sleep 0.01
+        done
+    fi
+    builtin kill "\$@"
+}
+EOF
+BASH_ENV=$scratch/kill-starts-another track
+late=$(< "$workspace/late.pid")
+expect_stray_gone "an extraction left running outlived track"
+if [[ -e "$workspace/late.done" ]] || kill -0 "$late" 2> /dev/null; then
+    fail "a process started after track's first listing outlived track"
+    kill "$late" 2> /dev/null || :
+fi
+expect_report "::warning::Compiler cache: stopped what earlier steps left running:"
+expect_report " bash[$late]"
+expect_report 'Compiler cache restored (success)'
+expect_kept
+
 begin untracked-job
 RUNNER_TRACKING_ID='' track
 expect_report '::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so track cannot stop what earlier steps left running; this job uses no restored tree and saves no compiler cache'
