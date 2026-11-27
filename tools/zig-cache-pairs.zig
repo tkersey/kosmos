@@ -37,10 +37,7 @@ fn writePair(
     try writer.print("{s}\t", .{manifest_path});
     const root = rootOf(manifest_path) orelse return writer.writeByte('\n');
     const limit: Io.Limit = .limited(manifest_bytes_max);
-    const contents = cache.readFileAlloc(io, manifest_path, gpa, limit) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return writer.writeByte('\n'),
-    };
+    const contents = try cache.readFileAlloc(io, manifest_path, gpa, limit);
     defer gpa.free(contents);
     var inputs: Io.Writer.Allocating = .init(gpa);
     defer inputs.deinit();

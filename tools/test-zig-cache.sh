@@ -334,6 +334,26 @@ else
     expect_report '1 build runners kept'
 fi
 
+scenario=unreadable-manifest
+mkdir -p -- "$scratch/unreadable/h/$m1"
+if printf 'h/%s\n' "$m1" | zig run -fstrip --cache-dir "$scratch/tools-cache/.zig-cache/tools" \
+    "$tools/zig-cache-pairs.zig" -- "$scratch/unreadable" > "$scratch/unreadable.tsv" 2> /dev/null; then
+    fail "the pairing tool paired a manifest it could not read: $(< "$scratch/unreadable.tsv")"
+fi
+begin unreadable-manifest
+track
+use h/$m1 o/$f1/test
+chmod 000 .zig-cache/h/$m2
+if cat -- .zig-cache/h/$m2 > /dev/null 2>&1; then
+    printf 'This user reads a file without read permission; cannot test a manifest read failure.\n' >&2
+    exit 1
+fi
+run admit || fail "admit failed on a manifest read failure"
+expect_saved false
+expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
+expect_present h/$m4 o/$f4/test
+chmod 644 .zig-cache/h/$m2
+
 scenario=host-cpu
 flags=(fpu cx8 cmov mmx fxsr sse sse2 lm pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2
     bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
