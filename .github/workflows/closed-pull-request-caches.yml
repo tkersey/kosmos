@@ -29,7 +29,10 @@ jobs:
             done
           deleted=$(jq -rs '"\(length) (\(map(.size_in_bytes) | add // 0) bytes)"' \
             "$RUNNER_TEMP/closed.json")
-          remaining=$(ref_caches | jq -rs 'length')
-          echo "$CACHE_REF caches: deleted $deleted, remaining $remaining" |
+          ref_caches > "$RUNNER_TEMP/remaining.json"
+          read -r undeleted later < <(jq -rn --slurpfile listed "$RUNNER_TEMP/closed.json" \
+            --slurpfile now "$RUNNER_TEMP/remaining.json" \
+            '[$now[].id] as $n | ($n - [$listed[].id]) as $new | "\($n - $new | length) \($new | length)"')
+          echo "$CACHE_REF caches: deleted $deleted; $undeleted listed entries remain; $later saved after the listing, for the budget job to delete" |
             tee -a "$GITHUB_STEP_SUMMARY"
-          test "$remaining" -eq 0
+          test "$undeleted" -eq 0

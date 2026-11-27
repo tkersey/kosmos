@@ -263,15 +263,20 @@ compiler caches but never save them.
 Every run except a fork's ends with `Keep compiler caches within budget`, also after a
 failure or cancellation. It waits for TigerStyle and every lane, so every job that can
 save a cache in that run has finished before it lists the caches. It checks out
-nothing, runs on a GitHub-hosted runner with only `actions: write`, and decides every
-deletion in one jq program. An entry is superseded when a later entry of its ref,
+nothing, runs on a GitHub-hosted runner with only `actions: write` and
+`pull-requests: read`, and decides every deletion in one jq program. It first deletes
+every entry of a pull request's merge ref whose pull request is not open, its own ref's
+included. It lists the caches before the open pull requests, so every pull request with
+a listed entry was opened before that listing, and one missing from it has been
+closed. An entry is superseded when a later entry of its ref,
 ordered by run id and attempt, has the same lane and key prefix or a different key
 prefix (host build target, CPU, Zig version or cache schema); GitHub assigns run ids in
 creation order. The job deletes the superseded entries of every ref except main, and
 main's when it runs for main. A lane restores before it saves, so no run still needs an
 entry its lane has superseded. The job then keeps refs other than main within
 B = 10 GB − M − 2R, where M = max(S, main's compiler caches) + main's other caches.
-It never deletes main's entries or its own ref's. It deletes first the entries of refs
+It never deletes main's entries, nor its own ref's unless that ref's pull request is
+closed. It deletes first the entries of refs
 whose newest run succeeded or is not among this workflow's latest 100 runs, then those
 of refs whose newest run failed, was cancelled or is still running; within each group,
 least recently used first.
@@ -311,7 +316,11 @@ older awaiting set's 14 entries. A ref midway through saving holds both sets onl
 the next budget job, which deletes the entries its new saves superseded. Closing a pull
 request runs `Closed pull request caches` from the base branch through
 `pull_request_target`. It checks out nothing, runs on a GitHub-hosted runner with only
-`actions: write`, and deletes every cache of that pull request's merge ref.
+`actions: write`, deletes every cache it lists for that pull request's merge ref and
+fails only if one of them remains. Closing a pull request does not cancel its running
+workflow, whose lanes can save after that listing; that run's own budget job waits for
+every lane, lists those saves, finds the pull request closed and deletes them, and if
+it does not, the next budget job of any ref does.
 Hosted lanes pass `-Dhost-target=x86_64-linux.5.10...7.2-gnu.2.31` and
 `-Dhost-cpu=x86_64_v3+sha`. The host target names its architecture, Linux
 5.10–7.2 range, ABI and glibc 2.31, so nothing in it comes from the runner's CPU,
