@@ -376,12 +376,20 @@ the start of the run attempt, is the only pass/fail time limit. Each lane's job 
 after 600 s already fails its attempt's gate, and the gate passes a later attempt only
 when that attempt ran every lane itself, so the limit decides no attempt's outcome and
 leaves passing attempts unchanged. Cache work counts against the gate like any other
-step, by the limits at most 245 s before a lane's checks and 91 s after them, 336 s in
-all. Measured, it took 10.2 s per lane at the median of those 84 lane runs and 16.9 s
-at most, when most lanes restored the pairing tool's build; built cold in every job that
-saves, the tool adds 2.5–4.3 s to each. Cache work can push a lane past its 20-minute
-limit only when the lane's other steps take more than 1,200 − 245 − 91 = 864 s, so only
-in a lane that fails the gate without it.
+step. Its steps take, by their limits, at most 245 s before a lane's checks and 91 s
+after them, 336 s in all; measured, they took 10.2 s per lane at the median of those 84
+lane runs and 16.9 s at most, when most lanes restored the pairing tool's build, and
+built cold in every job that saves, the tool adds 2.5–4.3 s to each. One failure also
+costs compilation: when `unstage` skips, fails or is stopped before it has returned the
+whole tree, the checks compile what it did not return from nothing, at most a cold
+compilation of everything the lane builds, which no limit bounds and which is shorter
+than the whole cold lane (a cold sessions lane took 548 s in run 45946785256). A
+restore that `track` discards adds none, since the lane then compiles as it would
+without a cache.
+The time cache work adds to a lane is therefore at most 336 s, plus, after such an
+`unstage`, that compilation. The cache steps can push a lane past its 20-minute limit
+only when the lane's other steps, that compilation included, take more than
+1,200 − 245 − 91 = 864 s, so only in a lane that fails the gate without them.
 Every lane that finishes compiling therefore leaves its compiles for the full rerun,
 unless a cache step fails or the tree cannot be saved (no access times, an entry neither
 a file nor a directory, no pairing tool, nothing used, over the ceiling): the stage and
@@ -516,9 +524,14 @@ re-run all jobs, when any `Qualify / ` job started before its attempt or none is
 otherwise it checks elapsed time from the attempt's start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed. The 600-second gate is the
-only pass/fail time gate: a cache step's own limit and `stop()`'s deadline end only
-cache work, never qualification: after either fires, no later step in that job saves a
-compiler cache, and the compiler cache retention job runs outside both gates. A truly
+only pass/fail time gate; no cache limit decides qualification. The 20 s limits
+`tools/zig-cache.sh` sets on its own steps and `stop()`'s deadline end only cache work:
+after either fires, no later step in that job saves a compiler cache. The one-minute
+timeouts of the restore and of the compile save end only that action, not the job's
+later saves: after a restore timeout `track` discards what was extracted and the job
+compiles and saves as after a miss, and after a compile-save timeout `unstage` stops
+the leftover `tar` and the admission and the checked save go on. The compiler cache
+retention job runs outside both gates. A truly
 cold run on a slow runner can exceed 600 seconds; recover with a full rerun of the whole
 workflow, since a rerun of only its failed jobs fails the gate. Before this check, such a
 rerun re-ran only the failed gate whenever every lane had succeeded, and the gate measured
