@@ -113,7 +113,7 @@ fn hostTarget(b: *std.Build) std.Build.ResolvedTarget {
     const arch_os_abi = b.option(
         []const u8,
         "host-target",
-        "Explicit arch-os-abi for host tools and native tests (default: native)",
+        "Explicit arch-os-abi for host tools and native tests (default: the build host)",
     );
     const cpu = b.option(
         []const u8,

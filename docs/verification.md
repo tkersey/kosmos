@@ -172,8 +172,9 @@ for `baseline` and misses the `x86_64_v3+sha` caches instead of failing its test
 reading the flags fails, the lane warns and builds for `baseline`; a missing CPU model
 line only warns.
 SHA extensions keep artifact digests on the hardware path. Every cache key is
-`kosmos-native-v6-<os>-<arch>-0.17.1-<host target>-<cpu>/<lane>/<lock>-<run number>-<attempt>-<phase>`,
-and every restore prefix names the same host target and CPU, so host artifacts hit on
+`kosmos-native-v6-<os>-<arch>-0.17.1-<host target>-<cpu>/<lane>/<lock>-<run id>-<attempt>-<phase>`,
+where 6 is the workflow's `KOSMOS_CACHE_VERSION`, and every restore prefix names the
+same host target and CPU, so host artifacts hit on
 every runner model that chooses the same CPU. The consumer lane builds the extracted
 package for the same target and CPU, from a fixed scratch path, with the lane's own
 global cache, and `test/native_consumer/build.zig` passes `-Dhost-target` and
@@ -368,9 +369,12 @@ Such saves fall outside the bound below.
 same-repository pull request, also after a failure or cancellation. It checks out
 nothing and runs on a GitHub-hosted runner with only `actions: write` and
 `pull-requests: read`. For each host target, CPU and lane on the run's ref it keeps the
-entry with the highest run number, attempt and phase (`checked` after `compiled`), read
-from the key rather than from the creation time, so an older run that saves last never
-displaces a newer run's entry, and deletes the others and every older key layout. If
+entry with the highest run id, attempt and phase (`checked` after `compiled`), read from
+the key rather than from the creation time, so an older run that saves last never
+displaces a newer run's entry; run ids, unlike run numbers, never restart. It deletes the
+others and every entry of an older key version (`kosmos-native-v<N>-` with N below the
+workflow's `KOSMOS_CACHE_VERSION`, or with no version); a newer version's entries, saved
+by a later workflow on the same ref, stay. If
 the ref's pull request has closed, it deletes every cache of the ref. Closing a pull
 request runs `Closed pull request caches` from the base branch through
 `pull_request_target`, also without checkout and with only `actions: write`; it deletes

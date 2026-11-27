@@ -896,9 +896,10 @@ grep -E '^ +(key: )?\$\{\{ env\.KOSMOS_CACHE_PREFIX \}\}/' "$workflow" > "$scrat
 grep -cE '^ +key: ' "$workflow" > "$scratch/key-count"
 (( $(wc -l < "$scratch/keys.txt") == 8 && $(< "$scratch/key-count") == 3 )) ||
     fail "not every compiler cache key starts with KOSMOS_CACHE_PREFIX"
-(( $(grep -Fc -- "-\${{ github.run_number }}-\${{ github.run_attempt }}-" "$scratch/keys.txt") == 3 )) ||
-    fail "a saved key lacks the run number and attempt"
-if ! grep -Eq 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0\.17\.1-%s-%s' "$workflow" ||
+(( $(grep -Fc -- "-\${{ github.run_id }}-\${{ github.run_attempt }}-" "$scratch/keys.txt") == 3 )) ||
+    fail "a saved key lacks the run id and attempt"
+if ! grep -Fq 'KOSMOS_CACHE_PREFIX=kosmos-native-v%s-%s-%s-0.17.1-%s-%s' "$workflow" ||
+    ! grep -Fq "\"\$KOSMOS_CACHE_VERSION\" \\" "$workflow" ||
     ! grep -Fq "\"\$RUNNER_OS\" \"\$RUNNER_ARCH\" \"\$KOSMOS_HOST_TARGET\" \"\$cpu\"" "$workflow"; then
     fail "the key prefix does not name the host target and the chosen CPU"
 fi
@@ -949,26 +950,33 @@ awk '
     active && /^            / { sub(/^            /, ""); print; next }
     active { exit }
 ' "$workflow" > "$scratch/superseded.jq"
-v3=kosmos-native-v6-Linux-X64-0.17.1-x86_64-linux.5.10...7.2-gnu.2.31-x86_64_v3+sha
-v1=kosmos-native-v6-Linux-X64-0.17.1-x86_64-linux.5.10...7.2-gnu.2.31-baseline
+version=$(awk '/^env:$/ { active = 1; next } /^[^ ]/ { active = 0 } active && /^  KOSMOS_CACHE_VERSION: / { print $2 }' \
+    "$workflow")
+[[ "$version" =~ ^[0-9]+$ ]] || fail "the workflow names no compiler cache key version: $version"
+layout=Linux-X64-0.17.1-x86_64-linux.5.10...7.2-gnu.2.31
+v3=kosmos-native-v$version-$layout-x86_64_v3+sha
+v1=kosmos-native-v$version-$layout-baseline
 cat > "$scratch/caches.json" << EOF
 [
-  {"id": 1, "size_in_bytes": 1, "created_at": "2026-11-27T10:00:00Z", "key": "$v3/sessions/aa-100-1-checked"},
-  {"id": 2, "size_in_bytes": 1, "created_at": "2026-11-27T11:00:00Z", "key": "$v1/sessions/aa-99-1-checked"},
-  {"id": 3, "size_in_bytes": 1, "created_at": "2026-11-27T12:00:00Z", "key": "$v3/sessions/aa-99-1-checked"},
-  {"id": 4, "size_in_bytes": 1, "created_at": "2026-11-27T09:59:00Z", "key": "$v3/sessions/aa-100-1-compiled"},
-  {"id": 5, "size_in_bytes": 1, "created_at": "2026-11-27T08:00:00Z", "key": "$v3/native/bb-98-2-compiled"},
-  {"id": 6, "size_in_bytes": 1, "created_at": "2026-11-27T13:00:00Z", "key": "$v3/native/aa-98-1-checked"},
-  {"id": 7, "size_in_bytes": 1, "created_at": "2026-11-27T14:00:00Z", "key": "kosmos-native-v5-Linux-X64/sessions/aa-1-1"},
-  {"id": 8, "size_in_bytes": 1, "created_at": "2026-11-27T15:00:00Z", "key": "setup-zig-0.17.1"}
+  {"id": 1, "size_in_bytes": 1, "created_at": "2026-11-27T10:00:00Z", "key": "$v3/sessions/aa-46010143728-1-checked"},
+  {"id": 2, "size_in_bytes": 1, "created_at": "2026-11-27T11:00:00Z", "key": "$v1/sessions/aa-9999999999-1-checked"},
+  {"id": 3, "size_in_bytes": 1, "created_at": "2026-11-27T12:00:00Z", "key": "$v3/sessions/aa-9999999999-1-checked"},
+  {"id": 4, "size_in_bytes": 1, "created_at": "2026-11-27T09:59:00Z", "key": "$v3/sessions/aa-46010143728-1-compiled"},
+  {"id": 5, "size_in_bytes": 1, "created_at": "2026-11-27T08:00:00Z", "key": "$v3/native/bb-46010143700-2-compiled"},
+  {"id": 6, "size_in_bytes": 1, "created_at": "2026-11-27T13:00:00Z", "key": "$v3/native/aa-46010143700-1-checked"},
+  {"id": 7, "size_in_bytes": 1, "created_at": "2026-11-27T14:00:00Z", "key": "kosmos-native-v$(( version - 1 ))-Linux-X64/sessions/aa-1-1"},
+  {"id": 8, "size_in_bytes": 1, "created_at": "2026-11-27T15:00:00Z", "key": "setup-zig-0.17.1"},
+  {"id": 9, "size_in_bytes": 1, "created_at": "2026-11-27T07:00:00Z", "key": "kosmos-native-v$(( version + 1 ))-$layout-x86_64_v3+sha/sessions/aa-1-1-checked"},
+  {"id": 10, "size_in_bytes": 1, "created_at": "2026-11-27T16:00:00Z", "key": "kosmos-native-Linux-X64-0.17.1-sessions-aa-46010143728-1"}
 ]
 EOF
 superseded() {
-    jq -r '.[]' "$scratch/caches.json" | jq -rs --arg state "$1" -f "$scratch/superseded.jq" | cut -f1 |
-        LC_ALL=C sort | tr '\n' ' '
+    jq -r '.[]' "$scratch/caches.json" |
+        jq -rs --arg state "$1" --argjson version "$version" -f "$scratch/superseded.jq" | cut -f1 |
+        sort -n | tr '\n' ' '
 }
-[[ "$(superseded open)" == "3 4 6 7 " ]] || fail "open retention deleted: $(superseded open)"
-[[ "$(superseded closed)" == "1 2 3 4 5 6 7 8 " ]] || fail "closed retention deleted: $(superseded closed)"
+[[ "$(superseded open)" == "3 4 6 7 10 " ]] || fail "open retention deleted: $(superseded open)"
+[[ "$(superseded closed)" == "1 2 3 4 5 6 7 8 9 10 " ]] || fail "closed retention deleted: $(superseded closed)"
 
 scenario=retention-failure
 run_block() {
@@ -993,7 +1001,7 @@ printf '%s\n' "\$*" >> "\$GH_LOG"
 case "\$*" in
     *pulls/*) printf 'open\n' ;;
     *DELETE*) ;;
-    *) printf '{"id": 5, "size_in_bytes": 1, "key": "$v3/native/bb-98-2-compiled"}\n{"id": 6, "size_in_bytes": 1, "key": "$v3/native/aa-98-1-checked"}\n' ;;
+    *) printf '{"id": 5, "size_in_bytes": 1, "key": "$v3/native/bb-46010143700-2-compiled"}\n{"id": 6, "size_in_bytes": 1, "key": "$v3/native/aa-46010143700-1-checked"}\n' ;;
 esac
 EOF
 printf '#!/usr/bin/env bash\n' > "$scratch/gh-stuck/sleep"
@@ -1001,6 +1009,7 @@ chmod +x -- "$scratch/gh-down/gh" "$scratch/gh-stuck/gh" "$scratch/gh-stuck/slee
 retain() {
     : > "$scratch/gh.log"
     env PATH="$scratch/$1:$PATH" GH_LOG="$scratch/gh.log" GH_REPO=o/r CACHE_REF=refs/pull/93/merge \
+        KOSMOS_CACHE_VERSION="$version" \
         PULL_REQUEST="$2" SUPERSEDED="$(< "$scratch/superseded.jq")" DELETED="$(< "$scratch/deleted.jq")" \
         RUNNER_TEMP="$scratch/retain-temp" GITHUB_STEP_SUMMARY="$scratch/summary" \
         bash -e "$scratch/$3" > "$scratch/retain.out" 2>&1 || fail "$3 with $1 and pull request '$2' exited $?"

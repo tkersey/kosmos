@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
         .@"host-target" = b.option(
             []const u8,
             "host-target",
-            "Explicit arch-os-abi for the dependency's host tools (default: native)",
+            "Explicit arch-os-abi for the dependency's host tools (default: the build host)",
         ),
         .@"host-cpu" = b.option(
             []const u8,

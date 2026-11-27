@@ -7,6 +7,8 @@ on:
 permissions:
   contents: read
   actions: read
+env:
+  KOSMOS_CACHE_VERSION: 6
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -84,7 +86,7 @@ jobs:
             cpu=baseline
           fi
           printf 'KOSMOS_HOST_CPU=%s\n' "$cpu" | tee -a "$GITHUB_ENV"
-          printf 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0.17.1-%s-%s\n' \
+          printf 'KOSMOS_CACHE_PREFIX=kosmos-native-v%s-%s-%s-0.17.1-%s-%s\n' "$KOSMOS_CACHE_VERSION" \
             "$RUNNER_OS" "$RUNNER_ARCH" "$KOSMOS_HOST_TARGET" "$cpu" | tee -a "$GITHUB_ENV"
       - name: Restore complete compiler cache
         id: cache
@@ -93,7 +95,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache.saved
-          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_number }}-${{ github.run_attempt }}-checked
+          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-checked
           restore-keys: |
             ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
             ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane == 'native-recovery' && 'native-driver' || matrix.lane == 'native-driver' && 'native' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-
@@ -205,7 +207,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache.saved
-          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_number }}-${{ github.run_attempt }}-compiled
+          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-compiled
       - name: Return what the compilation did not use for the checks
         if: env.KOSMOS_CACHE_SAVE == 'true'
         continue-on-error: true
@@ -306,7 +308,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache.saved
-          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_number }}-${{ github.run_attempt }}-checked
+          key: ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-checked
   runtime-complete:
     name: Runtime qualification budget
     needs: qualify
@@ -360,9 +362,10 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
           SUPERSEDED: |
             if $state != "open" then .
-            else map(select(.key | startswith("kosmos-native-")))
-              | map(select(.key | startswith("kosmos-native-v6-") | not))
-                + (map(select(.key | startswith("kosmos-native-v6-")))
+            else map(select(.key | startswith("kosmos-native-"))
+                | .version = ((.key | capture("^kosmos-native-v(?<n>[0-9]+)-").n // "0") | tonumber))
+              | map(select(.version < $version))
+                + (map(select(.version == $version))
                   | group_by(.key | split("/")[0:2])
                   | map(sort_by(.key | split("/")[2] | split("-")
                       | [(.[1] | tonumber), (.[2] | tonumber), .[3] == "checked"]) | .[:-1])
@@ -380,7 +383,7 @@ jobs:
           if [ -n "$PULL_REQUEST" ]; then
             state=$(gh api "repos/$GH_REPO/pulls/$PULL_REQUEST" --jq .state)
           fi
-          ref_caches | jq -rs --arg state "$state" "$SUPERSEDED" > "$RUNNER_TEMP/superseded.tsv"
+          ref_caches | jq -rs --arg state "$state" --argjson version "$KOSMOS_CACHE_VERSION" "$SUPERSEDED" > "$RUNNER_TEMP/superseded.tsv"
           while IFS=$'\t' read -r id bytes key; do
             echo "Deleting $key ($bytes bytes)"
             gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" --silent ||
