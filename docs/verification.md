@@ -504,9 +504,9 @@ re-run all jobs, when any `Qualify / ` job started before its attempt or none is
 otherwise it checks elapsed time from the attempt's start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed. The 600-second gate is the
-only pass/fail time gate; no cache step checks the time, and the compiler cache
-retention job runs outside both gates. A truly cold
-run on a slow runner can exceed 600 seconds; recover with a full rerun of the whole
+only pass/fail time gate: a cache step's own limit and `stop()`'s deadline end only that
+step's cache work, and the compiler cache retention job runs outside both gates. A truly
+cold run on a slow runner can exceed 600 seconds; recover with a full rerun of the whole
 workflow, since a rerun of only its failed jobs fails the gate. Before this check, such a
 rerun re-ran only the failed gate whenever every lane had succeeded, and the gate measured
 seconds from the new attempt's start; that let a run pass without any attempt qualifying
