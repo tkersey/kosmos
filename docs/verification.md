@@ -420,16 +420,35 @@ deletion; and the step carries `continue-on-error: true` and a four-minute timeo
 a hang is stopped and tolerated. A retention succeeds when it finishes without a
 warning. `Closed pull request caches` reports as deleted only the entries its last
 listing no longer holds.
-After a successful retention, a ref holds at most one entry per CPU and lane, so at most
-C sets of 14 entries, where C ≤ 2 is the number of CPU classes its runs chose; forks and
-branches other than `main` hold none. Each run attempt whose saves no successful
-retention has yet covered adds at most two entries per lane (its compile and job saves);
-every attempt saves under its own keys and has its own retention job, and an attempt
-whose retention is still to finish, stopped with a warning, timed out or was cancelled,
-keeps them until a later attempt's retention on the same ref succeeds. A closed pull
+Retention never deletes a newer version's entries, so a ref's entries are counted per
+cache version. A successful retention by a run of version v leaves the ref no entry of a
+version below v and at most one entry per key prefix and lane of v, and leaves each newer
+version as that version's own last successful retention on the ref left it. Beside the
+saves no such retention has covered (counted below), a ref therefore holds of each cache
+version at most the set its last successful retention of that version kept: one entry
+per key prefix and lane, so C sets of 14 entries, where C is the number of key prefixes
+of one version. Those are the CPU classes its runs chose,
+C ≤ 2, while the workflow fixes the OS, architecture, Zig version and host target in the
+prefix; changing any of them without raising `KOSMOS_CACHE_VERSION` adds prefixes to C.
+A ref holds the sets of more than one version only after a run of an older version
+retains after a newer version's retention on that ref: a full rerun of a run from before
+a version bump, which runs that run's own workflow, or an older run that finishes last.
+Such an older-version set stays only until the next successful retention of a newer
+version on that ref deletes it; on `main`, every push runs the newest version. Forks
+and branches other than `main` hold none. Each run attempt whose saves no successful
+retention of their version or a newer one on their ref has yet covered adds at most two
+entries per lane (its compile and job saves); every attempt saves under its own keys and
+has its own retention job, and an attempt whose retention is still to finish, stopped
+with a warning, timed out or was cancelled, keeps them until a later retention of the
+same or a newer version on the same ref succeeds. A closed pull
 request's ref holds none once `Closed pull request caches` or a later retention on it
 succeeds; when that cleanup stops with a warning, times out or is cancelled and no run
 follows, its entries stay until GitHub removes caches unused for seven days.
+These counts hold for the entries of this workflow and its later versions. A full rerun
+of a run from before it, possible for 30 days after that run, saves under that run's
+workflow, which on `main` saves `kosmos-native-v2-` entries of up to 4 GiB per lane and
+runs no retention; such entries fall outside the bound until a successful retention on
+their ref deletes them as an older version.
 The code enforces those counts, at most six jobs' build runners per entry, and the
 1,000,000,000-byte ceiling on each entry's tree (each archive GitHub counted for this
 pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per
@@ -440,14 +459,20 @@ compressed for 14 entries with one build runner per global cache, and a build ru
 2,591,504 bytes compressed. The history keeps at most five more build runners in each
 of a set's 15 global caches, so S = 1,008,556,734 + 75 × 2,591,504 = 1,202,919,534
 bytes. With P the same-repository pull requests whose ref holds caches (every open one,
-and a closed one whose cleanup has not succeeded, for up to seven days) and F the run
-attempts whose saves no successful retention has covered, the compiler caches total at
-most ((1 + P) × C + 2F) × S, beside `main`'s Zig tarball saved by the setup action
-(57,413,921 bytes). GitHub evicts caches only above 10 GB, so pull request caches can
-cause `main`'s to be evicted only if that total plus the tarball exceeds 10 GB; at the
-measured sizes the total stays below 10,000,000,000 bytes while (1 + P) × C + 2F ≤ 8:
-with every runner choosing `x86_64_v3+sha` (C = 1, as in every run so far), while
-P + 2F ≤ 7; with both classes (C = 2), while P + F ≤ 3.
+and a closed one whose cleanup has not succeeded, for up to seven days), O the
+older-version sets (summed over refs, the cache versions whose retained set a ref holds
+besides its newest such version) and F the run attempts whose saves no successful
+retention of their version or a newer one on their ref has covered, the compiler caches
+total at most ((1 + P + O) × C + 2F) × S, beside `main`'s Zig tarball saved by the setup
+action (57,413,921 bytes). GitHub evicts caches only above 10 GB, so pull request caches
+can cause `main`'s to be evicted only if that total plus the tarball exceeds 10 GB; at
+the measured sizes the total stays below 10,000,000,000 bytes while
+(1 + P + O) × C + 2F ≤ 8: with every runner choosing `x86_64_v3+sha` (C = 1, as in every
+run so far), while P + O + 2F ≤ 7; with both classes (C = 2), while P + O + F ≤ 3. O is 0
+while every run of this workflow carries version 6, as now. After a version bump its
+worst case counts, on each ref, every older version of this workflow whose runs on that
+ref can still be re-run, each only until that ref's next successful retention of a newer
+version.
 A run that fails the gate or is cancelled keeps, for each lane, its compile save if the
 lane finished compiling and its job save if the lane succeeded; the full rerun restores
 them.
