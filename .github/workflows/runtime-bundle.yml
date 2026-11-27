@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, recovery-specialization, publication, source, source-second, portable, browser, consumer]
+        lane: [sessions, session-ownership, source-regressions, native, native-driver, native-recovery, specialization, recovery-specialization, publication, source, source-second, portable, browser, consumer, direct, lockstep, lockstep-second]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -249,7 +249,7 @@ jobs:
             --system "$scratch/system" --cache-dir "$PWD/.zig-cache/native-consumer" \
             -Doptimize=safe -Dimage="$PWD/zig-out/native-consumer.bpi3" --summary all
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second'
+        if: matrix.lane == 'portable' || matrix.lane == 'browser' || matrix.lane == 'source' || matrix.lane == 'source-second' || startsWith(matrix.lane, 'lockstep')
         with:
           node-version: '26.9.0'
       - name: Install only the browser boundary's tools
@@ -275,6 +275,18 @@ jobs:
           group=first
           if [ "${{ matrix.lane }}" = source-second ]; then group=second; fi
           zig build check-source -Dsource-group="$group" -Dfixture-profile=prepared_only \
+            -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Check the direct realization against the core with pinned fuzz seeds
+        if: matrix.lane == 'direct'
+        run: >-
+          zig build check-direct
+          -Doptimize=safe -Dpackaged-runtime=true --summary all
+      - name: Qualify every source example and native/WASM agreement in lockstep
+        if: startsWith(matrix.lane, 'lockstep')
+        run: |
+          group=first
+          if [ "${{ matrix.lane }}" = lockstep-second ]; then group=second; fi
+          zig build check-lockstep-portable -Dsource-group="$group" \
             -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'

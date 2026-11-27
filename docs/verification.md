@@ -28,6 +28,43 @@ The native roots preserve the evaluator and language contracts:
 The aggregate `check` includes the entire `check-native` root, including
 `check-publication`.
 
+The direct realization has its own required roots. `check-lockstep` composes
+both:
+
+- `check-direct`: the 11 economy workloads in lockstep at every cut for
+  unbounded, 256 and quantum-one drives, restoring both realizations from each
+  admitted cut; identical resident transcripts and receipts for the core, direct
+  and lockstep realizations; certification of a direct segment on the core, a
+  fenced mismatch and recovery from the last certified cut; fallback to the core
+  at a guest cut; linear decoding of encoded collection elements; and 256
+  pinned fuzz seeds.
+- `check-lockstep-portable`: `source_agreement.mjs` and `kernel.mjs` with the
+  lockstep realization in both the native peer and the WASM kernel. Every PST3
+  restore, quantum-one frontier, cancellation frontier, request, reply,
+  native/WASM transfer and switch case in those roots therefore also compares
+  the core and the direct engine. `-Dsource-group` partitions the source fixtures
+  as for `check-source`.
+
+The lockstep realization compares, at every published cut, rejection names,
+guest work, the complete admitted canonical PST3, the outcome and the pending
+request, and fails with `RealizationDiverged`. The fuzz generator composes
+checked arithmetic, conditionals, bounded recursion, helper calls, external
+requests, yields, deep linear and multi-shot handlers, clause disposal,
+protected bodies with effectful cleanup, product unpacking, distinct linear
+computations held across a request, and failures. Its driver draws quanta
+(including zero, one and unbounded), replies, malformed and misbound replies,
+cancellations at progressed, yielded and requested cuts followed by quantum-one
+unwinding, and restores. Seeds 1 through 256 are pinned.
+
+Three deliberate direct-engine mutations were each caught by `check-direct`
+before being reverted: a deep `resume_value` that skipped handler reattachment
+(economy workloads and fuzzing), a reversed disposal order of a discarded
+frame's owned values (fuzzing), and an off-by-one field binding in
+`unpack_product` (fuzzing). The disposal-order mutation was not observable in
+the earlier corpus, where discarded frames held at most one distinguishable
+owned value; the generator's distinct held computations and quantum-one
+unwinding make that order part of the compared canonical cuts.
+
 The semantic suites share setup in `src/semantic/test_support.zig`, which has
 no test declarations. Each suite retains its own cases and expected results.
 Behavioral, lifecycle, custody and restore regressions in `stable_source.zig`,

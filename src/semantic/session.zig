@@ -16,14 +16,9 @@ pub const AllocationBudget = @import("../interpreter_v2/allocation_budget.zig").
 pub const invocation = @import("../interpreter_v2/invocation.zig");
 pub const resident_types = @import("../interpreter_v2/resident.zig");
 pub const Resident = resident_types.Resident;
-pub const Observation = union(enum) {
-    progressed,
-    yielded,
-    requested: struct { effect: data.program.Id, payload: g.Value },
-    completed: g.Value,
-    failed: g.Value,
-    cancelled: data.invocation.Reason,
-};
+const runtime_types = @import("../interpreter_v2/runtime_types.zig");
+pub const Observation = runtime_types.Observation;
+pub const Realization = runtime_types.Realization;
 
 fn Errors(comptime function: anytype) type {
     return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
@@ -41,10 +36,20 @@ pub const Prepared = struct {
     pub const Guest = GuestPrepared;
     guest: GuestPrepared,
     runtime: artifact.Admitted,
+    realization: Realization = runtime_types.default_realization,
     pub fn init(a: std.mem.Allocator, image: []const u8) Error!Prepared {
+        return initRealization(a, image, runtime_types.default_realization);
+    }
+    pub fn initRealization(
+        a: std.mem.Allocator,
+        image: []const u8,
+        selected: Realization,
+    ) Error!Prepared {
         var runtime = try builtin(a);
         defer runtime.deinit();
-        return initWithRuntime(a, image, &runtime);
+        var prepared = try initWithRuntime(a, image, &runtime);
+        prepared.realization = selected;
+        return prepared;
     }
     pub fn initWithRuntime(
         a: std.mem.Allocator,
@@ -81,7 +86,7 @@ pub const Prepared = struct {
             &identity,
             &guest.core.?.admitted().identity(),
         )) return error.GuestIdentityMismatch;
-        return .{ .guest = guest, .runtime = runtime };
+        return .{ .guest = guest, .runtime = runtime, .realization = .core };
     }
     pub fn acquire(self: *const Prepared) Error!*@import("../interpreter_v2/prepared.zig").Core {
         return self.guest.acquire();
@@ -89,7 +94,11 @@ pub const Prepared = struct {
     pub fn clone(self: *const Prepared) Error!Prepared {
         var guest = try self.guest.clone();
         errdefer guest.deinit();
-        return .{ .guest = guest, .runtime = try self.runtime.clone() };
+        return .{
+            .guest = guest,
+            .runtime = try self.runtime.clone(),
+            .realization = self.realization,
+        };
     }
     pub fn deinit(self: *Prepared) void {
         self.guest.deinit();

@@ -667,3 +667,85 @@ Reproduce the comparison in two separate processes on the same host.
 zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large
 zig build bench-semantics -Doptimize=safe -Deconomy-workload=recovery_scalar_chain_large -- --opt-in-first
 ```
+
+## Direct realization, 2026-11-25
+
+Measured on an Apple M2 Pro, macOS 27.3, exact Zig 0.17.1 and Node 26.13.1, on
+the candidate that adds `direct/`. The host was shared (load average 6–7).
+Every row below compared outputs: bench rows check each cut against the
+recorded trace, and paired rows require identical transcripts.
+
+`zig build bench-semantics -Doptimize=safe` adds the `direct-realization` row,
+which runs the in-tree direct engine against the same recorded native trace,
+canonical checkpoints, outcomes and guest work as the other rows. Execution
+medians in milliseconds (direct: three observations; generic and specialized:
+nine):
+
+| Workload | Direct | Generic base | Specialized base | Generic / direct |
+| --- | ---: | ---: | ---: | ---: |
+| scalar | 0.003 | 0.838 | 1.237 | 242 |
+| scalar_chain | 0.023 | 21.262 | 22.217 | 941 |
+| scalar_chain_large | 0.065 | 91.438 | 98.773 | 1,403 |
+| dynamic_loop | 0.031 | 51.515 | 43.638 | 1,639 |
+| structured | 0.006 | 1.782 | 2.007 | 309 |
+| repeated_calls | 0.069 | 81.622 | 74.492 | 1,187 |
+| higher_order | 0.009 | 1.412 | 1.738 | 165 |
+| handlers | 0.047 | 38.221 | 39.217 | 808 |
+| multi_shot | 0.144 | 14.799 | 18.944 | 102 |
+| long_cleanup | 0.787 | 221.278 | 587.856 | 281 |
+| retained_bytes | 0.026 | 3.800 | 4.275 | 146 |
+
+Reply and checkpoint paths admit the complete canonical state, as the core's
+guest cut does, which is why request-heavy rows gain less.
+`zig build bench-direct-wasm -Doptimize=safe` drives the same workloads through
+two shipped-mode (`small`) ABI 3 kernels built with `-Dkernel-realization=core`
+and `direct`, at quantum 256 with a checkpoint per cut. Medians of five drives:
+
+| Workload (sample 0/1/2) | Core ms | Direct ms | Core / direct |
+| --- | --- | --- | --- |
+| scalar | 2.67 / 2.34 / 2.24 | 0.047 / 0.040 / 0.041 | 54–58 |
+| scalar_chain_large | 364.7 / 364.4 / 363.7 | 0.229 / 0.222 / 0.231 | 1,577–1,644 |
+| dynamic_loop | 66.6 / 129.7 / 197.9 | 0.089 / 0.124 / 0.201 | 748–1,043 |
+| repeated_calls | 99.0 / 263.8 / 507.1 | 0.125 / 0.225 / 0.384 | 790–1,322 |
+| handlers | 127.9 / 126.9 / 125.9 | 0.133 / 0.126 / 0.127 | 959–1,008 |
+| multi_shot | 61.6 / 60.5 / 62.5 | 0.576 / 0.487 / 0.537 | 107–124 |
+| long_cleanup | 300.0 / 1088.1 / 2606.5 | 0.869 / 1.678 / 2.592 | 345–1,005 |
+| retained_bytes | 9.07 / 9.05 / 10.99 | 0.048 / 0.045 / 0.043 | 190–254 |
+
+The remaining rows are in the raw output. Raw outputs: `bench-semantics`
+SHA-256 `6d80d0b0ed093b6047dae53bf499fe8f949bc3166061320616f583905593e09b`,
+`bench-direct-wasm` SHA-256
+`9cb0af96a7aef9a18479d69079d127f01e5fa10532089da75b460b3ee6238259`.
+
+### PAREDROS W6 empty-check step
+
+The PAREDROS W6 replay (`tools/bench/kosmos` with a realization argument) restores
+the captured steady-state empty-check PST3 and drives it to completion, answering
+its three requests with the captured ERS3 replies: 2,320 guest transitions in 11
+q256 segments. Drive time excludes preparation and restore. Ten runs after one
+warm-up; p95 is nearest rank. "Exact" means every checkpoint and the terminal
+outcome is an object PAREDROS stored; core and direct transcripts were identical
+in every batch.
+
+| Configuration | Core median / p95 ms | Direct median / p95 ms | Restore ms core / direct |
+| --- | --- | --- | --- |
+| native ReleaseSafe, SafeAllocator, q256 (production) | 1329.9 / 1357.0 | 1.710 / 1.840 | 3.94 / 0.043 |
+| native ReleaseSafe, SafeAllocator, unbounded | 1214.1 / 1245.9 | 1.267 / 1.299 | 4.04 / 0.039 |
+| native ReleaseFast, libc, q256 | 979.7 / 1012.5 | 0.916 / 1.032 | 3.00 / 0.019 |
+| WASM ReleaseSmall kernel, Node, q256 | 9093.9 / 9416.1 (5 runs) | 2.879 / 3.763 | 6.96 / 0.084 |
+| WASM ReleaseSmall kernel, Node, unbounded | — | 2.472 / 3.623 | — / 0.081 |
+
+Preparation is unchanged (about 37 ms native safe, 78 ms WASM): it still admits
+the guest image and retains the semantic core used for fallback and
+certification.
+
+Value decoding was counted with a measurement-only Horos copy whose
+`readValueMetered` counts calls and decoded bytes. Per W6 drive, the core makes
+488,651 calls decoding 176.7 MB (restore: 33 calls, 1.26 MB); the direct
+realization makes 1,431 calls decoding 129.7 KB (restore: one call, 2.1 KB).
+Without its element offset index the direct realization made 6,522 calls
+decoding 134.8 KB. In a 12-second `sample` profile of the ReleaseSafe direct
+drive, guest transitions (`Session.run`) account for 70% of drive samples and
+checkpoint serialization with admission for 21%; `readValueMetered`, inside
+both, accounts for 20%, about 0.3 ms per step. The core spends 11–15% of a
+1.3-second step there.

@@ -63,7 +63,7 @@ fn encodeReply(request: []const u8, value: []const u8) ![]u8 {
 test "runtime observation failures preserve restored terminal state and retry binding" {
     const image = try makeImage(false);
     defer a.free(image);
-    var prepared = try runtime.Prepared.init(a, image);
+    var prepared = try runtime.Prepared.initRealization(a, image, .core);
     defer prepared.deinit();
     var owner = try runtime.Resident.start(a, &prepared, &std.mem.toBytes(@as(u64, 42)));
     defer finish(&owner);
@@ -366,7 +366,7 @@ test "resident cancellation replaces a cleanup binding and rejects its actual pr
 test "bounded resident reply uses retained binding and consumes control once" {
     const image = try makeImage(false);
     defer a.free(image);
-    var prepared = try runtime.Prepared.init(a, image);
+    var prepared = try runtime.Prepared.initRealization(a, image, .core);
     defer prepared.deinit();
     var owner = try runtime.Resident.start(a, &prepared, &.{ 42, 0, 0, 0, 0, 0, 0, 0 });
     defer if (owner.live) {

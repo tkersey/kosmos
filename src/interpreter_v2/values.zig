@@ -6,6 +6,7 @@ const p = data.program;
 const g = data.graph;
 const Store = @import("store.zig").Store;
 const DataProjection = @import("store.zig").DataProjection;
+const ElementOffsets = @import("element_offsets.zig").ElementOffsets;
 const Error = @import("runtime_types.zig").Error;
 const read = @import("operands.zig").read;
 pub const Parts = struct { tag: p.Id = 0, fields: []const g.Value };
@@ -45,6 +46,19 @@ const Collection = struct {
                     const element: usize = @intCast(collection.element);
                     if (facts.exportable[element] and facts.minimum[element] == 0)
                         break :blk .{ .encoded = &.{} };
+                    if (values.offsets) |index| if (collection.encoded_origin) |origin| {
+                        const key: ElementOffsets.Key = .{
+                            .blob = origin.id,
+                            .offset = collection.byte_offset,
+                            .element = collection.element,
+                        };
+                        const offset = try index.seek(key, encoded, start, values);
+                        byte_offset += offset;
+                        if (start + count == collection.count)
+                            break :blk .{ .encoded = encoded[offset..] };
+                        const end = try index.seek(key, encoded, start + count, values);
+                        break :blk .{ .encoded = encoded[offset..end] };
+                    };
                     var reader: data.wire.Reader = .{ .input = encoded };
                     var remaining = start;
                     while (remaining != 0) : (remaining -= 1)
@@ -165,6 +179,17 @@ pub const Values = struct {
     /// The restricted base retains ordinary recursive data as shared records.
     /// Historical guest execution keeps its existing eager encoding policy.
     aggregate_storage: enum { encoded, structured } = .encoded,
+    offsets: ?*ElementOffsets = null,
+
+    pub fn readElement(self: *Values, element: p.Id, reader: *data.wire.Reader) Error![]const u8 {
+        return data.admission.readValue(
+            self.allocator,
+            self.schemas,
+            try self.schemaFacts(),
+            element,
+            reader,
+        );
+    }
 
     fn schemaFacts(self: *Values) Error!data.admission.SchemaFacts {
         if (self.facts == null) self.facts = try data.admission.schemas(

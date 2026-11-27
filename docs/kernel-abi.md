@@ -116,7 +116,11 @@ persistence remain the caller's responsibility.
 ## Build and verification
 
 `zig build build-kernel` builds the generic ABI 3 kernel without constructing
-Horos's authoring compiler. `zig build build-runtime check-package` builds the
+Horos's authoring compiler. The kernel executes with the default direct
+realization; `-Dkernel-realization=core` selects the semantic core and
+`-Dkernel-realization=lockstep` the qualification oracle. Exports, formats,
+statuses and rejection diagnostics are the same for every realization; physical
+working-memory demand, and so a `needs_capacity` report, depends on it. `zig build build-runtime check-package` builds the
 ordinary standalone JS package and exercises its extracted public API and CLI.
 These commands do not publish a release or create a qualified-v1 bundle.
 
