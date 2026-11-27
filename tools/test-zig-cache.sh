@@ -453,12 +453,15 @@ awk '
     job == "qualify:" && /^      - / { step++ }
     job == "qualify:" {
         builds[step] += gsub(/zig build( |$)/, "&")
+        targets[step] += gsub(/-Dtarget="\$KOSMOS_HOST_TARGET" -Dcpu="\$KOSMOS_HOST_CPU"/, "&")
         pinned[step] += gsub(/-Dhost-target="\$KOSMOS_HOST_TARGET" -Dhost-cpu="\$KOSMOS_HOST_CPU"/, "&")
     }
     END {
         for (s in builds) {
             total += builds[s]
-            if (builds[s] != pinned[s]) print "step " s ": " builds[s] " builds, " pinned[s] " pinned"
+            if (builds[s] != pinned[s] || builds[s] != targets[s]) {
+                print "step " s ": " builds[s] " builds, " targets[s] " targets, " pinned[s] " pinned"
+            }
         }
         if (total < 10) print total " builds"
     }
@@ -468,6 +471,9 @@ awk '
 consumer=$tools/../test/native_consumer/build.zig
 if ! grep -Fq '.@"host-target" = b.option(' "$consumer" || ! grep -Fq '.@"host-cpu" = b.option(' "$consumer"; then
     fail "the native consumer does not pass the host target and CPU to its Kosmos dependency"
+fi
+if ! grep -Fq 'const target = b.standardTargetOptions(.{});' "$tools/../build.zig"; then
+    fail "-Dhost-target changes the default -Dtarget"
 fi
 
 scenario=retention

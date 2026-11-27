@@ -143,11 +143,13 @@ jobs:
           if [ "${{ matrix.lane }}" = native ]; then
             /usr/bin/time -v zig build build-storage-check build-semantics-check \
               build-zig17-check --cache-dir .zig-cache/native-owners \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             /usr/bin/time -v zig build build-semantic-recovery-driver \
               --cache-dir .zig-cache/native-driver \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose
           else
@@ -155,11 +157,13 @@ jobs:
               ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache/native-driver-core" \
               /usr/bin/time -v zig build semantic-artifact --prefix "$RUNNER_TEMP/driver-core" \
               --cache-dir .zig-cache/native-driver-core \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             core_pid=$!
             /usr/bin/time -v zig build build-semantic-driver-executable \
               --cache-dir .zig-cache/native-driver \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all --verbose &
             driver_pid=$!
@@ -172,6 +176,7 @@ jobs:
         if: matrix.build
         run: >-
           zig build ${{ matrix.build }} -Dcompile-only=true
+          -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU"
           -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Set aside what the compilation did not use
@@ -196,16 +201,19 @@ jobs:
           if [ "${{ matrix.lane }}" = native ]; then
             zig build check-storage check-semantics check-zig17 \
               --cache-dir .zig-cache/native-owners \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = native-recovery ]; then
             zig build check-semantic-recovery-driver \
               --cache-dir .zig-cache/native-driver \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           else
             zig build check-installed-semantic-driver --prefix "$RUNNER_TEMP/driver-core" \
               --cache-dir .zig-cache/native-driver \
+              -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU" \
               -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU" \
               -Doptimize=safe --summary all
           fi
@@ -218,6 +226,7 @@ jobs:
         if: matrix.build
         run: >-
           zig build ${{ matrix.build }}
+          -Dtarget="$KOSMOS_HOST_TARGET" -Dcpu="$KOSMOS_HOST_CPU"
           -Dhost-target="$KOSMOS_HOST_TARGET" -Dhost-cpu="$KOSMOS_HOST_CPU"
           -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Check every selected current session fixture

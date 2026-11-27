@@ -150,7 +150,7 @@ fn buildsForHost(host: std.Build.ResolvedTarget, target: std.Build.ResolvedTarge
 
 fn configureOptions(b: *std.Build) Options {
     const host = hostTarget(b);
-    const target = b.standardTargetOptions(.{ .default_target = host.query });
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = std.json.parseFromSliceLeaky(
         Profile,
