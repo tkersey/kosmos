@@ -227,9 +227,11 @@ the `tar` it started, and terminates whatever still carries the job's
 `RUNNER_TRACKING_ID` and is neither `track` nor one of its ancestors, sends each SIGKILL,
 and repeats the listing until it finds none left, so it waits until each process the
 signal reached has exited and also stops a process one of them started after a listing.
+A process whose SIGKILL fails while it is still listed (`EPERM`, for one the job cannot
+signal) counts as left and is named with `(SIGKILL failed)`; a process that exited
+before its signal is neither waited for nor named.
 It warns with their names when there were any, and deletes whatever they wrote to
-`.zig-cache.saved` before they stopped. A process that exited before its signal is
-neither waited for nor named. Only then does it verify the
+`.zig-cache.saved` before they stopped. Only then does it verify the
 tree, so nothing an earlier step started can write anywhere afterwards, and a file such
 a process held open reaches `.zig-cache` only as part of a tree that matches its record.
 When `RUNNER_TRACKING_ID` is unset, the job's processes cannot be listed, or such a

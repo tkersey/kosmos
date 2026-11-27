@@ -160,7 +160,7 @@ arm() {
 }
 
 stop() {
-    local id=${RUNNER_TRACKING_ID:-} line pid name ancestor deadline killed names=
+    local id=${RUNNER_TRACKING_ID:-} line pid name note ancestor deadline left names=
     local -A ours=() stopped=()
     if [[ -z "$id" ]]; then
         skip "::warning::Compiler cache: RUNNER_TRACKING_ID is unset, so $mode cannot stop what earlier steps left running"
@@ -178,7 +178,7 @@ stop() {
         if ! grep -Fxq -- "/proc/$$/environ" "$state/tracked"; then
             skip "::warning::Compiler cache: this job's processes cannot be listed, so $mode cannot stop what earlier steps left running"
         fi
-        killed=0
+        left=0
         while IFS= read -r line; do
             pid=${line#/proc/}
             pid=${pid%/environ}
@@ -187,15 +187,20 @@ stop() {
             fi
             name=
             read -r name 2> /dev/null < "/proc/$pid/comm" || :
-            if kill -KILL -- "$pid" 2> /dev/null; then
-                killed=1
-                if [[ -z "${stopped[$pid]:-}" ]]; then
-                    stopped[$pid]=1
-                    names+=" ${name:-?}[${pid}]"
+            note=
+            if ! kill -KILL -- "$pid" 2> /dev/null; then
+                if ! grep -qsxzF -- "RUNNER_TRACKING_ID=$id" "/proc/$pid/environ"; then
+                    continue
                 fi
+                note='(SIGKILL failed)'
+            fi
+            left=1
+            if [[ -z "${stopped[$pid]:-}" ]]; then
+                stopped[$pid]=1
+                names+=" ${name:-?}[${pid}]${note}"
             fi
         done < "$state/tracked"
-        (( killed )) || break
+        (( left )) || break
         if (( SECONDS >= deadline )); then
             skip "::warning::Compiler cache: what earlier steps left running did not exit within ${stop_seconds_max} s of SIGKILL:${names}"
         fi

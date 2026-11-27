@@ -768,7 +768,15 @@ expect_absent h/$m4 o/$f4 b/stale
 
 begin stray-already-gone
 waiting_stray
-printf 'kill() { return 1; }\n' > "$scratch/kill-finds-nothing"
+cat > "$scratch/kill-finds-nothing" << 'EOF'
+kill() {
+    builtin kill "$@"
+    while grep -qsxzF -- "RUNNER_TRACKING_ID=$RUNNER_TRACKING_ID" "/proc/${!#}/environ"; do
+        sleep 0.01
+    done
+    return 1
+}
+EOF
 BASH_ENV=$scratch/kill-finds-nothing KOSMOS_CACHE_STEP_SECONDS_MAX=4 track ||
     fail "track failed when its kill found no process"
 expect_report 'Compiler cache restored (success)'
@@ -787,6 +795,24 @@ expect_report "::warning::Compiler cache: what earlier steps left running did no
 expect_report 'this job uses no restored tree and saves no compiler cache'
 expect_report 'Compiler cache: deleted the unverified restored tree'
 [[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a track that could not stop a process kept the restored tree"
+: > "$workspace/release"
+compile o/$f1/test
+run stage
+expect_saved false
+
+begin stray-unsignalled
+waiting_stray
+printf 'kill() { return 1; }\n' > "$scratch/kill-fails"
+started=$(date +%s)
+BASH_ENV=$scratch/kill-fails KOSMOS_CACHE_STEP_SECONDS_MAX=4 track ||
+    fail "track failed when it could not signal a process"
+(( $(date +%s) - started <= 3 )) || fail "track waited $(( $(date +%s) - started )) s for a 2 s cap"
+expect_report "::warning::Compiler cache: what earlier steps left running did not exit within 2 s of SIGKILL: bash[$stray](SIGKILL failed)"
+expect_report 'this job uses no restored tree and saves no compiler cache'
+expect_report 'Compiler cache: deleted the unverified restored tree'
+! grep -Fq 'Compiler cache restored' "$workspace/report" || fail "track promoted a tree while a process it could not signal ran"
+[[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a track that could not signal a process kept the restored tree"
+kill -0 "$stray" 2> /dev/null || fail "the process track could not signal did not outlive track"
 : > "$workspace/release"
 compile o/$f1/test
 run stage
