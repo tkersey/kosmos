@@ -6,10 +6,12 @@ record=$cache/kosmos-cache-record
 work_directory=${RUNNER_TEMP:?}
 state=${KOSMOS_CACHE_STATE:-$work_directory/zig-cache-access}
 aside=$state/aside
+history=$cache/kosmos-build-runners
 tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 unread_epoch=1
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
+build_runner_jobs_max=6
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
 
 usage() {
@@ -88,6 +90,11 @@ track() {
     rm -f -- "$record"
     rm -rf -- "$state"
     mkdir -p -- "$state" "$cache"
+    if [[ -f "$history" ]]; then
+        mv -- "$history" "$state/runners"
+    else
+        : > "$state/runners"
+    fi
     arm
     printf 'Compiler cache restored (%s): %s bytes; access tracking %s\n' \
         "$1" "$(tree_bytes "$cache")" "$(< "$state/tracking")"
@@ -117,8 +124,12 @@ classify_units() {
         -v unread="$unread_epoch" \
         -v pairs_in="$state/pairs" \
         -v earlier_in="$state/earlier" \
+        -v history_in="$state/runners" \
+        -v history_max="$build_runner_jobs_max" \
         -v tool_root="$tool_root" \
         -v kept_out="$state/kept" \
+        -v used_out="$state/used" \
+        -v history_out="$state/history" \
         -v prune_out="$state/prune" "$unit_program"'
         BEGIN {
             while ((getline line < pairs_in) > 0) {
@@ -129,6 +140,12 @@ classify_units() {
                 for (i = 3; i <= fields; i++) input[field[1], i - 2] = field[i]
             }
             close(pairs_in)
+            while (history_lines < history_max - 1 && (getline line < history_in) > 0) {
+                history[++history_lines] = line
+                fields = split(line, field, "\t")
+                for (i = 1; i <= fields; i++) retained[field[i]] = 1
+            }
+            close(history_in)
         }
         {
             name = unit($4)
@@ -141,15 +158,17 @@ classify_units() {
         END {
             while ((getline name < earlier_in) > 0) if (name in unit_root) used[name] = 1
             printf "" > kept_out
+            printf "" > used_out
             printf "" > prune_out
             for (name in unit_root) {
                 group[name] = (name in manifest_of) ? manifest_of[name] : name
                 if (name in used) group_used[group[name]] = 1
-                if (name in runner) group_runner[group[name]] = 1
+                if ((name in runner) && (name in retained)) group_retained[group[name]] = 1
             }
             for (name in unit_root) {
                 broken[name] = (group[name] in output_of) && output_of[group[name]] == ""
-                kept[name] = !broken[name] && (group[name] in group_used || group[name] in group_runner)
+                kept[name] = !broken[name] && (group[name] in group_used || group[name] in group_retained)
+                if (!broken[name] && group[name] in group_used) print name > used_out
             }
             for (name in output_of) {
                 if (!(name in unit_root) || !kept[name]) continue
@@ -164,6 +183,20 @@ classify_units() {
                 if (!(name in unit_root) || broken[name]) continue
                 kept[name] = 1
                 if (name in manifest_of) kept[manifest_of[name]] = 1
+            }
+            line = ""
+            for (name in runner) {
+                if (kept[name] && group[name] in group_used) line = line (line == "" ? "" : "\t") name
+            }
+            print line > history_out
+            for (i = 1; i <= history_lines; i++) {
+                fields = split(history[i], field, "\t")
+                line = ""
+                for (j = 1; j <= fields; j++) {
+                    name = field[j]
+                    if ((name in unit_root) && kept[name]) line = line (line == "" ? "" : "\t") name
+                }
+                print line > history_out
             }
             for (name in unit_root) {
                 root = unit_root[name]
@@ -211,7 +244,7 @@ classify() {
         printf '::warning::Compiler cache: the pairing tool failed; save skipped\n'
         return 1
     fi
-    touch -- "$state/earlier"
+    touch -- "$state/earlier" "$state/runners"
     local status=0
     classify_units || status=$?
     if (( status == 3 )); then
@@ -229,6 +262,7 @@ seal() {
             find "$directory" -mindepth 1 -delete
         fi
     done
+    cp -- "$state/history" "$history"
     bytes=$(tree_bytes "$cache")
     if (( bytes > save_bytes_max )); then
         printf '::warning::Compiler cache: %s bytes exceed the %s-byte ceiling; save skipped\n' \
@@ -251,7 +285,7 @@ stage() {
 }
 
 unstage() {
-    rm -f -- "$record"
+    rm -f -- "$record" "$history"
     if [[ ! -f "$state/kept" ]]; then
         return 0
     fi
@@ -263,7 +297,7 @@ unstage() {
         fi
     done < "$state/prune"
     rm -rf -- "$aside"
-    cat -- "$state/kept" >> "$state/earlier"
+    cat -- "$state/used" >> "$state/earlier"
     arm
 }
 

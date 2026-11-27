@@ -224,16 +224,23 @@ when the job read or wrote either, and removed with it otherwise; a kept manifes
 keeps the cache inputs it records, which a hit checks. A manifest that names no existing
 output is removed from every save; for a Run step without side effects and without
 outputs, which Zig 0.17.1 caches by manifest alone
-(`lib/compiler/Maker/Step/Run.zig:560-605`), that step runs again next time. The build
-runner depends only on the Zig version and the runner's CPU, so every build runner in a
-tree is kept, with its manifest and recorded builtin modules, whether or not the job
-used it: an entry holds one per runner model its lane has run on, and a lane on any of
-those models skips the 50–100-second build-runner compilation; it rebuilds only its
-configure scripts. Temporary directories are emptied. A save is skipped with a warning
-when reads leave no access time, when the pairing tool fails, when the job used no
-compiled output outside the pairing tool's own cache, or when the tree exceeds
-1,000,000,000 bytes, about twice the largest measured (native-driver, 498,240,971
-bytes).
+(`lib/compiler/Maker/Step/Run.zig:560-605`), that step runs again next time. Zig's
+build runner depends only on the Zig version and the runner (its CPU and kernel
+release), and building one takes 50–100 seconds, so a tree also keeps the build runners
+of its recent jobs, with their manifests and recorded builtin modules. Every saved tree
+carries `kosmos-build-runners`, one line per saved job, newest first, naming the build
+runners that job used; `track` sets the restored lines aside. A save writes the job's
+line followed by the five newest restored lines, keeps every build runner they name, and
+prunes every other build runner the job did not use. An entry therefore holds the build
+runners of at most the six newest saved jobs it descends from: at most 6 per global
+cache (12 for native-driver, whose core rebuild has its own), and so at most 64,069,014
+bytes of build runners per global cache in the tree at the measured 10,678,169 bytes
+each. A lane on a runner model and kernel among those six skips the build-runner
+compilation and rebuilds only its configure scripts. Temporary directories are emptied.
+A save is skipped with a warning when reads leave no access time, when the pairing tool
+fails (it fails on any manifest it cannot open or read), when the job used no compiled
+output outside the pairing tool's own cache, or when the tree exceeds 1,000,000,000
+bytes, about twice the largest measured (native-driver, 498,240,971 bytes).
 The stage, both saves, `unstage` and the admission carry no status condition, so GitHub
 runs each only after every earlier step has succeeded, and the admission and its save
 are the lane's last steps. A failed compilation saves nothing. A compilation after a
@@ -254,21 +261,32 @@ every cache of the pull request's merge ref. A run still in progress at the clos
 save after that, and its own retention job then finds the pull request closed and
 deletes those saves. Both jobs log a failed deletion and wait up to 30 seconds for the
 cache list to drop deleted entries before failing.
-After retention, each ref holds at most one entry per CPU and lane, so at most C sets,
-where C ≤ 2 is the number of CPU classes its runs chose; a closed pull request holds
-none, and forks and other branches none. A run whose retention job has not finished can
-add two entries per lane to its ref (its compile save and its job save). With S the size
-of one set, P the open same-repository pull requests and F the runs whose retention job
-has not finished, the compiler caches total at most ((1 + P) × C + 2F) × S, beside
-`main`'s Zig tarball saved by the setup action (57,413,921 bytes). GitHub evicts caches
-only above 10 GB, so pull request caches can cause `main`'s to be evicted only if that
-total plus the tarball exceeds 10 GB. Run 45946785256 saved one set of
-S = 1,008,556,734 bytes with one build runner per cache root; each further runner model
-adds at most 15 build runners (one per global cache), each 2,591,504 bytes compressed
-(10,678,169 bytes in the tree, measured for x86_64-linux), so over the six models seen
-so far S ≤ 1,202,919,534 bytes and the total stays below 10,000,000,000 bytes while
-(1 + P) × C + 2F ≤ 8: with every runner choosing `x86_64_v3+sha` (C = 1, as in every
-run so far), while P + 2F ≤ 7; with both classes (C = 2), while P + F ≤ 3.
+After a successful retention, a ref holds at most one entry per CPU and lane, so at most
+C sets of 14 entries, where C ≤ 2 is the number of CPU classes its runs chose; forks and
+branches other than `main` hold none. Each run whose saves no successful retention has
+yet covered adds at most two entries per lane (its compile and job saves): a run whose
+retention job is still to finish, or failed, timed out or was cancelled, keeps them until
+a later run's retention on the same ref succeeds. A closed pull request's ref holds none
+once `Closed pull request caches` or a later retention on it succeeds; when that cleanup
+fails, times out or is cancelled and no run follows, its entries stay until GitHub
+removes caches unused for seven days.
+The code enforces those counts, at most six jobs' build runners per entry, and the
+1,000,000,000-byte ceiling on each entry's tree (each archive GitHub counted for this
+pull request was smaller than its tree). Those alone allow 1,000,000,000 bytes per
+entry, which keeps `main` safe only up to nine entries, so the bound below rests on
+measured sizes. Measured: run 45946785256 saved the largest set, 1,008,556,734 bytes
+compressed for 14 entries with one build runner per global cache, and a build runner is
+2,591,504 bytes compressed. Five more build runners in each of a set's 15 global caches,
+the most the six-job limit admits, bring a set to at most S = 1,202,919,534 bytes. With
+P the same-repository pull requests whose ref holds caches (every open one, and a closed
+one whose cleanup has not succeeded, for up to seven days) and F the runs whose saves no
+successful retention has covered, the compiler caches total at most
+((1 + P) × C + 2F) × S, beside `main`'s Zig tarball saved by the setup action
+(57,413,921 bytes). GitHub evicts caches only above 10 GB, so pull request caches can
+cause `main`'s to be evicted only if that total plus the tarball exceeds 10 GB; at the
+measured sizes the total stays below 10,000,000,000 bytes while (1 + P) × C + 2F ≤ 8:
+with every runner choosing `x86_64_v3+sha` (C = 1, as in every run so far), while
+P + 2F ≤ 7; with both classes (C = 2), while P + F ≤ 3.
 A cancelled run keeps, for each lane, its compile save if the lane finished compiling
 and its job save if the lane succeeded; the full rerun restores them.
 The native owners, ordinary driver and checked recovery driver each compile on

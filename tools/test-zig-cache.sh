@@ -19,6 +19,10 @@ m5=00000000000000000000000000000005
 m6=00000000000000000000000000000006
 m7=00000000000000000000000000000007 f7=efdb98b0b2f2e4035e7d72d2daa34619
 m8=00000000000000000000000000000008 f8=f8e51811854fbb1a0ea0cf0382772caf
+m9=00000000000000000000000000000009 f9=1dbb5dec00b322ff9547f39d5401c828
+m10=0000000000000000000000000000000a f10=8e71e2b9cd08bfa51c6bd7b6f3139158
+m11=0000000000000000000000000000000b f11=de67a6b69f662fbad43221270c3c5a5d
+m12=0000000000000000000000000000000c f12=5d2d57063a704c006bb139b35c246609
 
 fail() {
     printf 'FAIL %s: %s\n' "$scenario" "$1" >&2
@@ -150,6 +154,12 @@ expect_recorded() {
         find .zig-cache -type f ! -path .zig-cache/kosmos-cache-record -printf '%s %P\n' | LC_ALL=C sort
     ); then
         fail "the saved tree differs from its record"
+    fi
+}
+
+expect_history() {
+    if ! cmp -s .zig-cache/kosmos-build-runners <(printf '%s\n' "$@"); then
+        fail "build runner history: $(tr '\n' '|' < .zig-cache/kosmos-build-runners 2> /dev/null)"
     fi
 }
 
@@ -324,14 +334,41 @@ else
     for input in "${runner_inputs[@]}"; do
         restored_file ".zig-cache/$input"
     done
+    for runner in "$m9 $f9" "$m10 $f10" "$m11 $f11" "$m12 $f12"; do
+        restored_manifest ".zig-cache/h/${runner% *}"
+        restored_file ".zig-cache/o/${runner#* }/maker"
+    done
+    printf '%s\n' "o/$f10" "$runner_output" o/gone '' '' "o/$f11" > .zig-cache/kosmos-build-runners
     record_tree
+    track
+    expect_absent kosmos-build-runners
+    use h/$m1 o/$f1/test h/$m9 o/$f9/maker
+    run stage
+    expect_saved true
+    expect_recorded
+    expect_history "o/$f9" "o/$f10" "$runner_output" '' '' ''
+    expect_present "h/$runner_name" "$runner_output/maker" "${runner_inputs[@]}" h/$m9 o/$f9/maker \
+        h/$m10 o/$f10/maker
+    expect_absent h/$m11 o/$f11 h/$m12 o/$f12 "native-driver-core/h/$runner_name" \
+        "native-driver-core/$runner_output"
+    expect_report '3 build runners kept'
+    : > "$GITHUB_OUTPUT"
+    run unstage
+    expect_absent kosmos-build-runners
+    run admit
+    expect_saved true
+    expect_recorded
+    expect_history "o/$f9" "o/$f10" "$runner_output" '' '' ''
+    expect_present "h/$runner_name" "$runner_output/maker" "${runner_inputs[@]}" h/$m1 o/$f1/test \
+        h/$m9 o/$f9/maker h/$m10 o/$f10/maker
+    expect_absent b/stale h/$m11 o/$f11 h/$m12 o/$f12 "native-driver-core/h/$runner_name" \
+        "native-driver-core/$runner_output"
+    expect_report '3 build runners kept'
     track
     use h/$m1 o/$f1/test
     run admit
     expect_saved true
-    expect_present "h/$runner_name" "$runner_output/maker" "${runner_inputs[@]}" h/$m1 o/$f1/test
-    expect_absent b/stale "native-driver-core/h/$runner_name" "native-driver-core/$runner_output"
-    expect_report '1 build runners kept'
+    expect_history '' "o/$f9" "o/$f10" "$runner_output" '' ''
 fi
 
 scenario=unreadable-manifest
