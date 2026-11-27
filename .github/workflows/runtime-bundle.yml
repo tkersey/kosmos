@@ -148,6 +148,11 @@ jobs:
             sha256sum "$builtin_file"
             builtin_target < "$builtin_file"
           done
+      - name: Build the compiler cache pairing tool
+        if: env.KOSMOS_CACHE_SAVE == 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        run: bash tools/zig-cache.sh tool
       - name: Verify the restored compiler cache against its record and track its use
         continue-on-error: true
         timeout-minutes: 1

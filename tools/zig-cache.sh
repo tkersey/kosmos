@@ -6,7 +6,6 @@ cache=.zig-cache
 record=$cache/kosmos-cache-record
 history=$cache/kosmos-build-runners
 restored=$cache.restored
-tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
 output=${GITHUB_OUTPUT:-/dev/null}
 unread_epoch=1
@@ -21,7 +20,7 @@ mark=
 
 usage() {
     printf 'Usage: bash tools/zig-cache.sh host-cpu < /proc/cpuinfo\n' >&2
-    printf '       bash tools/zig-cache.sh due\n' >&2
+    printf '       bash tools/zig-cache.sh due|tool\n' >&2
     printf '       bash tools/zig-cache.sh track success|failure|cancelled|skipped\n' >&2
     printf '       bash tools/zig-cache.sh stage|unstage|admit\n' >&2
     exit 64
@@ -48,10 +47,19 @@ host_cpu() {
 }
 
 pairs() {
-    zig run -fstrip --cache-dir "$cache/$tool_root" \
+    "$pairs_tool" "$cache"
+}
+
+tool() {
+    rm -f -- "$pairs_tool"
+    fits
+    mkdir -p -- "$tool_dir"
+    zig build-exe -fstrip --cache-dir "$tool_dir/local" --global-cache-dir "$tool_dir/global" \
         ${KOSMOS_HOST_TARGET:+-target "$KOSMOS_HOST_TARGET"} \
         ${KOSMOS_HOST_CPU:+-mcpu "$KOSMOS_HOST_CPU"} \
-        "$pairs_source" -- "$cache"
+        -femit-bin="$tool_dir/building" "$pairs_source"
+    mv -- "$tool_dir/building" "$pairs_tool"
+    printf 'Compiler cache: built the pairing tool\n'
 }
 
 limit() {
@@ -74,6 +82,8 @@ begin() {
     shift 2
     state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
     aside=$state/aside
+    tool_dir=${RUNNER_TEMP:?}/zig-cache-pairs
+    pairs_tool=$tool_dir/zig-cache-pairs
     if [[ -z "${KOSMOS_CACHE_LIMITED:-}" ]]; then
         if [[ "$mode" == stage || "$mode" == admit ]]; then
             printf 'save=false\n' >> "$output"
@@ -167,9 +177,6 @@ track() {
     bytes=$(tree_bytes "$cache")
     tracking=$(< "$state/tracking")
     printf 'Compiler cache restored (%s): %s bytes; access tracking %s\n' "$1" "$bytes" "$tracking"
-    if ! pairs < /dev/null > /dev/null; then
-        printf '::warning::Compiler cache: the pairing tool failed to build; nothing will be saved\n'
-    fi
     give
 }
 
@@ -216,7 +223,6 @@ classify_units() {
         -v earlier_in="$state/earlier" \
         -v history_in="$state/runners" \
         -v history_max="$build_runner_jobs_max" \
-        -v tool_root="$tool_root" \
         -v kept_out="$state/kept" \
         -v used_out="$state/used" \
         -v history_out="$state/history" \
@@ -262,7 +268,7 @@ classify_units() {
             }
             for (name in output_of) {
                 if (!(name in unit_root) || !kept[name]) continue
-                if ((name in group_used) && unit_root[name] != tool_root) used_pairs++
+                if (name in group_used) used_pairs++
                 queue[++queued] = name
                 queued_manifest[name] = 1
             }
@@ -426,6 +432,11 @@ case "${1:-}" in
         printf 'due=false\n' >> "$output"
         fits
         printf 'due=true\n' >> "$output"
+        ;;
+    tool)
+        [[ $# -eq 1 ]] || usage
+        begin "$1" 'the pairing tool is not built and this job saves no compiler cache' "$@"
+        tool
         ;;
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage

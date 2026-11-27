@@ -7,12 +7,15 @@ workflow=$tools/../.github/workflows/runtime-bundle.yml
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/zig-cache-test.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 export RUNNER_TEMP=$scratch
-export ZIG_GLOBAL_CACHE_DIR=$scratch/zig-global
-unset KOSMOS_HOST_TARGET KOSMOS_HOST_CPU KOSMOS_CACHE_BYTES_MAX
+unset KOSMOS_HOST_TARGET KOSMOS_HOST_CPU KOSMOS_CACHE_BYTES_MAX KOSMOS_CACHE_STEP_SECONDS_MAX
 REAL_FIND=$(command -v find)
 REAL_MV=$(command -v mv)
 REAL_RM=$(command -v rm)
-export REAL_FIND REAL_MV REAL_RM
+REAL_ZIG=$(command -v zig)
+export REAL_FIND REAL_MV REAL_RM REAL_ZIG
+tool_cache=$scratch/zig-cache-pairs
+pairs_tool=$tool_cache/zig-cache-pairs
+real_cache=$scratch/real-cache
 failures=0
 
 m1=00000000000000000000000000000001 f1=eaae50b21867a4fc20733d2d7251e2b6
@@ -34,9 +37,6 @@ fail() {
     printf 'FAIL %s: %s\n' "$scenario" "$1" >&2
     failures=$((failures + 1))
 }
-
-mkdir -p -- "$scratch/tools-cache"
-(cd "$scratch/tools-cache" && zig run -fstrip --cache-dir .zig-cache/tools "$tools/zig-cache-pairs.zig" -- . < /dev/null)
 
 restored_file() {
     mkdir -p -- "$(dirname "$1")"
@@ -103,12 +103,21 @@ begin() {
     restored_file $cache/native-driver-core/zig-pkg/stale/build.zig
     restored_manifest $cache/source-examples/h/$m2
     restored_file $cache/source-examples/o/$f2/test
-    cp -R -- "$scratch/tools-cache/.zig-cache/tools" $cache/tools
     record_tree
+}
+
+build_tool() {
+    ZIG_GLOBAL_CACHE_DIR=$workspace/.zig-cache bash "$script" tool > "$workspace/report"
 }
 
 track() {
     bash "$script" track "${1:-success}" > "$workspace/report"
+}
+
+expect_kept() {
+    if grep -Fq 'differs from its record' "$workspace/report"; then
+        fail "a complete tree was discarded"
+    fi
 }
 
 use() {
@@ -221,6 +230,26 @@ expect_history() {
     fi
 }
 
+begin cold-tool
+failing zig << 'EOF'
+sleep 2
+exec "$REAL_ZIG" "$@"
+EOF
+PATH=$failing_path build_tool || fail "a slow cold build of the pairing tool failed"
+expect_report 'Compiler cache: built the pairing tool'
+[[ -x "$pairs_tool" ]] || fail "the pairing tool was not built"
+KOSMOS_CACHE_STEP_SECONDS_MAX=1 track || fail "track exceeded its limit after a slow cold build of the pairing tool"
+expect_report 'Compiler cache restored (success)'
+expect_kept
+use h/$m1 o/$f1/test
+run stage
+expect_saved true
+: > "$GITHUB_OUTPUT"
+run unstage
+run admit
+expect_saved true
+expect_present h/$m1 o/$f1/test
+
 begin pairs
 track
 if [[ "$(< "$KOSMOS_CACHE_STATE/tracking")" != on ]]; then
@@ -236,7 +265,7 @@ expect_saved true
 expect_recorded
 expect_present h/$m1 o/$f1/test h/$m2 o/$f2/test h/$m3 c/$f3 z/used-zir h/timestamp \
     b/used/builtin.zig p/used.tar.gz native-driver-core/h/$m1 native-driver-core/o/$f1/test \
-    native-driver-core/zig-pkg/used/build.zig tools
+    native-driver-core/zig-pkg/used/build.zig
 expect_absent h/$m4 o/$f4 o/orphan z/stale-zir h/$m5 h/$m6 h/$m8 o/$f8 b/stale p/stale.tar.gz \
     native-driver-core/zig-pkg/stale tmp/.tmp-leftover source-examples/h/$m2 source-examples/o/$f2
 expect_report 'Compiler cache root: 19 units; 5 manifest-output pairs; 2 manifests without output dropped; 0 build runners kept; pruned 10 units'
@@ -285,11 +314,9 @@ use h/$m1 o/$f1/test
 run admit
 expect_saved true
 track
-expect_present h/$m1 o/$f1/test tools
+expect_present h/$m1 o/$f1/test
 expect_absent kosmos-cache-record
-if grep -Fq 'differs from its record' "$workspace/report"; then
-    fail "a complete tree was discarded"
-fi
+expect_kept
 
 begin broken
 rm -rf .zig-cache/o/$f2
@@ -325,17 +352,44 @@ expect_saved false
 expect_absent kosmos-cache-record
 expect_report '-byte ceiling; save skipped'
 
-begin tool-failure
-mkdir -p -- "$scratch/broken-zig"
-printf '#!/bin/sh\nexit 1\n' > "$scratch/broken-zig/zig"
-chmod +x -- "$scratch/broken-zig/zig"
-PATH="$scratch/broken-zig:$PATH" track || fail "track failed with a broken pairing tool"
-expect_report '::warning::Compiler cache: the pairing tool failed to build'
-use h/$m1 o/$f1/test
-PATH="$scratch/broken-zig:$PATH" run admit || fail "admit failed with a broken pairing tool"
-expect_saved false
-expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
-expect_present h/$m4 o/$f4/test
+for failure in failed stopped; do
+    begin "tool-$failure"
+    if [[ "$failure" == failed ]]; then
+        failing zig <<< 'exit 1'
+    else
+        failing zig <<< 'sleep 5'
+    fi
+    [[ -x "$pairs_tool" ]] || fail "no pairing tool before a $failure build"
+    started=$(date +%s)
+    if PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 build_tool; then
+        fail "a $failure build of the pairing tool succeeded"
+    fi
+    (( $(date +%s) - started <= 3 )) || fail "a stopped tool build took $(( $(date +%s) - started )) s for a 1 s limit"
+    if [[ "$failure" == failed ]]; then
+        expect_report '::warning::Compiler cache: tool failed with status 1; this job saves no further compiler cache'
+    else
+        expect_report '::warning::Compiler cache: tool exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
+    fi
+    [[ ! -e "$pairs_tool" ]] || fail "a $failure build left a pairing tool"
+    track || fail "track failed after a $failure build of the pairing tool"
+    expect_kept
+    use h/$m1 o/$f1/test
+    run stage || fail "stage failed without the pairing tool"
+    expect_saved false
+    expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
+    run unstage
+    run admit || fail "admit failed without the pairing tool"
+    expect_saved false
+    expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
+    expect_present h/$m4 o/$f4/test
+    begin "tool-$failure-next-job"
+    build_tool || fail "the job after a $failure build of the pairing tool could not build it"
+    track
+    expect_kept
+    use h/$m1 o/$f1/test
+    run admit
+    expect_saved true
+done
 
 begin stage
 track
@@ -345,7 +399,7 @@ compile o/$f7/test
 run stage
 expect_saved true
 expect_recorded
-expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test b/used/builtin.zig tools
+expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test b/used/builtin.zig
 expect_absent h/$m2 o/$f2 source-examples/h/$m2 source-examples/o/$f2 z/used-zir p/used.tar.gz
 : > "$GITHUB_OUTPUT"
 use h/$m1 o/$f1/test h/$m7 o/$f7/test
@@ -359,11 +413,14 @@ run admit
 expect_saved true
 expect_recorded
 expect_present h/$m1 o/$f1/test h/$m7 o/$f7/test b/used/builtin.zig source-examples/h/$m2 \
-    source-examples/o/$f2/test z/checked-zir tools
+    source-examples/o/$f2/test z/checked-zir
 expect_absent h/$m2 o/$f2 h/$m4 o/$f4 z/used-zir p/used.tar.gz
 
 scenario=build-runner
-find "$scratch/tools-cache/.zig-cache/tools/h" "$ZIG_GLOBAL_CACHE_DIR/h" -type f ! -name timestamp \
+mkdir -p -- "$real_cache"
+(cd "$real_cache" && zig run -fstrip --cache-dir local --global-cache-dir "$tool_cache/global" \
+    "$tools/zig-cache-pairs.zig" -- local < /dev/null)
+find "$real_cache/local/h" "$tool_cache/global/h" -type f ! -name timestamp \
     -size +0c > "$scratch/real-manifests"
 runner_manifest=
 while IFS= read -r manifest; do
@@ -379,9 +436,7 @@ else
     runner_name=$(basename "$runner_manifest")
     cp -- "$runner_manifest" .zig-cache/h/"$runner_name"
     cp -- "$runner_manifest" .zig-cache/native-driver-core/h/"$runner_name"
-    pairing=$(printf 'h/%s\n' "$runner_name" |
-        zig run -fstrip --cache-dir "$scratch/tools-cache/.zig-cache/tools" "$tools/zig-cache-pairs.zig" -- \
-            "$(dirname "$(dirname "$runner_manifest")")")
+    pairing=$(printf 'h/%s\n' "$runner_name" | "$pairs_tool" "$(dirname "$(dirname "$runner_manifest")")")
     runner_output=$(cut -f2 <<< "$pairing")
     mapfile -t runner_inputs < <(tr '\t' '\n' <<< "$pairing" | tail -n +3)
     if [[ "$runner_output" != o/* || ${#runner_inputs[@]} -eq 0 ]]; then
@@ -431,8 +486,7 @@ fi
 
 scenario=unreadable-manifest
 mkdir -p -- "$scratch/unreadable/h/$m1"
-if printf 'h/%s\n' "$m1" | zig run -fstrip --cache-dir "$scratch/tools-cache/.zig-cache/tools" \
-    "$tools/zig-cache-pairs.zig" -- "$scratch/unreadable" > "$scratch/unreadable.tsv" 2> /dev/null; then
+if printf 'h/%s\n' "$m1" | "$pairs_tool" "$scratch/unreadable" > "$scratch/unreadable.tsv" 2> /dev/null; then
     fail "the pairing tool paired a manifest it could not read: $(< "$scratch/unreadable.tsv")"
 fi
 begin unreadable-manifest
@@ -578,6 +632,12 @@ KOSMOS_JOB_STARTED='' run due || fail "due with an unknown start exited $?"
 [[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an unknown start skips the restore"
 expect_report '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run'
 
+begin late-tool
+RUNNER_TEMP=$workspace/runner KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) build_tool ||
+    fail "a late build of the pairing tool failed"
+expect_report "fewer than the 150 s a cache step needs to begin; the pairing tool is not built"
+[[ ! -e "$workspace/runner/zig-cache-pairs" ]] || fail "a late job built the pairing tool"
+
 begin late-track
 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track
 expect_report "fewer than the 150 s a cache step needs to begin; the restored tree is set aside"
@@ -649,7 +709,7 @@ awk '
     job == "qualify:" && /^        if: / { condition[steps] = $0 }
     job == "qualify:" && /^        continue-on-error: / { tolerated[steps] = $2 }
     job == "qualify:" && /^        timeout-minutes: / { minutes[steps] = $2 }
-    job == "qualify:" && /tools\/zig-cache\.sh (due|track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
+    job == "qualify:" && /tools\/zig-cache\.sh (due|tool|track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
     END {
         for (i = 1; i <= steps; i++) {
             printf "%d\t%s\t%s\t%s\t%s\t%d\n", i, name[i], condition[i], tolerated[i], minutes[i], cache[i]
@@ -658,7 +718,7 @@ awk '
 ' "$workflow" > "$scratch/steps.tsv"
 awk -F '\t' '($6 || $2 ~ /^Record native compiler/) && !($4 == "true" && $5 == 1) { print $2 }' \
     "$scratch/steps.tsv" > "$scratch/intolerant.txt"
-(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 8 )) || fail "the qualification job does not have eight cache steps"
+(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 9 )) || fail "the qualification job does not have nine cache steps"
 [[ ! -s "$scratch/intolerant.txt" ]] ||
     fail "a cache step can fail the lane or outlast a minute: $(tr '\n' ';' < "$scratch/intolerant.txt")"
 job_minutes=$(awk '/^  qualify:$/ { active = 1 } active && /^    timeout-minutes: / { print $2; exit }' "$workflow")
@@ -668,17 +728,17 @@ step_limit=$(sed -n 's/^step_seconds_max=.{KOSMOS_CACHE_STEP_SECONDS_MAX:-\([0-9
 kill_after=$(sed -n 's/^kill_seconds=//p' "$script")
 (( job_seconds == job_minutes * 60 && remaining >= 2 * 60 + 30 )) ||
     fail "the checked save's margin does not cover two one-minute steps and the job's end"
-for mode in stage unstage admit; do
+for mode in tool stage unstage admit; do
     grep -Fxq "        run: bash tools/zig-cache.sh $mode" "$workflow" || fail "$mode does not run under the tool's limit"
 done
 grep -Fxq "        run: bash tools/zig-cache.sh track \"\$RESTORE\"" "$workflow" ||
     fail "track does not run under the tool's limit"
 grep -Fq "started=\$(timeout -k 1 10 gh api " "$workflow" || fail "reading the job start has no 10 s limit"
 grep -Fxq "        if: steps.start.outputs.due == 'true'" "$workflow" || fail "the restore does not wait for the time check"
-bound=$(( (10 + 1) + 2 * (60 + 10) + 3 * (step_limit + kill_after) ))
-(( bound == 214 )) || fail "cache work before the checks may take $bound s, not the documented 214 s"
-grep -Fq '11 + 70 + 21 + 21 + 70 + 21 = 214 s' "$tools/../docs/verification.md" ||
-    fail "docs/verification.md does not state the 214 s bound"
+bound=$(( (10 + 1) + 2 * (60 + 10) + 4 * (step_limit + kill_after) ))
+(( bound == 235 )) || fail "cache work before the checks may take $bound s, not the documented 235 s"
+grep -Fq '11 + 70 + 21 + 21 + 21 + 70 + 21 = 235 s' "$tools/../docs/verification.md" ||
+    fail "docs/verification.md does not state the 235 s bound"
 if ! grep -Fq "grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::" "$workflow" ||
     ! grep -Fq "if ! cpu=\$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then" "$workflow" ||
     ! grep -Fxq '            cpu=baseline' "$workflow"; then
@@ -692,6 +752,7 @@ step() {
     awk -F '\t' -v pattern="$1" '$2 ~ pattern { print $1 }' "$scratch/steps.tsv"
 }
 steps=$(wc -l < "$scratch/steps.tsv")
+tool_step=$(step '^Build the compiler cache pairing tool')
 track_step=$(step '^Verify the restored compiler cache')
 stage_step=$(step '^Set aside what the compilation')
 compiled_step=$(step '^Save the compiled lane')
@@ -700,11 +761,12 @@ admit_step=$(step '^Prune the compiler cache to what the job used')
 checked_step=$(step '^Save the checked lane')
 last_compile=$(awk -F '\t' '$2 ~ /^Compile/ { last = $1 } END { print last }' "$scratch/steps.tsv")
 first_compile=$(awk -F '\t' '$2 ~ /^Compile/ { print $1; exit }' "$scratch/steps.tsv")
+(( tool_step + 1 == track_step )) || fail "the pairing tool is not built in its own step directly before track"
 (( track_step < first_compile && stage_step == last_compile + 1 && compiled_step == stage_step + 1 &&
     unstage_step == compiled_step + 1 )) ||
     fail "the compile save does not directly follow the last compilation"
 (( admit_step == steps - 1 && checked_step == steps )) || fail "the job's save is not its last step"
-for index in "$stage_step" "$compiled_step" "$unstage_step" "$admit_step" "$checked_step"; do
+for index in "$tool_step" "$stage_step" "$compiled_step" "$unstage_step" "$admit_step" "$checked_step"; do
     if awk -F '\t' -v i="$index" '$1 == i && $3 ~ /always\(\)|cancelled\(\)|failure\(\)|success\(\)/' \
         "$scratch/steps.tsv" | grep -q .; then
         fail "step $index runs after a failed step"
@@ -841,16 +903,15 @@ retain gh-stuck '' close.sh
 expect_retained '::warning::A deleted cache is still listed after 30 seconds' 'cleanup with a stuck deletion'
 
 scenario=zig-pairs
-for directory in "$scratch/tools-cache/.zig-cache/tools" "$ZIG_GLOBAL_CACHE_DIR"; do
+for directory in "$real_cache/local" "$tool_cache/global"; do
     find "$directory/h" -type f ! -name timestamp -size +0c -printf 'h/%P\n' > "$scratch/finalized.txt"
-    zig run -fstrip --cache-dir "$scratch/tools-cache/.zig-cache/tools" \
-        "$tools/zig-cache-pairs.zig" -- "$directory" < "$scratch/finalized.txt" > "$scratch/zig-pairs.tsv"
+    "$pairs_tool" "$directory" < "$scratch/finalized.txt" > "$scratch/zig-pairs.tsv"
     finalized=$(wc -l < "$scratch/finalized.txt")
     paired=$(awk -F '\t' '$2 ~ /^(o|c)\/[0-9a-f]+$/' "$scratch/zig-pairs.tsv" | wc -l)
     (( finalized > 0 && paired == finalized )) ||
         fail "$directory: $paired of $finalized finalized Zig manifests name an existing output"
     while IFS= read -r input; do
-        [[ -e "$directory/$input" || -e "$ZIG_GLOBAL_CACHE_DIR/$input" ]] ||
+        [[ -e "$directory/$input" || -e "$tool_cache/global/$input" ]] ||
             fail "$directory: recorded cache input $input does not exist"
     done < <(cut -f3- "$scratch/zig-pairs.tsv" | tr '\t' '\n' | sed '/^$/d')
 done
