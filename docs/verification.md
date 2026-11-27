@@ -172,43 +172,65 @@ After restoring, `tools/zig-cache.sh track` checks on the workspace filesystem t
 reading a file updates its access time, marks every cached file unread and starts the
 lane's work deadline. Before the save, `tools/zig-cache.sh admit` hard-links the cache
 into a snapshot and prunes the build caches by Zig's own manifest-output pairs.
-Zig 0.17.1 stores a step's output in `o/F` or its configuration in `c/F`, where F is
-the digest `std/Build/Cache.zig` computes from the manifest's file name and the file
-digests the manifest records (`finalDigest`), and it reports a manifest hit as cached
-without checking that the output exists. `tools/zig-cache-pairs.zig` computes F with
-Zig's own `Cache.hasher_init` and manifest layout. In 1,324 manifests from five local
-caches every finalized manifest named an existing output; only never-finalized, empty
-manifests named none. The admission keeps a manifest together with its output when the
-run read or wrote either, and removes both otherwise. Outputs that no manifest names
-and ZIR files stay when the run read or wrote them. A file counts as written when its
-change time follows tracking, since extraction can preserve its access and
-modification times but not its change time. A kept manifest therefore always keeps
-its output. A manifest whose output is absent is the state in which Zig reports the
-step `cached` and the next step fails with `checking cache failed: file_open
-FileNotFound`; the admission removes such a manifest from every snapshot, read or not.
-The failing lane's own save then replaces the broken entry, retention deletes it, and
-the next run rebuilds that step. Without working access times nothing else is removed.
+Zig 0.17.1 finalizes a manifest under `h/` for each step it caches and stores the
+step's output in `o/F` or its configuration in `c/F`, where F is the digest
+`std/Build/Cache.zig` computes from the manifest's file name and the file digests the
+manifest records (`finalDigest`); it reports a manifest hit as cached without checking
+that the output exists. One kind of finalized manifest names no output: a Run step
+without side effects whose stdio is `.check`, `.zig_test` or `.protocol`, with no
+output arguments and no captured output, records its inputs and creates no `o/F`
+(`lib/compiler/Maker/Step/Run.zig:560-605` and `:690-727`).
+`tools/zig-cache-pairs.zig` computes F with Zig's own `Cache.hasher_init` and manifest
+layout. The admission keeps a manifest together with its output when the run read or
+wrote either, and removes both otherwise. Outputs that no manifest names and ZIR files
+stay when the run read or wrote them. A file counts as written when its change time
+follows tracking, since extraction can preserve its access and modification times but
+not its change time. A kept manifest therefore always keeps its output. A manifest that
+names no existing output is removed from every snapshot, read or not, and reported
+among the manifests without output dropped. For a compile or configuration step, whose
+output Zig expects, that is the state in which Zig reports the step `cached` and the
+next step fails with `checking cache failed: file_open FileNotFound`; the failing
+lane's own save then replaces the broken entry, retention deletes it, and the next run
+rebuilds that step. For an output-less Run step, dropping its manifest makes every run
+execute that step again. Kosmos has no such step: every admission in runs 45909879869
+and 45910441500 dropped none, and the four found so far came from a PAREDROS cache.
+Without working access times nothing else is removed.
 Temporary directories are emptied. Every file the run read or wrote stays, so the full
 rerun after a failed run finds every artifact a lane used once that lane reached its
 admission.
-Each lane's build and test steps run through `tools/zig-cache.sh work`, which ends
-them 510 seconds after tracking started: TERM, then KILL after 10 seconds. Tracking
-started at most 24 seconds into a job in the measured runs, and admission, including
-the pairing tool's compilation, plus save took at most 10 seconds, so a lane past its
-deadline fails, admits and saves its cache inside its 10-minute job limit. Reaching
-that limit instead would cancel the lane and skip its admission, which runs only when
-the run is not cancelled.
+Each lane's build and test steps, and the portable lane's packaging, run through
+`tools/zig-cache.sh work` (logged as `shell: /usr/bin/bash tools/zig-cache.sh work
+{0}`). It runs the step's script with `bash --noprofile --norc -eo pipefail`, the flags
+of GitHub's `shell: bash`. On main these steps ran under the default `bash -e {0}`, so
+the wrapper adds `pipefail`; only the session step has pipelines, and it already sets
+`pipefail`. The wrapper ends the script 510 seconds after tracking started: TERM, then
+KILL after 10 seconds. The deadline is anchored at tracking, not at the job's start.
+After a lane's last work step only the admission and the save run before its cache is
+saved, each with a one-minute timeout. The portable lane uploads its package after the
+save, also with a one-minute timeout, and the post steps of checkout, setup-zig and
+setup-node run last. A lane past its deadline therefore fails, admits and saves its
+cache inside its 10-minute job limit provided that the time from the job's start to
+tracking plus the admission and save time is at most 80 seconds (600 − 510 − 10), and
+that the steps outside the wrapper between tracking and the last work step (target
+identities, setup-node and the browser lane's tool installation) end by the deadline.
+Nothing enforces these preconditions. In run 45910441500 tracking started 14.2–23.1
+seconds after each job's first log line, and admission, including the pairing tool's
+compilation, plus save took 5.5–11.2 seconds (11.2 on the native lane). Reaching the
+job limit before the save would cancel the lane and skip its admission or save, which
+run only when the run is not cancelled.
 The admission compresses the snapshot with the cache action's own archive pipeline
 (`tar --posix`, `zstdmt`) and saves it if the archive plus 1 MiB is at most the
 lane's ceiling: 224 MiB (234,881,024 bytes) for native-driver and 144 MiB
 (150,994,944 bytes) for every other lane. The slack covers the access and change
 times tar records, which differ between the measurement and the save; observed
 archives differed by at most 15 KB. A lane's archive is its pruned build caches plus
-its global caches, which grow by a build runner, about 7.8 MB compressed, for each new
-runner CPU model. Six models have been observed (graniterapids, emeraldrapids, icelake,
-znver3, znver4 and znver5). With eight, the measured archives would reach at most
-127 MB for the other lanes and 196 MB for native-driver, whose core rebuild keeps a
-second global cache. If an archive exceeds its ceiling, the admission prunes the global
+its global caches, which grow by a build runner for each runner CPU model new to the
+lane: the five archives that grew between runs 45909879869 and 45910441500 grew by
+3.6–4.6 MB, about 4.1 MB, and the others changed by at most 0.7 MB. Six models have
+been observed (graniterapids, emeraldrapids, icelake, znver3, znver4 and znver5). With
+eight, at 7.8 MB per build runner, the measured archives would reach at most 127 MB for
+the other lanes and 196 MB for native-driver, whose core rebuild keeps a second global
+cache. If an archive exceeds its ceiling, the admission prunes the global
 caches by the same pairs and saves what the run used; the global caches then grow
 again from the current model. Only if that archive also exceeds the ceiling does the
 lane skip its save, with a warning, and keep its previous entry. Each lane saves at
@@ -232,24 +254,39 @@ It never deletes main's entries or its own ref's. It deletes first the entries o
 whose newest run succeeded or is not among this workflow's latest 100 runs, then those
 of refs whose newest run failed, was cancelled or is still running; within each group,
 least recently used first.
-If at most two runs of this workflow are in progress at any moment, counting a run
-from its first save until a budget job's listing includes its saves, and every
-non-fork run's budget job completes, the repository's caches never exceed 10 GB. After
-the latest completed listing, refs other than main held at most B and main at most M,
-and each run in progress saves at most R. GitHub evicts least recently used caches only
-above 10 GB, so pull request caches cannot cause main's to be evicted. This covers
-runs of this repository's workflow. Fork pull requests from contributors who have
-contributed before run without approval and use the workflow as their pull request
-edits it, so such a run can save caches outside this accounting.
+The accounting covers runs of this exact workflow version: these 14 lanes with these
+ceilings, so each run saves at most R. If every run that saves caches is such a run and
+at most two are in progress at any moment, counting a run from its first save until a
+budget job whose listing includes its saves has finished its deletions, the
+repository's caches never exceed 10 GB. When that job finishes, the caches it listed
+hold at most B for refs other than main and at most M for main, and each run still
+counted saves at most R. Between a budget job's listing and the end of its deletions,
+the refs it listed can still exceed B, so the runs whose saves it listed keep counting
+until it finishes; if it fails between its listing and its deletions, they keep
+counting until a later budget job finishes its deletions, so that window has no bound.
+GitHub evicts least recently used caches only above 10 GB, so under these
+preconditions pull request caches cannot cause main's to be evicted. A run whose
+workflow changes the lanes or ceilings is outside the accounting and can save more than
+R: a same-repository pull request that edits them runs its edited workflow, and so does
+a fork pull request from a contributor who has contributed before, which runs without
+approval.
 Another ref's budget job deletes a pull request's newest set only after every
 superseded entry and every entry of refs whose newest run succeeded, and only while the
 newest sets of refs awaiting a rerun or still running, plus the deleting run's own ref,
 exceed B. With main's caches on 2026-11-26 (1,021,140,724 compiler cache bytes and
-57,413,921 other bytes), M = 2,255,229,217 and B = 3,214,922,463 bytes, 3.4 times the
-measured set of 954,774,387 bytes. A failed run's set therefore survives until
-its full rerun while at most two other such sets are kept, for example another failed
-pull request and the ref whose run is finishing. With three, the job deletes the least
-recently used of them first. A ref midway through saving holds both sets only until
+57,413,921 other bytes), M = 2,255,229,217 and B = 3,214,922,463 bytes. A failed run's
+set therefore survives until its full rerun while at most two other such sets are kept,
+for example another failed pull request and the ref whose run is finishing, and while
+each set is at most B/3 = 1,071,640,821 bytes, so that the three fit in B. The set
+saved by run 45910441500 is 976,174,315 bytes, 95,466,506 below B/3. Sets grow without
+new hardware: a lane keeps a build runner, about 4.1 MB compressed, for each observed
+runner model it has run on. In that run each lane's restored builtin modules and its
+runner's model named two to four of the six observed models, 42 of the 84 lane-model
+pairs, so at least 42 build runners, about 172 MB per set and more for native-driver's
+second global cache, can still arrive and take a set past B/3. Past B/3, three such sets
+exceed B and the job deletes the least recently used entries of the two that are not
+its own ref's: replaying the budget program with three sets of 1.1 GB deletes 2 of the
+older awaiting set's 14 entries. A ref midway through saving holds both sets only until
 the next budget job, which deletes the entries its new saves superseded. Closing a pull
 request runs `Closed pull request caches` from the base branch through
 `pull_request_target`. It checks out nothing, runs on a GitHub-hosted runner with only
