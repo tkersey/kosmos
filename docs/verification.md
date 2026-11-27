@@ -221,32 +221,38 @@ renames it back. The restore therefore extracts into `.zig-cache.saved`, never i
 timeout stops the action, the runner stops the action's own process, which need not stop
 the `tar` it started, and terminates whatever still carries the job's
 `RUNNER_TRACKING_ID` only when the job ends. Such a process writes below
-`.zig-cache.saved` by path, or into a file it already holds open. After restoring,
-`tools/zig-cache.sh track` therefore first renames `.zig-cache.saved` to
-`.zig-cache.restored`; then it lists every process that carries the job's
-`RUNNER_TRACKING_ID` and is neither `track` nor one of its ancestors, sends each SIGKILL,
-and repeats the listing until it finds none left, so it waits until each process the
-signal reached has exited and also stops a process one of them started after a listing.
-A process whose SIGKILL fails while it is still listed (`EPERM`, for one the job cannot
-signal) counts as left and is named with `(SIGKILL failed)`; a process that exited
-before its signal is neither waited for nor named.
-It warns with their names when there were any, and deletes whatever they wrote to
-`.zig-cache.saved` before they stopped. Only then does it verify the
-tree, so nothing an earlier step started can write anywhere afterwards, and a file such
-a process held open reaches `.zig-cache` only as part of a tree that matches its record.
-When `RUNNER_TRACKING_ID` is unset or the job's processes cannot be listed, `track`
-warns, deletes the tree and the job saves nothing. The listing stops at a deadline 10 s
-(half the step's 20 s limit, in bash's whole `SECONDS`, so 9 to 10 s) after the first
-listing: when a pass at or after it still finds a process left, `track` warns
+`.zig-cache.saved` by path, or into a file it already holds open, and a child that a
+compilation, a save or a check leaves running can do the same below `.zig-cache` or
+`.zig-cache.saved`. Every cache step that reads, prunes, records, seals or renames the
+tree, `track`, the stage, `unstage` and the admission, therefore first stops what earlier
+steps left running, with the access mark held aside: it lists every process that carries
+the job's `RUNNER_TRACKING_ID` and is neither the step nor one of its ancestors, sends
+each SIGKILL, and repeats the listing until it finds none left, so it waits until each
+process the signal reached has exited and also stops a process one of them started after
+a listing. A process whose SIGKILL fails while it is still listed (`EPERM`, for one the
+job cannot signal) counts as left and is named with `(SIGKILL failed)`; a process that
+exited before its signal is neither waited for nor named. The step warns with their
+names when there were any, and only then touches the tree, so nothing an earlier step
+started can write into it afterwards: `track` then renames `.zig-cache.saved` to
+`.zig-cache.restored` and verifies it, so a file such a process held open reaches
+`.zig-cache` only as part of a tree that matches its record, and the stage and the
+admission list, prune, record and seal a tree nothing else writes.
+When `RUNNER_TRACKING_ID` is unset or the job's processes cannot be listed, the step
+warns and skips. The listing stops at a deadline 10 s (half the step's 20 s limit,
+leaving the step's own work, at most 5.1 s measured, the other half; in bash's whole
+`SECONDS`, so 9 to 10 s) after the first listing: when a pass at or after it still
+finds a process left, the step warns
 `what earlier steps left running did not exit within 10 s of SIGKILL:` with every
-process it signalled or failed to signal, skips without verifying, deletes
-`.zig-cache.restored` and gives no mark, so the lane compiles from nothing and the job
-saves nothing. What that pass found is left running: a process whose SIGKILL has not
-taken effect yet (one blocked in uninterruptible I/O) or failed. It runs until it exits
-or the job ends, and can keep writing below `.zig-cache.saved` or into a file it holds
-open, but never into `.zig-cache`, which receives no restored tree, and nothing it
-writes is saved. The deadline bounds only this cleanup, not qualification: the lane's
-compilation and checks run as usual, and the 600 s gate stays their only time limit.
+process it signalled or failed to signal, and skips. A step that skips for any of these
+reasons has not touched the tree and gives no mark back, so no later step saves: `track`
+deletes the restored tree, `.zig-cache.saved`, so the lane compiles from nothing; the
+stage and the admission save nothing; `unstage` leaves the compile save's tree in
+`.zig-cache.saved` and the units it set aside where they are, so the checks compile from
+nothing. What that pass found is left running: a process whose SIGKILL has not taken
+effect yet (one blocked in uninterruptible I/O) or failed. It runs until it exits or the job ends, and
+can keep writing into the tree or a file it holds open, but nothing it writes is saved.
+The deadline bounds only this cleanup, not qualification: the lane's compilation and
+checks run as usual, and the 600 s gate stays their only time limit.
 `track` renames the tree to `.zig-cache` only
 when the restore succeeded and the tree matches its record (an extraction that stops
 early can still report success), and deletes it otherwise, so a partial extraction never
@@ -315,8 +321,9 @@ manifest is present without its output. A cache-tool failure skips every later s
 instead of continuing on partial data: `tools/zig-cache.sh` stops at the first failing
 command and writes `save=true` last; `track` writes its access mark last; the stage,
 `unstage` and the admission take the mark when they start and put it back (`unstage` a
-new one) only when they finish or skip cleanly, so after a failed or killed step no
-later step finds a mark and none saves.
+new one) only when they finish or skip cleanly, not when they skip because they could
+not stop what earlier steps left running, so after a failed or killed step no later step
+finds a mark and none saves.
 Every cache step has a time limit chosen from measured durations. In the 84 lane runs of
 runs 45946785256, 45948208955, 45957239435 (both attempts) and 45976374805 (both
 attempts), timed from the job logs, the restore took at most 3.9 s, `track` 4.3 s (while
@@ -331,8 +338,8 @@ being stopped; 137, a SIGKILL from `timeout` or from elsewhere (the kernel's OOM
 killer), as exceeding its limit and being killed when 20 s had passed, and otherwise as
 killed after the seconds it ran, before its limit; any other nonzero status as failed
 with that status. In each case no later step saves. When `track` skips, fails or is
-stopped after it set the restored tree aside, `tools/zig-cache.sh` deletes
-`.zig-cache.restored` under a
+stopped before the restored tree is verified and in place, `tools/zig-cache.sh` deletes
+it, at `.zig-cache.saved` or `.zig-cache.restored`, under a
 second 20 s limit (the restore, which downloads and writes the same tree, took at most
 3.9 s) and warns, without failing the step, if the deletion fails or is stopped.
 The restore and both saves are actions, whose step timeout GitHub counts in whole

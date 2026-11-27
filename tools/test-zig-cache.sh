@@ -844,6 +844,59 @@ expect_saved true
 expect_present h/$m1 o/$f1/test
 expect_absent h/$m4 o/$f4
 
+begin stray-stage
+track
+use h/$m1 o/$f1/test
+waiting_stray "exec 3>> '.zig-cache/o/$f1/test'" "printf 'stray' >&3"
+run stage
+expect_stray_gone "a compilation left running outlived stage"
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$stray]"
+expect_saved true
+expect_recorded
+
+begin stray-unstage
+track
+use h/$m1 o/$f1/test
+run stage
+expect_saved true
+: > "$GITHUB_OUTPUT"
+waiting_stray "cd '$extraction'" "mkdir -p o/stray
+printf 'stray' > o/stray/test"
+run unstage
+expect_stray_gone "a compile save left running outlived unstage"
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$stray]"
+run admit
+expect_saved true
+expect_recorded
+expect_present h/$m1 o/$f1/test
+expect_absent o/stray h/$m4 o/$f4
+
+begin stray-admit
+track
+use h/$m1 o/$f1/test
+waiting_stray "exec 3>> '.zig-cache/o/$f1/test'" "printf 'stray' >&3
+mkdir -p '.zig-cache/o/stray'
+printf 'stray' > '.zig-cache/o/stray/test'"
+run admit
+expect_stray_gone "a check left running outlived admit"
+expect_report "::warning::Compiler cache: stopped what earlier steps left running: bash[$stray]"
+expect_saved true
+[[ ! -e .zig-cache ]] || fail "a check left running wrote into .zig-cache after admit"
+expect_recorded
+expect_absent o/stray
+
+begin stray-admit-outlives-kill
+track
+use h/$m1 o/$f1/test
+waiting_stray
+BASH_ENV=$scratch/kill-ignored KOSMOS_CACHE_STEP_SECONDS_MAX=4 run admit ||
+    fail "admit failed when a process outlived its kill"
+expect_report "::warning::Compiler cache: what earlier steps left running did not exit within 2 s of SIGKILL: bash[$stray]"
+expect_report '; save skipped'
+expect_saved false
+expect_present h/$m1 o/$f1/test h/$m4 o/$f4/test
+: > "$workspace/release"
+
 printf "trap '' TERM\n" > "$scratch/ignore-term"
 for signal in term kill; do
     for command in cmp touch; do

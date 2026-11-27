@@ -79,7 +79,7 @@ limit() {
         printf '::warning::Compiler cache: %s failed with status %d; this job saves no further compiler cache\n' \
             "$mode" "$status"
     fi
-    if [[ "$mode" == track && -e "$restored" ]]; then
+    if [[ "$mode" == track && ( -e "$saved" || -e "$restored" ) ]]; then
         discard
     fi
     exit "$status"
@@ -87,7 +87,7 @@ limit() {
 
 discard() {
     local status=0
-    timeout -k "$kill_seconds" "$step_seconds_max" rm -rf -- "$restored" || status=$?
+    timeout -k "$kill_seconds" "$step_seconds_max" rm -rf -- "$saved" "$restored" || status=$?
     if (( status == 0 )); then
         printf 'Compiler cache: deleted the unverified restored tree\n'
     else
@@ -121,10 +121,14 @@ skip() {
 }
 
 take() {
+    local held=
+    mkdir -p -- "$state"
     if [[ -e "$state/armed" ]]; then
-        mark=$(< "$state/armed")
+        held=$(< "$state/armed")
         rm -f -- "$state/armed"
     fi
+    stop
+    mark=$held
 }
 
 give() {
@@ -221,12 +225,10 @@ stop() {
 track() {
     local bytes tracking
     rm -rf -- "$state"
-    mkdir -p -- "$state"
+    take
     if [[ -e "$saved" ]]; then
         mv -T -- "$saved" "$restored"
     fi
-    stop
-    rm -rf -- "$saved"
     if [[ "$1" == success && -f "$restored/kosmos-cache-record" ]]; then
         tree_record "$restored" > "$state/restored-record"
         if cmp -s -- "$restored/kosmos-cache-record" "$state/restored-record"; then
@@ -439,7 +441,7 @@ stage() {
 }
 
 unstage() {
-    local unit held
+    local unit
     take
     if [[ -e "$state/sealed" && -e "$saved" ]]; then
         mv -T -- "$saved" "$cache"
@@ -460,10 +462,6 @@ unstage() {
         return 0
     fi
     if [[ -f "$state/used" ]]; then
-        held=$mark
-        mark=
-        stop
-        mark=$held
         cat -- "$state/used" >> "$state/earlier"
         arm
     fi
