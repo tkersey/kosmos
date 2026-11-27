@@ -73,7 +73,21 @@ limit() {
         printf '::warning::Compiler cache: %s failed with status %d; this job saves no further compiler cache\n' \
             "$mode" "$status"
     fi
+    if [[ "$mode" == track && -e "$restored" ]]; then
+        discard
+    fi
     exit "$status"
+}
+
+discard() {
+    local status=0
+    timeout -k "$kill_seconds" "$step_seconds_max" rm -rf -- "$restored" || status=$?
+    if (( status == 0 )); then
+        printf 'Compiler cache: deleted the unverified restored tree\n'
+    else
+        printf '::warning::Compiler cache: deleting the unverified restored tree stopped or failed with status %d; it stays in the workspace\n' \
+            "$status"
+    fi
 }
 
 begin() {
@@ -440,7 +454,7 @@ case "${1:-}" in
         ;;
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage
-        begin "$1" 'the restored tree is set aside and this job saves no compiler cache' "$@"
+        begin "$1" 'the restored tree is deleted and this job saves no compiler cache' "$@"
         track "$2"
         ;;
     stage | unstage | admit)

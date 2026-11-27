@@ -546,6 +546,7 @@ if PATH=$failing_path track; then
     fail "track succeeded with a failing rm"
 fi
 expect_report '::warning::Compiler cache: the restored tree differs from its record'
+expect_report '::warning::Compiler cache: deleting the unverified restored tree stopped or failed with status 1; it stays in the workspace'
 [[ ! -e .zig-cache ]] || fail "a tree that differs from its record stayed in place"
 
 begin classify-failure
@@ -640,12 +641,27 @@ expect_report "fewer than the 150 s a cache step needs to begin; the pairing too
 
 begin late-track
 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track
-expect_report "fewer than the 150 s a cache step needs to begin; the restored tree is set aside"
-[[ ! -e .zig-cache && -e .zig-cache.restored/h/$m1 ]] || fail "a late track left the unverified tree in place"
+expect_report "fewer than the 150 s a cache step needs to begin; the restored tree is deleted"
+expect_report 'Compiler cache: deleted the unverified restored tree'
+[[ ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a late track left the unverified tree in the workspace"
 compile o/$f1/test
 run stage
 expect_saved false
 expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+
+begin late-track-stuck-deletion
+failing rm << 'EOF'
+if [[ "$*" == *.zig-cache.restored* ]]; then
+    sleep 5
+fi
+exec "$REAL_RM" "$@"
+EOF
+started=$(date +%s)
+PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track ||
+    fail "a late track whose deletion was stopped failed"
+(( $(date +%s) - started <= 3 )) || fail "a stopped deletion took $(( $(date +%s) - started )) s for a 1 s limit"
+expect_report '::warning::Compiler cache: deleting the unverified restored tree stopped or failed with status 124; it stays in the workspace'
+[[ ! -e .zig-cache ]] || fail "a late track left the unverified tree in use"
 
 begin late-stage
 track
@@ -664,24 +680,30 @@ expect_absent h/$m4 o/$f4 b/stale
 
 printf "trap '' TERM\n" > "$scratch/ignore-term"
 for signal in term kill; do
-    begin "track-timeout-$signal"
-    failing touch <<< 'sleep 5'
-    started=$(date +%s)
-    if [[ "$signal" == term ]]; then
-        PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track && fail "track succeeded past its limit"
-    else
-        BASH_ENV=$scratch/ignore-term PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track &&
-            fail "track ignoring SIGTERM succeeded past its limit"
-    fi
-    (( $(date +%s) - started <= 3 )) || fail "a stopped track took $(( $(date +%s) - started )) s for a 1 s limit"
-    expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
-    [[ ! -e .zig-cache.restored ]] || [[ ! -e .zig-cache ]] || fail "a stopped track left two trees"
-    run stage
-    expect_saved false
-    run unstage
-    run admit
-    expect_saved false
-    expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+    for command in cmp touch; do
+        begin "track-timeout-$signal-$command"
+        failing "$command" <<< 'sleep 5'
+        started=$(date +%s)
+        if [[ "$signal" == term ]]; then
+            PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track && fail "track succeeded past its limit"
+        else
+            BASH_ENV=$scratch/ignore-term PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track &&
+                fail "track ignoring SIGTERM succeeded past its limit"
+        fi
+        (( $(date +%s) - started <= 3 )) || fail "a stopped track took $(( $(date +%s) - started )) s for a 1 s limit"
+        expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
+        [[ ! -e .zig-cache.restored ]] || fail "a stopped track left the restored tree in the workspace"
+        if [[ "$command" == cmp ]]; then
+            expect_report 'Compiler cache: deleted the unverified restored tree'
+            [[ ! -e .zig-cache ]] || fail "a track stopped before verifying the tree left it in use"
+        fi
+        run stage
+        expect_saved false
+        run unstage
+        run admit
+        expect_saved false
+        expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+    done
 done
 
 scenario=host-cpu
@@ -735,10 +757,10 @@ grep -Fxq "        run: bash tools/zig-cache.sh track \"\$RESTORE\"" "$workflow"
     fail "track does not run under the tool's limit"
 grep -Fq "started=\$(timeout -k 1 10 gh api " "$workflow" || fail "reading the job start has no 10 s limit"
 grep -Fxq "        if: steps.start.outputs.due == 'true'" "$workflow" || fail "the restore does not wait for the time check"
-bound=$(( (10 + 1) + 2 * (60 + 10) + 4 * (step_limit + kill_after) ))
-(( bound == 235 )) || fail "cache work before the checks may take $bound s, not the documented 235 s"
-grep -Fq '11 + 70 + 21 + 21 + 21 + 70 + 21 = 235 s' "$tools/../docs/verification.md" ||
-    fail "docs/verification.md does not state the 235 s bound"
+bound=$(( (10 + 1) + 2 * (60 + 10) + 5 * (step_limit + kill_after) ))
+(( bound == 256 )) || fail "cache work before the checks may take $bound s, not the documented 256 s"
+grep -Fq '11 + 70 + 21 + (21 + 21) + 21 + 70 + 21 = 256 s' "$tools/../docs/verification.md" ||
+    fail "docs/verification.md does not state the 256 s bound"
 if ! grep -Fq "grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::" "$workflow" ||
     ! grep -Fq "if ! cpu=\$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then" "$workflow" ||
     ! grep -Fxq '            cpu=baseline' "$workflow"; then

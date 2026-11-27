@@ -286,15 +286,18 @@ restored a cache, took 2.5–4.3 s. `tools/zig-cache.sh` runs the tool's build, 
 the stage, `unstage` and the admission each under its own `timeout`, which stops it after
 20 s, about four times the longest measured, with SIGTERM and 1 s later SIGKILL; it then
 warns that the step exceeded its 20 s limit and was stopped, or that it failed with its
-status, and no later step saves. Reading the job's start stops after 10 s (SIGKILL 1 s
-later).
+status, and no later step saves. When `track` skips, fails or is stopped while the
+restored tree is still aside, `tools/zig-cache.sh` deletes `.zig-cache.restored` under a
+second 20 s limit (the restore, which downloads and writes the same tree, took at most
+3.9 s) and warns, without failing the step, if the deletion fails or is stopped.
+Reading the job's start stops after 10 s (SIGKILL 1 s later).
 The restore and both saves are actions, whose step timeout GitHub counts in whole
 minutes (the runner's `StepsRunner` takes `timeout-minutes` as an integer), so they keep
 `timeout-minutes: 1`, and the runner ends a timed-out step within 10 s more (SIGINT,
 7.5 s, SIGTERM, 2.5 s, then a kill). With every cache step hanging until it is stopped,
 the cache work before a lane's checks (reading the start, the restore, the tool's build,
-`track`, the stage, the compile save and `unstage`) adds at most
-11 + 70 + 21 + 21 + 21 + 70 + 21 = 235 s,
+`track` and its deletion, the stage, the compile save and `unstage`) adds at most
+11 + 70 + 21 + (21 + 21) + 21 + 70 + 21 = 256 s,
 and the cache work after them (the admission and the checked save) at most 21 + 70 = 91 s,
 beside GitHub's start-up of each step (under 0.1 s in these logs). The target identity
 diagnostic, which `main` already ran on the native and source lanes, is not cache work
@@ -305,20 +308,20 @@ job's own record (`job.check_run_id`) in the Actions API, into `KOSMOS_JOB_START
 runs `tools/zig-cache.sh due`, which the restore waits for; the tool's build, `track`, the
 stage and the admission check the same start when they begin. Past 450 s each warns and
 skips: the restore does not run; the pairing tool is not built, so no later step saves;
-`track` leaves the restored tree aside unverified, so the lane compiles from nothing and
-saves nothing; the stage sets nothing aside, so the compile
+`track` deletes the restored tree unverified, so the lane compiles from nothing and saves
+nothing; the stage sets nothing aside, so the compile
 save does not run and `unstage` returns nothing and keeps `track`'s mark; the admission
 neither prunes nor saves. The compile save and `unstage` run only after a stage that
 began by 450 s, to save and return what it set aside. When the start cannot be read,
 `due` warns once, the steps before the checks run without a time check, still within
-their 235 s, and the admission skips.
+their 256 s, and the admission skips.
 The 150 s cover the admission's 21 s, the checked save's 70 s, 30 s for the steps that
 end the job (at most 4 s in round 9's 28 lane runs) and clock skew: an admission that
 starts by 450 s ends by 471 s, its save by 541 s and the job by 571 s, so the cache work
 after the checks never cancels a lane (an admission that skips only reads the clock).
 Cache work can therefore push a lane past its ten-minute limit only through its at most
-235 s before the checks, that is only when the lane's other steps take more than
-600 − 235 = 365 s; after a compilation that ends past 450 s it adds only a stage that
+256 s before the checks, that is only when the lane's other steps take more than
+600 − 256 = 344 s; after a compilation that ends past 450 s it adds only a stage that
 reads the clock and skips and an `unstage` with nothing to return. A lane whose checks end by 450 s
 keeps its checked save; a colder lane (sessions ended its checks at 543 s in run
 45946785256) keeps only its compile save, which a full rerun after a cold timeout
@@ -327,7 +330,7 @@ restores. Every compilation measured so far ended by 350 s (portable, cold, in r
 compiles cold again. Cache work counts against the run's 600 s gate like any other
 step: 10.2 s per lane at the median of those 84 lane runs and 16.9 s at most, when most
 lanes restored the pairing tool's build; built cold in every job that saves, it adds
-2.5–4.3 s to each. By the limits it adds at most 235 + 91 = 326 s.
+2.5–4.3 s to each. By the limits it adds at most 256 + 91 = 347 s.
 The stage, both saves, `unstage` and the admission carry no status condition, so GitHub
 runs each only after every earlier step has succeeded or been tolerated, and the
 admission and its save are the lane's last steps. A failed compilation saves nothing. A
