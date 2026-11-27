@@ -172,9 +172,9 @@ runner OS and architecture, Zig version, host target, chosen CPU, lane and
 dependency-lock hash, and every restore prefix names the same target and CPU, so host
 artifacts hit on every runner model that chooses the same CPU. Zig compiles its build
 runner and configure script for the runner itself, and the extracted-package consumer
-keeps its default target, so only those vary by runner model. Builds without either
-option stay native; a host CPU requires a host target that names its architecture, OS
-and ABI.
+keeps its default target, so only those vary by runner model; a lane on a model other
+than the one that saved its entry compiles them again. Builds without either option stay
+native; a host CPU requires a host target that names its architecture, OS and ABI.
 Every lane compiles before it runs a check. The native lanes compile with their
 `build-*` steps. Every other lane runs its `zig build` arguments once with
 `-Dcompile-only=true`, under which each requested step depends only on the
@@ -188,7 +188,9 @@ After restoring, `tools/zig-cache.sh track` discards a restore that failed or ti
 out, so a partial extraction never becomes the working cache. It then checks on the
 workspace filesystem that reading a file updates its access time, marks every restored
 file unread, and records the change time of a file it touches, waiting until a second
-touch reads a later change time, so every later write follows the mark.
+touch reads a later change time, so every later write follows the mark. The target
+identity diagnostic reads restored builtin modules before this, so its reads count for
+nothing.
 `tools/zig-cache.sh admit` keeps a unit (a manifest, output, configuration, ZIR file,
 builtin module, package archive or extracted package) when the compilation read or
 wrote it; a file counts as written when its change time follows the mark, which
@@ -229,6 +231,9 @@ requests and F the runs whose retention job has not finished, the compiler cache
 at most (1 + P + F) × S, beside `main`'s Zig tarball saved by the setup action
 (57,413,921 bytes). GitHub evicts caches only above 10 GB, so pull request caches can
 cause `main`'s to be evicted only if (1 + P + F) × S plus that tarball exceeds 10 GB.
+In run 45938510116 one set was S = 864,596,374 bytes, native-driver's entry the largest
+at 100,209,414 bytes, so `main`'s caches cannot be evicted while P + F ≤ 10: eleven
+sets and the tarball total 9,567,974,035 bytes. The bound shrinks as S grows.
 The native owners, ordinary driver and checked recovery driver each compile on
 a separate runner.
 The ordinary driver uses the legacy compiler and compares the shipped artifact
