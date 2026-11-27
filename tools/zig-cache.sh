@@ -13,12 +13,15 @@ unread_epoch=1
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
 build_runner_jobs_max=6
 job_seconds_max=600
-after_checks_seconds_min=150
+remaining_seconds_min=150
+step_seconds_max=${KOSMOS_CACHE_STEP_SECONDS_MAX:-20}
+kill_seconds=1
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
 mark=
 
 usage() {
     printf 'Usage: bash tools/zig-cache.sh host-cpu < /proc/cpuinfo\n' >&2
+    printf '       bash tools/zig-cache.sh due\n' >&2
     printf '       bash tools/zig-cache.sh track success|failure|cancelled|skipped\n' >&2
     printf '       bash tools/zig-cache.sh stage|unstage|admit\n' >&2
     exit 64
@@ -51,16 +54,36 @@ pairs() {
         "$pairs_source" -- "$cache"
 }
 
-failed() {
-    local status=$?
-    if (( status != 0 )); then
+limit() {
+    local status=0
+    KOSMOS_CACHE_LIMITED=1 timeout -k "$kill_seconds" "$step_seconds_max" bash "${BASH_SOURCE[0]}" "$@" ||
+        status=$?
+    if (( status == 124 || status == 137 )); then
+        printf '::warning::Compiler cache: %s exceeded its %d s limit and was stopped; this job saves no further compiler cache\n' \
+            "$mode" "$step_seconds_max"
+    elif (( status != 0 )); then
         printf '::warning::Compiler cache: %s failed with status %d; this job saves no further compiler cache\n' \
             "$mode" "$status"
+    fi
+    exit "$status"
+}
+
+begin() {
+    mode=$1
+    skipped=$2
+    shift 2
+    state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
+    aside=$state/aside
+    if [[ -z "${KOSMOS_CACHE_LIMITED:-}" ]]; then
+        if [[ "$mode" == stage || "$mode" == admit ]]; then
+            printf 'save=false\n' >> "$output"
+        fi
+        limit "$@"
     fi
 }
 
 skip() {
-    printf '%s; save skipped\n' "$1"
+    printf '%s; %s\n' "$1" "$skipped"
     if [[ -n "$mark" ]]; then
         give
     fi
@@ -120,6 +143,7 @@ track() {
     fi
     rm -rf -- "$state"
     mkdir -p -- "$state"
+    fits
     if [[ "$1" == success && -f "$restored/kosmos-cache-record" ]]; then
         tree_record "$restored" > "$state/restored-record"
         if cmp -s -- "$restored/kosmos-cache-record" "$state/restored-record"; then
@@ -152,12 +176,19 @@ track() {
 fits() {
     local started=${KOSMOS_JOB_STARTED:-} now left
     if [[ ! "$started" =~ ^[0-9]+$ ]]; then
-        skip '::warning::Compiler cache: the job start is unknown, so a save might outlast the job'
+        if [[ "$mode" == admit ]]; then
+            skip '::warning::Compiler cache: the job start is unknown, so a save might outlast the job'
+        fi
+        if [[ "$mode" == due ]]; then
+            printf '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run without a time check and the checked save is skipped\n'
+        fi
+        printf 'Compiler cache: the job start is unknown; %s runs without a time check\n' "$mode"
+        return 0
     fi
     now=$(date +%s)
     left=$(( job_seconds_max - (now - started) ))
-    if (( left < after_checks_seconds_min )); then
-        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${after_checks_seconds_min} s the admission, the save and the job's end may take"
+    if (( left < remaining_seconds_min )); then
+        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${remaining_seconds_min} s a cache step needs to begin"
     fi
     printf "Compiler cache: %s s of the job's %s s remain\n" "$left" "$job_seconds_max"
 }
@@ -338,6 +369,7 @@ seal() {
 stage() {
     local unit
     take
+    fits
     classify
     while IFS= read -r unit; do
         mkdir -p -- "$(dirname -- "$aside/$unit")"
@@ -366,8 +398,8 @@ unstage() {
     fi
     if [[ -f "$state/used" ]]; then
         cat -- "$state/used" >> "$state/earlier"
+        arm
     fi
-    arm
     give
 }
 
@@ -387,22 +419,22 @@ case "${1:-}" in
         [[ $# -eq 1 ]] || usage
         host_cpu
         ;;
+    due)
+        [[ $# -eq 1 ]] || usage
+        mode=$1
+        skipped='restore skipped'
+        printf 'due=false\n' >> "$output"
+        fits
+        printf 'due=true\n' >> "$output"
+        ;;
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage
-        state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
-        mode=$1
-        trap failed EXIT
+        begin "$1" 'the restored tree is set aside and this job saves no compiler cache' "$@"
         track "$2"
         ;;
     stage | unstage | admit)
         [[ $# -eq 1 ]] || usage
-        state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
-        aside=$state/aside
-        mode=$1
-        trap failed EXIT
-        if [[ "$1" != unstage ]]; then
-            printf 'save=false\n' >> "$output"
-        fi
+        begin "$1" 'save skipped' "$@"
         "$1"
         ;;
     *)

@@ -86,8 +86,22 @@ jobs:
           printf 'KOSMOS_HOST_CPU=%s\n' "$cpu" | tee -a "$GITHUB_ENV"
           printf 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0.17.1-%s-%s\n' \
             "$RUNNER_OS" "$RUNNER_ARCH" "$KOSMOS_HOST_TARGET" "$cpu" | tee -a "$GITHUB_ENV"
+      - name: Read the job's start and decide whether to restore the compiler cache
+        id: start
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          started=$(timeout -k 1 10 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID" --jq '.started_at | fromdate') ||
+            started=
+          started=${started//[^0-9]/}
+          printf 'KOSMOS_JOB_STARTED=%s\n' "$started" | tee -a "$GITHUB_ENV"
+          KOSMOS_JOB_STARTED=$started bash tools/zig-cache.sh due
       - name: Restore complete compiler cache
         id: cache
+        if: steps.start.outputs.due == 'true'
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
@@ -139,13 +153,7 @@ jobs:
         timeout-minutes: 1
         env:
           RESTORE: ${{ steps.cache.outcome }}
-          GH_TOKEN: ${{ github.token }}
-          JOB_ID: ${{ job.check_run_id }}
-        run: |
-          started=$(timeout 15 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID" --jq '.started_at | fromdate') ||
-            started=
-          printf 'KOSMOS_JOB_STARTED=%s\n' "${started//[^0-9]/}" | tee -a "$GITHUB_ENV"
-          bash tools/zig-cache.sh track "$RESTORE"
+        run: bash tools/zig-cache.sh track "$RESTORE"
       - name: Compile native qualification and independently rebuild the core
         if: startsWith(matrix.lane, 'native')
         run: |

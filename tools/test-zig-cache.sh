@@ -568,6 +568,62 @@ KOSMOS_JOB_STARTED=$(( $(date +%s) - 440 )) run admit
 expect_saved true
 expect_absent h/$m4 o/$f4 b/stale
 
+begin due
+run due || fail "due exited $?"
+[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an on-time job does not restore"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run due || fail "a late due exited $?"
+[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=false ]] || fail "a late job restores"
+expect_report "of the job's 600 s remain, fewer than the 150 s a cache step needs to begin; restore skipped"
+KOSMOS_JOB_STARTED='' run due || fail "due with an unknown start exited $?"
+[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an unknown start skips the restore"
+expect_report '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run'
+
+begin late-track
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track
+expect_report "fewer than the 150 s a cache step needs to begin; the restored tree is set aside"
+[[ ! -e .zig-cache && -e .zig-cache.restored/h/$m1 ]] || fail "a late track left the unverified tree in place"
+compile o/$f1/test
+run stage
+expect_saved false
+expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+
+begin late-stage
+track
+use h/$m1 o/$f1/test
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run stage
+expect_saved false
+expect_report "fewer than the 150 s a cache step needs to begin; save skipped"
+expect_present h/$m2 o/$f2/test h/$m4 o/$f4/test b/stale p/stale.tar.gz
+[[ ! -e "$KOSMOS_CACHE_STATE/aside" ]] || fail "a late stage set units aside"
+: > "$GITHUB_OUTPUT"
+run unstage
+run admit
+expect_saved true
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m4 o/$f4 b/stale
+
+printf "trap '' TERM\n" > "$scratch/ignore-term"
+for signal in term kill; do
+    begin "track-timeout-$signal"
+    failing touch <<< 'sleep 5'
+    started=$(date +%s)
+    if [[ "$signal" == term ]]; then
+        PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track && fail "track succeeded past its limit"
+    else
+        BASH_ENV=$scratch/ignore-term PATH=$failing_path KOSMOS_CACHE_STEP_SECONDS_MAX=1 track &&
+            fail "track ignoring SIGTERM succeeded past its limit"
+    fi
+    (( $(date +%s) - started <= 3 )) || fail "a stopped track took $(( $(date +%s) - started )) s for a 1 s limit"
+    expect_report '::warning::Compiler cache: track exceeded its 1 s limit and was stopped; this job saves no further compiler cache'
+    [[ ! -e .zig-cache.restored ]] || [[ ! -e .zig-cache ]] || fail "a stopped track left two trees"
+    run stage
+    expect_saved false
+    run unstage
+    run admit
+    expect_saved false
+    expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+done
+
 scenario=host-cpu
 flags=(fpu cx8 cmov mmx fxsr sse sse2 lm pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2
     bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
@@ -593,7 +649,7 @@ awk '
     job == "qualify:" && /^        if: / { condition[steps] = $0 }
     job == "qualify:" && /^        continue-on-error: / { tolerated[steps] = $2 }
     job == "qualify:" && /^        timeout-minutes: / { minutes[steps] = $2 }
-    job == "qualify:" && /tools\/zig-cache\.sh (track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
+    job == "qualify:" && /tools\/zig-cache\.sh (due|track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
     END {
         for (i = 1; i <= steps; i++) {
             printf "%d\t%s\t%s\t%s\t%s\t%d\n", i, name[i], condition[i], tolerated[i], minutes[i], cache[i]
@@ -602,14 +658,27 @@ awk '
 ' "$workflow" > "$scratch/steps.tsv"
 awk -F '\t' '($6 || $2 ~ /^Record native compiler/) && !($4 == "true" && $5 == 1) { print $2 }' \
     "$scratch/steps.tsv" > "$scratch/intolerant.txt"
-(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 7 )) || fail "the qualification job does not have seven cache steps"
+(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 8 )) || fail "the qualification job does not have eight cache steps"
 [[ ! -s "$scratch/intolerant.txt" ]] ||
     fail "a cache step can fail the lane or outlast a minute: $(tr '\n' ';' < "$scratch/intolerant.txt")"
 job_minutes=$(awk '/^  qualify:$/ { active = 1 } active && /^    timeout-minutes: / { print $2; exit }' "$workflow")
 job_seconds=$(sed -n 's/^job_seconds_max=//p' "$script")
-after_checks=$(sed -n 's/^after_checks_seconds_min=//p' "$script")
-(( job_seconds == job_minutes * 60 && after_checks >= 2 * 60 + 30 )) ||
+remaining=$(sed -n 's/^remaining_seconds_min=//p' "$script")
+step_limit=$(sed -n 's/^step_seconds_max=.{KOSMOS_CACHE_STEP_SECONDS_MAX:-\([0-9]*\)}$/\1/p' "$script")
+kill_after=$(sed -n 's/^kill_seconds=//p' "$script")
+(( job_seconds == job_minutes * 60 && remaining >= 2 * 60 + 30 )) ||
     fail "the checked save's margin does not cover two one-minute steps and the job's end"
+for mode in stage unstage admit; do
+    grep -Fxq "        run: bash tools/zig-cache.sh $mode" "$workflow" || fail "$mode does not run under the tool's limit"
+done
+grep -Fxq "        run: bash tools/zig-cache.sh track \"\$RESTORE\"" "$workflow" ||
+    fail "track does not run under the tool's limit"
+grep -Fq "started=\$(timeout -k 1 10 gh api " "$workflow" || fail "reading the job start has no 10 s limit"
+grep -Fxq "        if: steps.start.outputs.due == 'true'" "$workflow" || fail "the restore does not wait for the time check"
+bound=$(( (10 + 1) + 2 * (60 + 10) + 3 * (step_limit + kill_after) ))
+(( bound == 214 )) || fail "cache work before the checks may take $bound s, not the documented 214 s"
+grep -Fq '11 + 70 + 21 + 21 + 70 + 21 = 214 s' "$tools/../docs/verification.md" ||
+    fail "docs/verification.md does not state the 214 s bound"
 if ! grep -Fq "grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::" "$workflow" ||
     ! grep -Fq "if ! cpu=\$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then" "$workflow" ||
     ! grep -Fxq '            cpu=baseline' "$workflow"; then
