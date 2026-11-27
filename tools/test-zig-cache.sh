@@ -642,7 +642,7 @@ track
 use h/$m1 o/$f1/test
 KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run admit
 expect_saved false
-expect_report "of the job's 600 s remain, fewer than the 150 s"
+expect_report "of the job's 600 s remain, fewer than the 150 s needed; save skipped"
 expect_present h/$m4 o/$f4/test b/stale
 KOSMOS_JOB_STARTED='' run admit
 expect_saved false
@@ -654,22 +654,24 @@ expect_absent h/$m4 o/$f4 b/stale
 begin due
 run due || fail "due exited $?"
 [[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an on-time job does not restore"
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run due || fail "a late due exited $?"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 515 )) run due || fail "a due at 515 s exited $?"
+[[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "a job at 515 s does not restore"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 530 )) run due || fail "a late due exited $?"
 [[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=false ]] || fail "a late job restores"
-expect_report "of the job's 600 s remain, fewer than the 150 s a cache step needs to begin; restore skipped"
+expect_report "of the job's 600 s remain, fewer than the 75 s needed; restore skipped"
 KOSMOS_JOB_STARTED='' run due || fail "due with an unknown start exited $?"
 [[ "$(tail -n 1 "$GITHUB_OUTPUT")" == due=true ]] || fail "an unknown start skips the restore"
 expect_report '::warning::Compiler cache: the job start is unknown, so the cache steps before the checks run'
 
 begin late-tool
-RUNNER_TEMP=$workspace/runner KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) build_tool ||
+RUNNER_TEMP=$workspace/runner KOSMOS_JOB_STARTED=$(( $(date +%s) - 580 )) build_tool ||
     fail "a late build of the pairing tool failed"
-expect_report "fewer than the 150 s a cache step needs to begin; the pairing tool is not built"
+expect_report "fewer than the 26 s needed; the pairing tool is not built"
 [[ ! -e "$workspace/runner/zig-cache-pairs" ]] || fail "a late job built the pairing tool"
 
 begin late-track
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) track
-expect_report "fewer than the 150 s a cache step needs to begin; this job uses no restored tree and saves no compiler cache"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 560 )) track
+expect_report "fewer than the 47 s needed; this job uses no restored tree and saves no compiler cache"
 [[ -d "$extraction" && ! -e .zig-cache && ! -e .zig-cache.restored ]] || fail "a late track moved the extraction"
 run unstage
 [[ -d "$extraction" && ! -e .zig-cache ]] || fail "unstage moved an extraction that no stage renamed"
@@ -749,9 +751,9 @@ expect_saved false
 begin late-stage
 track
 use h/$m1 o/$f1/test
-KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run stage
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 510 )) run stage
 expect_saved false
-expect_report "fewer than the 150 s a cache step needs to begin; save skipped"
+expect_report "fewer than the 96 s needed; save skipped"
 expect_present h/$m2 o/$f2/test h/$m4 o/$f4/test b/stale p/stale.tar.gz
 [[ ! -e "$KOSMOS_CACHE_STATE/aside" ]] || fail "a late stage set units aside"
 : > "$GITHUB_OUTPUT"
@@ -760,6 +762,38 @@ run admit
 expect_saved true
 expect_present h/$m1 o/$f1/test
 expect_absent h/$m4 o/$f4 b/stale
+
+begin slow-compile
+track
+use h/$m1 o/$f1/test
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 500 )) run stage
+expect_saved true
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m4 o/$f4 b/stale
+: > "$GITHUB_OUTPUT"
+archive h/$m1 o/$f1/test
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 520 )) run unstage
+[[ -d .zig-cache && ! -e "$extraction" ]] || fail "unstage did not return the saved tree to .zig-cache"
+expect_present h/$m4 o/$f4/test b/stale
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 540 )) run admit
+expect_saved false
+expect_report "fewer than the 150 s needed; save skipped"
+
+begin late-unstage
+track
+use h/$m1 o/$f1/test
+run stage
+expect_saved true
+: > "$GITHUB_OUTPUT"
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 580 )) run unstage
+expect_report "fewer than the 26 s needed; nothing set aside is returned and this job saves no further compiler cache"
+[[ -d .zig-cache && ! -e "$extraction" ]] || fail "a late unstage did not return the saved tree to .zig-cache"
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m2 o/$f2 h/$m4 o/$f4 b/stale
+expect_paired
+run admit
+expect_saved false
+expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
 
 printf "trap '' TERM\n" > "$scratch/ignore-term"
 for signal in term kill; do
@@ -828,11 +862,21 @@ awk -F '\t' '($6 || $2 ~ /^Record native compiler/) && !($4 == "true" && $5 == 1
     fail "a cache step can fail the lane or outlast a minute: $(tr '\n' ';' < "$scratch/intolerant.txt")"
 job_minutes=$(awk '/^  qualify:$/ { active = 1 } active && /^    timeout-minutes: / { print $2; exit }' "$workflow")
 job_seconds=$(sed -n 's/^job_seconds_max=//p' "$script")
-remaining=$(sed -n 's/^remaining_seconds_min=//p' "$script")
+checked=$(sed -n 's/^checked_seconds_min=//p' "$script")
 step_limit=$(sed -n 's/^step_seconds_max=.{KOSMOS_CACHE_STEP_SECONDS_MAX:-\([0-9]*\)}$/\1/p' "$script")
 kill_after=$(sed -n 's/^kill_seconds=//p' "$script")
-(( job_seconds == job_minutes * 60 && remaining >= 2 * 60 + 30 )) ||
-    fail "the checked save's margin does not cover two one-minute steps and the job's end"
+action=$(sed -n 's/^action_seconds_max=//p' "$script")
+margin=$(sed -n 's/^margin_seconds=//p' "$script")
+(( job_seconds == job_minutes * 60 && checked >= (step_limit + kill_after) + action + 30 && action == 60 + 10 &&
+    margin > 0 )) || fail "the checked save's guard does not cover the admission, the checked save and the job's end"
+step_total=$(( step_limit + kill_after ))
+cutoffs="the restore by $(( job_seconds - action - margin )) s, the pairing tool's build by"
+cutoffs+=" $(( job_seconds - step_total - margin )) s, \`track\` by $(( job_seconds - 2 * step_total - margin )) s,"
+cutoffs+=" the stage by $(( job_seconds - step_total - action - margin )) s, \`unstage\` by"
+cutoffs+=" $(( job_seconds - step_total - margin )) s and the admission by $(( job_seconds - checked )) s"
+[[ "$(tr '\n' ' ' < "$tools/../docs/verification.md")" == *"$cutoffs"* ]] ||
+    fail "docs/verification.md does not state the cutoffs: $cutoffs"
+(( job_seconds - step_total - action - margin >= 500 )) || fail "a compilation ending at 500 s gets no compile save"
 for mode in tool stage unstage admit; do
     grep -Fxq "        run: bash tools/zig-cache.sh $mode" "$workflow" || fail "$mode does not run under the tool's limit"
 done

@@ -13,9 +13,12 @@ unread_epoch=1
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
 build_runner_jobs_max=6
 job_seconds_max=600
-remaining_seconds_min=150
+checked_seconds_min=150
 step_seconds_max=${KOSMOS_CACHE_STEP_SECONDS_MAX:-20}
 kill_seconds=1
+step_seconds=$(( step_seconds_max + kill_seconds ))
+action_seconds_max=70
+margin_seconds=5
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
 mark=
 
@@ -53,7 +56,7 @@ pairs() {
 
 tool() {
     rm -f -- "$pairs_tool"
-    fits
+    fits $(( step_seconds + margin_seconds ))
     mkdir -p -- "$tool_dir"
     zig build-exe -fstrip --cache-dir "$tool_dir/local" --global-cache-dir "$tool_dir/global" \
         ${KOSMOS_HOST_TARGET:+-target "$KOSMOS_HOST_TARGET"} \
@@ -207,7 +210,7 @@ track() {
     local bytes tracking
     rm -rf -- "$state"
     mkdir -p -- "$state"
-    fits
+    fits $(( 2 * step_seconds + margin_seconds ))
     if [[ -e "$saved" ]]; then
         mv -T -- "$saved" "$restored"
     fi
@@ -240,7 +243,7 @@ track() {
 }
 
 fits() {
-    local started=${KOSMOS_JOB_STARTED:-} now left
+    local needed=$1 started=${KOSMOS_JOB_STARTED:-} now left
     if [[ ! "$started" =~ ^[0-9]+$ ]]; then
         if [[ "$mode" == admit ]]; then
             skip '::warning::Compiler cache: the job start is unknown, so a save might outlast the job'
@@ -253,8 +256,8 @@ fits() {
     fi
     now=$(date +%s)
     left=$(( job_seconds_max - (now - started) ))
-    if (( left < remaining_seconds_min )); then
-        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${remaining_seconds_min} s a cache step needs to begin"
+    if (( left < needed )); then
+        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${needed} s needed"
     fi
     printf "Compiler cache: %s s of the job's %s s remain\n" "$left" "$job_seconds_max"
 }
@@ -436,7 +439,7 @@ seal() {
 stage() {
     local unit
     take
-    fits
+    fits $(( step_seconds + action_seconds_max + margin_seconds ))
     classify
     while IFS= read -r unit; do
         mkdir -p -- "$(dirname -- "$aside/$unit")"
@@ -446,12 +449,16 @@ stage() {
 }
 
 unstage() {
-    local unit
+    local unit held
     take
     if [[ -e "$state/sealed" && -e "$saved" ]]; then
         mv -T -- "$saved" "$cache"
     fi
     rm -f -- "$state/sealed" "$record" "$history"
+    held=$mark
+    mark=
+    fits $(( step_seconds + margin_seconds ))
+    mark=$held
     if [[ -f "$state/prune" ]]; then
         tac -- "$state/prune" > "$state/return"
         while IFS= read -r unit; do
@@ -476,7 +483,7 @@ unstage() {
 admit() {
     local unit
     take
-    fits
+    fits "$checked_seconds_min"
     classify
     while IFS= read -r unit; do
         rm -rf -- "${cache:?}/$unit"
@@ -494,7 +501,7 @@ case "${1:-}" in
         mode=$1
         skipped='restore skipped'
         printf 'due=false\n' >> "$output"
-        fits
+        fits $(( action_seconds_max + margin_seconds ))
         printf 'due=true\n' >> "$output"
         ;;
     tool)
@@ -507,10 +514,15 @@ case "${1:-}" in
         begin "$1" 'this job uses no restored tree and saves no compiler cache' "$@"
         track "$2"
         ;;
-    stage | unstage | admit)
+    stage | admit)
         [[ $# -eq 1 ]] || usage
         begin "$1" 'save skipped' "$@"
         "$1"
+        ;;
+    unstage)
+        [[ $# -eq 1 ]] || usage
+        begin "$1" 'nothing set aside is returned and this job saves no further compiler cache' "$@"
+        unstage
         ;;
     *)
         usage
