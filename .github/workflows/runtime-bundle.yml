@@ -291,12 +291,28 @@ jobs:
             -Doptimize=safe -Dpackaged-runtime=true --summary all
       - name: Package the tested ordinary JS consumer
         if: matrix.lane == 'portable'
-        working-directory: zig-out/runtime
+        shell: bash tools/zig-cache.sh work {0}
         run: |
+          cd zig-out/runtime
           archive=$(npm pack --offline --ignore-scripts --silent --pack-destination "$RUNNER_TEMP")
           mv "$RUNNER_TEMP/$archive" "$RUNNER_TEMP/kosmos-runtime-package.tar.gz"
+      - name: Admit the lane's bounded compiler cache
+        id: cache_admission
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        timeout-minutes: 1
+        run: bash tools/zig-cache.sh admit "$KOSMOS_CACHE_ENTRY_BYTES_MAX"
+      - name: Retain the lane's bounded compiler cache
+        if: ${{ !cancelled() && steps.cache_admission.outputs.save == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .zig-cache-upload
+          key: kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Retain the tested package
         if: matrix.lane == 'portable'
+        timeout-minutes: 1
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: kosmos-runtime-package-${{ github.sha }}
@@ -304,18 +320,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Admit the lane's bounded compiler cache
-        id: cache_admission
-        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        continue-on-error: true
-        run: bash tools/zig-cache.sh admit "$KOSMOS_CACHE_ENTRY_BYTES_MAX"
-      - name: Retain the lane's bounded compiler cache
-        if: ${{ !cancelled() && steps.cache_admission.outputs.save == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: .zig-cache-upload
-          key: kosmos-native-v4-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ env.KOSMOS_HOST_TARGET }}-${{ env.KOSMOS_HOST_CPU }}/${{ matrix.lane }}/${{ hashFiles('build.zig.zon', 'build-profile.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   runtime-complete:
     name: Runtime qualification budget
     needs: qualify
