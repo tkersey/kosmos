@@ -1031,6 +1031,67 @@ expect_retained '::warning::Closed pull request cache cleanup stopped where ' 'c
 retain gh-stuck '' close.sh
 expect_retained '::warning::A deleted cache is still listed after 30 seconds' 'cleanup with a stuck deletion'
 
+scenario=budget
+run_block "$workflow" runtime-complete > "$scratch/budget.sh"
+mkdir -p -- "$scratch/gh-runs"
+cat > "$scratch/gh-runs/gh" << 'EOF'
+#!/usr/bin/env bash
+set -o pipefail
+while (( $# > 0 )); do
+    case "$1" in
+        --jq) filter=$2; shift ;;
+        repos/*) path=$1 ;;
+    esac
+    shift
+done
+case "$path" in
+    repos/o/r/actions/runs/7/attempts/2) printf '{"run_attempt": 2, "run_started_at": "%s"}\n' "$ATTEMPT_STARTED" ;;
+    repos/o/r/actions/runs/7/attempts/2/jobs\?per_page=100) cat "$JOBS" ;;
+    *) exit 1 ;;
+esac | jq -r "$filter"
+EOF
+chmod +x -- "$scratch/gh-runs/gh"
+ago() {
+    date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ
+}
+budget() {
+    local qualification=$1 attempt=$2 lane status=0
+    shift 2
+    {
+        printf '{"total_count": %d, "jobs": [' $(( $# + 2 ))
+        printf '{"name": "TigerStyle", "run_attempt": 2, "started_at": "%s"}' "$(ago "$attempt")"
+        for lane in "$@"; do
+            printf ', {"name": "Qualify / %s", "run_attempt": 2, "started_at": "%s"}' "${lane%=*}" "$(ago "${lane#*=}")"
+        done
+        printf ', {"name": "Runtime qualification budget", "run_attempt": 2, "started_at": "%s"}]}\n' "$(ago 0)"
+    } > "$scratch/jobs.json"
+    : > "$scratch/budget-summary"
+    env PATH="$scratch/gh-runs:$PATH" GH_REPO=o/r RUN_ID=7 RUN_ATTEMPT=2 QUALIFICATION="$qualification" \
+        ATTEMPT_STARTED="$(ago "$attempt")" JOBS="$scratch/jobs.json" GITHUB_STEP_SUMMARY="$scratch/budget-summary" \
+        bash -e "$scratch/budget.sh" > "$scratch/budget.out" 2>&1 || status=$?
+    printf '%d\n' "$status"
+}
+rerun_all='::error::Attempt 2 did not run every qualification lane itself; re-run all jobs, not only the failed ones'
+expect_budget() {
+    local status=$1 expected=$2 case=$3
+    if [[ "$expected" == pass ]]; then
+        (( status == 0 )) || fail "$case failed the budget gate: $(tr '\n' '|' < "$scratch/budget.out")"
+    else
+        (( status != 0 )) || fail "$case passed the budget gate"
+        [[ -z "$expected" ]] || grep -Fq -- "$expected" "$scratch/budget.out" ||
+            fail "$case lacks: $expected ($(tr '\n' '|' < "$scratch/budget.out"))"
+    fi
+}
+expect_budget "$(budget success 300 sessions=297 native=296)" pass 'a full run within 600 s'
+grep -Eq '^Runtime qualification before budget gate: 30[0-9]s ' "$scratch/budget-summary" ||
+    fail "the budget gate measured other than the attempt's start: $(< "$scratch/budget-summary")"
+expect_budget "$(budget success 6 sessions=900 native=4)" "$rerun_all" 'a rerun of only the failed lanes'
+expect_budget "$(budget success 6 sessions=900 native=880)" "$rerun_all" 'a rerun of only the budget gate'
+expect_budget "$(budget success 6)" "$rerun_all" 'an attempt listing no lane'
+expect_budget "$(budget success 700 sessions=697 native=696)" 'Runtime qualification before budget gate: 70' \
+    'a full run past 600 s'
+expect_budget "$(budget failure 300 sessions=297 native=296)" '' 'a failed lane'
+
 scenario=zig-pairs
 for directory in "$real_cache/local" "$tool_cache/global"; do
     find "$directory/h" -type f ! -name timestamp -size +0c -printf 'h/%P\n' > "$scratch/finalized.txt"

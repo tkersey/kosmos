@@ -321,10 +321,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           QUALIFICATION: ${{ needs.qualify.result }}
         run: |
           test "$QUALIFICATION" = success
-          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
+          attempt="repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT"
+          started="$(gh api "$attempt" --jq .run_started_at)"
+          lanes="$(gh api --paginate "$attempt/jobs?per_page=100" --jq '.jobs[] | select(.name | startswith("Qualify / ")) | .started_at // ""')"
+          if [ -z "$lanes" ] || awk -v started="$started" '$0 < started { earlier = 1 } END { exit !earlier }' <<< "$lanes"; then
+            echo "::error::Attempt $RUN_ATTEMPT did not run every qualification lane itself; re-run all jobs, not only the failed ones" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
           echo "Runtime qualification before budget gate: ${elapsed}s (maximum 600s; TigerStyle exempt)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600

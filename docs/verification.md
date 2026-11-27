@@ -332,16 +332,17 @@ and keeps its own one-minute timeout (0.2 s measured).
 No cache step reads the clock or has a cutoff: each is bounded only by its own limit, and
 `track`, the stage, the compile save, `unstage` and the admission run whenever every
 earlier step succeeded or was tolerated. The runtime budget gate's 600 s, measured from
-the run's start, is the only pass/fail time limit. Each lane's job carries
+the start of the run attempt, is the only pass/fail time limit. Each lane's job carries
 `timeout-minutes: 20` only as a backstop against a runaway step: a lane still running
-after 600 s already fails the gate, so the limit decides no run's outcome and leaves
-passing runs unchanged. Cache work counts against the gate like any other step, by the
-limits at most 245 s before a lane's checks and 91 s after them, 336 s in all. Measured,
-it took 10.2 s per lane at the median of those 84 lane runs and 16.9 s at most, when most
-lanes restored the pairing tool's build; built cold in every job that saves, the tool
-adds 2.5–4.3 s to each. Cache work can push a lane past its 20-minute limit only when the
-lane's other steps take more than 1,200 − 245 − 91 = 864 s, so only in a lane that fails
-the gate without it.
+after 600 s already fails its attempt's gate, and the gate passes a later attempt only
+when that attempt ran every lane itself, so the limit decides no attempt's outcome and
+leaves passing attempts unchanged. Cache work counts against the gate like any other
+step, by the limits at most 245 s before a lane's checks and 91 s after them, 336 s in
+all. Measured, it took 10.2 s per lane at the median of those 84 lane runs and 16.9 s
+at most, when most lanes restored the pairing tool's build; built cold in every job that
+saves, the tool adds 2.5–4.3 s to each. Cache work can push a lane past its 20-minute
+limit only when the lane's other steps take more than 1,200 − 245 − 91 = 864 s, so only
+in a lane that fails the gate without it.
 Every lane that finishes compiling therefore leaves its compiles for the full rerun,
 unless a cache step fails or the tree cannot be saved (no access times, no pairing tool,
 nothing used, over the ceiling): the stage and the compile save run directly after the
@@ -439,14 +440,22 @@ artifact whose source correspondence the native semantic lane checks. All lanes
 retain full runtime artifact and guest-state admission.
 Matching compiler artifacts are restored and missing inputs are rebuilt; every
 selected test still executes. Every runtime lane's job has a 20-minute limit, only a
-backstop against a runaway step. The runtime
-budget gate checks elapsed time from workflow start against 600 seconds without
+backstop against a runaway step. The runtime budget gate first lists its own run
+attempt's jobs. GitHub lists a job that a rerun of only the failed jobs, or of one job,
+did not run again under the new attempt's number but with its original start time,
+which precedes the attempt's start. The gate therefore fails, telling the maintainer to
+re-run all jobs, when any `Qualify / ` job started before its attempt or none is listed;
+otherwise it checks elapsed time from the attempt's start against 600 seconds without
 waiting for TigerStyle. The terminal gate requires both the bounded runtime
 qualification and the exempt TigerStyle job to succeed. The 600-second gate is the
 only pass/fail time gate; no cache step checks the time, and the compiler cache
 retention job runs outside both gates. A truly cold
 run on a slow runner can exceed 600 seconds; recover with a full rerun of the whole
-workflow, never a rerun of only its failed jobs.
+workflow, since a rerun of only its failed jobs fails the gate. Before this check, such a
+rerun re-ran only the failed gate whenever every lane had succeeded, and the gate measured
+seconds from the new attempt's start; that let a run pass without any attempt qualifying
+within 600 s, both when a lane ran past 600 s and, already on `main`, when queueing
+pushed a run whose lanes each fit their limit past 600 s. The gate now refuses both.
 The pinned Zig setup action uses `zigmirror.com`, selected from measured Linux
 acquisition times in the integrated Protean qualification. Upstream signature and
 archive-name verification remain active. An explicit mirror removes the action's
