@@ -272,14 +272,12 @@ unit_kinds='^(h|o|c|z|b|p|zig-pkg)$'
 classify_units() {
     awk -F '\t' \
         -v kinds="$unit_kinds" \
-        -v armed="$mark" \
-        -v unread="$unread_epoch" \
         -v pairs_in="$state/pairs" \
+        -v used_in="$state/used" \
         -v earlier_in="$state/earlier" \
         -v history_in="$state/runners" \
         -v history_max="$build_runner_jobs_max" \
         -v kept_out="$state/kept" \
-        -v used_out="$state/used" \
         -v history_out="$state/history" \
         -v prune_out="$state/prune" "$unit_program"'
         BEGIN {
@@ -304,12 +302,11 @@ classify_units() {
             unit_root[name] = root
             unit_bytes[name] += $3
             if (maker) runner[name] = 1
-            if ($1 + 0 > unread + 0.5 || $2 + 0 > armed + 0) used[name] = 1
         }
         END {
+            while ((getline name < used_in) > 0) used[name] = 1
             while ((getline name < earlier_in) > 0) if (name in unit_root) used[name] = 1
             printf "" > kept_out
-            printf "" > used_out
             printf "" > prune_out
             for (name in unit_root) {
                 group[name] = (name in manifest_of) ? manifest_of[name] : name
@@ -319,7 +316,6 @@ classify_units() {
             for (name in unit_root) {
                 broken[name] = (group[name] in output_of) && output_of[group[name]] == ""
                 kept[name] = !broken[name] && (group[name] in group_used || group[name] in group_retained)
-                if (!broken[name] && group[name] in group_used) print name > used_out
             }
             for (name in output_of) {
                 if (!(name in unit_root) || !kept[name]) continue
@@ -396,8 +392,26 @@ classify() {
         skip 'Compiler cache: nonregular file'
     fi
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
-    awk -F '\t' -v kinds="$unit_kinds" "$unit_program"'{ if (unit($4) != "" && kind == "h") print unit($4) }' \
-        "$state/listing" > "$state/manifests"
+    awk -F '\t' \
+        -v kinds="$unit_kinds" \
+        -v armed="$mark" \
+        -v unread="$unread_epoch" \
+        -v manifests_out="$state/manifests" \
+        -v used_out="$state/used" "$unit_program"'
+        BEGIN {
+            printf "" > manifests_out
+            printf "" > used_out
+        }
+        {
+            name = unit($4)
+            if (name == "") next
+            if (kind == "h") print name > manifests_out
+            if (!(name in used) && ($1 + 0 > unread + 0.5 || $2 + 0 > armed + 0)) {
+                used[name] = 1
+                print name > used_out
+            }
+        }
+    ' "$state/listing"
     if ! pairs < "$state/manifests" > "$state/pairs"; then
         skip '::warning::Compiler cache: the pairing tool failed'
     fi

@@ -897,6 +897,29 @@ expect_saved false
 expect_present h/$m1 o/$f1/test h/$m4 o/$f4/test
 : > "$workspace/release"
 
+begin pairing-failure
+track
+use h/$m1 o/$f1/test
+mkdir -p -- "$workspace/reading/zig-cache-pairs"
+cat > "$workspace/reading/zig-cache-pairs/zig-cache-pairs" << 'EOF'
+#!/usr/bin/env bash
+cd -- "$1"
+while IFS= read -r manifest; do
+    cat -- "$manifest" > /dev/null
+done
+exit 1
+EOF
+chmod +x -- "$workspace/reading/zig-cache-pairs/zig-cache-pairs"
+RUNNER_TEMP=$workspace/reading run stage
+expect_saved false
+expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
+run unstage
+run admit
+expect_saved true
+expect_recorded
+expect_present h/$m1 o/$f1/test
+expect_absent h/$m2 o/$f2 h/$m3 c/$f3 h/$m4 o/$f4
+
 printf "trap '' TERM\n" > "$scratch/ignore-term"
 for signal in term kill; do
     for command in cmp touch; do

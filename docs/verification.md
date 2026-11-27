@@ -261,15 +261,16 @@ It then checks on the workspace filesystem that reading a file updates its acces
 marks every restored file unread, and records the change time of a file it touches,
 waiting until a second touch reads a later change time, so every later write follows
 the mark.
-Since the compile save reads what it keeps, `unstage` marks every file unread again from
-a new mark and remembers what the compilation used, after a stage that classified the
-job's use; after a stage that stopped before that, nothing was saved and `track`'s mark
-stands. Before the new mark, `unstage` stops what earlier steps left running, as `track`
-does: a compile save stopped by its one-minute timeout can leave its `tar` running, and
-that `tar` follows the directories it opened into `.zig-cache` once `unstage` renames the
-tree back, so its reads after the mark would count units the job never used. When
-`unstage` cannot stop such processes, or the same 10 s deadline fires, it warns, leaves
-what is still listed running, gives no mark back, and the admission saves nothing. The
+Since the pairing tool and the compile save read what they open, `unstage` marks every
+file unread again from a new mark and remembers what the compilation used whenever the
+stage got as far as the pairing tool: the stage writes the units the job used, from the
+access and change times it listed, before it runs the tool, and `unstage` re-arms
+whenever that list exists, so a tool that read manifests and then failed cannot make the
+admission count them as used. A stage that stopped before the tool read no file, and
+`track`'s mark stands. The stop at the start of `unstage` keeps the new mark exact: a
+compile save stopped by its one-minute timeout can leave its `tar` running, and that
+`tar` follows the directories it opened into `.zig-cache` once `unstage` renames the tree
+back, so its reads after the mark would count units the job never used. The
 target identity diagnostic reads the restored builtin modules in `.zig-cache.saved`
 before `track`, so its reads count for nothing.
 The admissions keep a unit (a manifest, output, configuration, ZIR file, builtin module,
