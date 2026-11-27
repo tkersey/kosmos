@@ -78,14 +78,18 @@ jobs:
           git ls-files '*.zig' | xargs zig fmt --check
       - name: Choose the host CPU this runner executes
         run: |
-          grep -m 1 '^model name' /proc/cpuinfo
-          cpu=$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo)
+          grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::The runner names no CPU model\n'
+          if ! cpu=$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then
+            printf '::warning::Reading the runner CPU flags failed; building for baseline\n'
+            cpu=baseline
+          fi
           printf 'KOSMOS_HOST_CPU=%s\n' "$cpu" | tee -a "$GITHUB_ENV"
           printf 'KOSMOS_CACHE_PREFIX=kosmos-native-v6-%s-%s-0.17.1-%s-%s\n' \
             "$RUNNER_OS" "$RUNNER_ARCH" "$KOSMOS_HOST_TARGET" "$cpu" | tee -a "$GITHUB_ENV"
       - name: Restore complete compiler cache
         id: cache
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache
@@ -98,6 +102,8 @@ jobs:
             ${{ env.KOSMOS_CACHE_PREFIX }}/${{ matrix.lane == 'browser' && 'portable' || (matrix.lane == 'publication' || matrix.lane == 'recovery-specialization') && 'specialization' || matrix.lane }}/
       - name: Record native compiler and restored target identities
         if: startsWith(matrix.lane, 'native') || matrix.lane == 'source'
+        continue-on-error: true
+        timeout-minutes: 1
         run: |
           builtin_target() {
             awk '
@@ -129,9 +135,17 @@ jobs:
             builtin_target < "$builtin_file"
           done
       - name: Verify the restored compiler cache against its record and track its use
+        continue-on-error: true
+        timeout-minutes: 1
         env:
           RESTORE: ${{ steps.cache.outcome }}
-        run: bash tools/zig-cache.sh track "$RESTORE"
+          GH_TOKEN: ${{ github.token }}
+          JOB_ID: ${{ job.check_run_id }}
+        run: |
+          started=$(timeout 15 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID" --jq '.started_at | fromdate') ||
+            started=
+          printf 'KOSMOS_JOB_STARTED=%s\n' "${started//[^0-9]/}" | tee -a "$GITHUB_ENV"
+          bash tools/zig-cache.sh track "$RESTORE"
       - name: Compile native qualification and independently rebuild the core
         if: startsWith(matrix.lane, 'native')
         run: |
@@ -183,10 +197,12 @@ jobs:
         id: compiled
         if: env.KOSMOS_CACHE_SAVE == 'true'
         continue-on-error: true
+        timeout-minutes: 1
         run: bash tools/zig-cache.sh stage
       - name: Save the compiled lane's cache before running it
         if: steps.compiled.outputs.save == 'true'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache
@@ -194,6 +210,7 @@ jobs:
       - name: Return what the compilation did not use for the checks
         if: env.KOSMOS_CACHE_SAVE == 'true'
         continue-on-error: true
+        timeout-minutes: 1
         run: bash tools/zig-cache.sh unstage
       - name: Check native owners and independently rebuild the core
         if: startsWith(matrix.lane, 'native')
@@ -281,10 +298,12 @@ jobs:
         id: checked
         if: env.KOSMOS_CACHE_SAVE == 'true'
         continue-on-error: true
+        timeout-minutes: 1
         run: bash tools/zig-cache.sh admit
       - name: Save the checked lane's compiler cache
         if: steps.checked.outputs.save == 'true'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache

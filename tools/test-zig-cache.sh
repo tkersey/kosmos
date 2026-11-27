@@ -9,6 +9,10 @@ trap 'rm -rf "$scratch"' EXIT
 export RUNNER_TEMP=$scratch
 export ZIG_GLOBAL_CACHE_DIR=$scratch/zig-global
 unset KOSMOS_HOST_TARGET KOSMOS_HOST_CPU KOSMOS_CACHE_BYTES_MAX
+REAL_FIND=$(command -v find)
+REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
+export REAL_FIND REAL_MV REAL_RM
 failures=0
 
 m1=00000000000000000000000000000001 f1=eaae50b21867a4fc20733d2d7251e2b6
@@ -23,6 +27,8 @@ m9=00000000000000000000000000000009 f9=1dbb5dec00b322ff9547f39d5401c828
 m10=0000000000000000000000000000000a f10=8e71e2b9cd08bfa51c6bd7b6f3139158
 m11=0000000000000000000000000000000b f11=de67a6b69f662fbad43221270c3c5a5d
 m12=0000000000000000000000000000000c f12=5d2d57063a704c006bb139b35c246609
+m13=0000000000000000000000000000000d f13=ac5ccc6c534c25a14bf4bbe04b12bc3c
+m14=0000000000000000000000000000000e f14=a3cfd7ea9f35d9c11a48dcaad2b6a3f3
 
 fail() {
     printf 'FAIL %s: %s\n' "$scenario" "$1" >&2
@@ -44,6 +50,15 @@ restored_manifest() {
     touch -d @1000000000 -- "$1"
 }
 
+restored_manifest_input() {
+    mkdir -p -- "$(dirname "$1")"
+    {
+        head -c 40 /dev/zero
+        printf '%b%s\0\0' "$2" "$3"
+    } > "$1"
+    touch -d @1000000000 -- "$1"
+}
+
 record_tree() {
     find .zig-cache -type f ! -path .zig-cache/kosmos-cache-record -printf '%s %P\n' | LC_ALL=C sort \
         > "$scratch/record"
@@ -57,6 +72,8 @@ begin() {
     cd "$workspace"
     export KOSMOS_CACHE_STATE=$workspace/state
     export GITHUB_OUTPUT=$workspace/output
+    KOSMOS_JOB_STARTED=$(date +%s)
+    export KOSMOS_JOB_STARTED
     : > "$GITHUB_OUTPUT"
     local cache=.zig-cache
     restored_manifest $cache/h/$m1
@@ -119,6 +136,47 @@ rewrite_unread() {
 
 run() {
     bash "$script" "$1" > "$workspace/report"
+}
+
+failing() {
+    mkdir -p -- "$workspace/failing"
+    {
+        printf '#!/usr/bin/env bash\n'
+        cat
+    } > "$workspace/failing/$1"
+    chmod +x -- "$workspace/failing/$1"
+    failing_path=$workspace/failing:$PATH
+}
+
+aside_moves() {
+    rm -f -- "$workspace/moves"
+    failing mv << EOF
+if [[ "\$*" == */aside/* ]]; then
+    printf '%s\n' "\${@: -2:1}" >> '$workspace/moves'
+    if (( \$(wc -l < '$workspace/moves') >= $1 )); then
+        exit 1
+    fi
+fi
+exec "\$REAL_MV" "\$@"
+EOF
+}
+
+expect_manifests() {
+    local order pattern='^m+u+$'
+    order=$(awk '{ printf "%s", ($0 ~ /\/h\/[0-9a-f]+$/) ? "m" : "u" }' "$workspace/moves")
+    if [[ "$1" == last ]]; then
+        pattern='^u+m+$'
+    fi
+    [[ "$order" =~ $pattern ]] || fail "manifests do not move $1: $order"
+}
+
+expect_paired() {
+    local pair
+    for pair in "h/$m2 o/$f2" "h/$m3 c/$f3" "h/$m4 o/$f4" "source-examples/h/$m2 source-examples/o/$f2"; do
+        if [[ -e ".zig-cache/${pair% *}" && ! -e ".zig-cache/${pair#* }" ]]; then
+            fail "${pair% *} is present without ${pair#* }"
+        fi
+    done
 }
 
 expect_saved() {
@@ -391,6 +449,125 @@ expect_report '::warning::Compiler cache: the pairing tool failed; save skipped'
 expect_present h/$m4 o/$f4/test
 chmod 644 .zig-cache/h/$m2
 
+begin transitive
+restored_manifest_input .zig-cache/h/$m13 '\x08' "o/$f14/generated"
+restored_file .zig-cache/o/$f13/test
+restored_manifest_input .zig-cache/h/$m14 '\x0c' b/transitive/builtin.zig
+restored_file .zig-cache/o/$f14/generated
+restored_file .zig-cache/b/transitive/builtin.zig
+record_tree
+track
+use h/$m13 o/$f13/test
+run admit
+expect_saved true
+expect_recorded
+expect_present h/$m13 o/$f13/test o/$f14/generated h/$m14 b/transitive/builtin.zig
+expect_absent h/$m4 o/$f4 b/stale
+
+begin track-failure
+failing touch <<< 'exit 1'
+if PATH=$failing_path track; then
+    fail "track succeeded with a failing touch"
+fi
+expect_report '::warning::Compiler cache: track failed'
+expect_present h/$m1 o/$f1/test h/$m4 o/$f4/test b/stale
+use h/$m1 o/$f1/test
+run stage
+expect_saved false
+run unstage
+run admit
+expect_saved false
+expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+expect_present h/$m4 o/$f4/test b/stale
+
+begin track-discard
+printf 'x' > .zig-cache/o/$f1/test
+failing rm << 'EOF'
+if [[ "$*" == *.zig-cache* ]]; then
+    exit 1
+fi
+exec "$REAL_RM" "$@"
+EOF
+if PATH=$failing_path track; then
+    fail "track succeeded with a failing rm"
+fi
+expect_report '::warning::Compiler cache: the restored tree differs from its record'
+[[ ! -e .zig-cache ]] || fail "a tree that differs from its record stayed in place"
+
+begin classify-failure
+track
+use h/$m1 o/$f1/test
+failing find << EOF
+if [[ "\$*" == *%A@* ]]; then
+    "\$REAL_FIND" "\$@" | grep -v 'h/$m4'
+    exit 1
+fi
+exec "\$REAL_FIND" "\$@"
+EOF
+if PATH=$failing_path run admit; then
+    fail "admit succeeded with a failing listing"
+fi
+expect_saved false
+expect_report '::warning::Compiler cache: admit failed'
+expect_present h/$m4 o/$f4/test b/stale
+
+begin move-order
+track
+use h/$m1 o/$f1/test
+aside_moves 1000
+PATH=$failing_path run stage
+expect_saved true
+expect_manifests first
+aside_moves 1000
+PATH=$failing_path run unstage
+expect_manifests last
+
+begin stage-failure
+track
+use h/$m1 o/$f1/test
+aside_moves 2
+if PATH=$failing_path run stage; then
+    fail "stage succeeded with a failing move"
+fi
+expect_saved false
+expect_paired
+run unstage
+expect_present h/$m2 o/$f2/test h/$m3 c/$f3 h/$m4 o/$f4/test h/$m5 h/$m6 h/$m8 o/$f8 o/orphan \
+    z/used-zir z/stale-zir b/used b/stale p/used.tar.gz p/stale.tar.gz \
+    native-driver-core/zig-pkg/stale source-examples/h/$m2 source-examples/o/$f2/test
+run admit
+expect_saved false
+expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+
+begin unstage-failure
+track
+use h/$m1 o/$f1/test
+run stage
+expect_saved true
+: > "$GITHUB_OUTPUT"
+aside_moves 2
+if PATH=$failing_path run unstage; then
+    fail "unstage succeeded with a failing move"
+fi
+expect_paired
+run admit
+expect_saved false
+expect_report 'untracked, or an earlier compiler cache step failed; save skipped'
+
+begin late
+track
+use h/$m1 o/$f1/test
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 451 )) run admit
+expect_saved false
+expect_report "of the job's 600 s remain, fewer than the 150 s"
+expect_present h/$m4 o/$f4/test b/stale
+KOSMOS_JOB_STARTED='' run admit
+expect_saved false
+expect_report '::warning::Compiler cache: the job start is unknown'
+KOSMOS_JOB_STARTED=$(( $(date +%s) - 440 )) run admit
+expect_saved true
+expect_absent h/$m4 o/$f4 b/stale
+
 scenario=host-cpu
 flags=(fpu cx8 cmov mmx fxsr sse sse2 lm pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2
     bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
@@ -414,8 +591,34 @@ awk '
     job == "qualify:" && /^      - name: / { sub(/^      - name: /, ""); name[steps] = $0 }
     job == "qualify:" && /^        name: / { sub(/^        name: /, ""); name[steps] = $0 }
     job == "qualify:" && /^        if: / { condition[steps] = $0 }
-    END { for (i = 1; i <= steps; i++) printf "%d\t%s\t%s\n", i, name[i], condition[i] }
+    job == "qualify:" && /^        continue-on-error: / { tolerated[steps] = $2 }
+    job == "qualify:" && /^        timeout-minutes: / { minutes[steps] = $2 }
+    job == "qualify:" && /tools\/zig-cache\.sh (track|stage|unstage|admit)|uses: actions\/cache\// { cache[steps] = 1 }
+    END {
+        for (i = 1; i <= steps; i++) {
+            printf "%d\t%s\t%s\t%s\t%s\t%d\n", i, name[i], condition[i], tolerated[i], minutes[i], cache[i]
+        }
+    }
 ' "$workflow" > "$scratch/steps.tsv"
+awk -F '\t' '($6 || $2 ~ /^Record native compiler/) && !($4 == "true" && $5 == 1) { print $2 }' \
+    "$scratch/steps.tsv" > "$scratch/intolerant.txt"
+(( $(awk -F '\t' '$6' "$scratch/steps.tsv" | wc -l) == 7 )) || fail "the qualification job does not have seven cache steps"
+[[ ! -s "$scratch/intolerant.txt" ]] ||
+    fail "a cache step can fail the lane or outlast a minute: $(tr '\n' ';' < "$scratch/intolerant.txt")"
+job_minutes=$(awk '/^  qualify:$/ { active = 1 } active && /^    timeout-minutes: / { print $2; exit }' "$workflow")
+job_seconds=$(sed -n 's/^job_seconds_max=//p' "$script")
+after_checks=$(sed -n 's/^after_checks_seconds_min=//p' "$script")
+(( job_seconds == job_minutes * 60 && after_checks >= 2 * 60 + 30 )) ||
+    fail "the checked save's margin does not cover two one-minute steps and the job's end"
+if ! grep -Fq "grep -m 1 '^model name' /proc/cpuinfo || printf '::warning::" "$workflow" ||
+    ! grep -Fq "if ! cpu=\$(bash tools/zig-cache.sh host-cpu < /proc/cpuinfo); then" "$workflow" ||
+    ! grep -Fxq '            cpu=baseline' "$workflow"; then
+    fail "the CPU diagnostic or choice can fail the lane"
+fi
+if ! grep -Fq "JOB_ID: \${{ job.check_run_id }}" "$workflow" ||
+    ! grep -Fq "printf 'KOSMOS_JOB_STARTED=%s\\n'" "$workflow"; then
+    fail "the job start is not read from the job's own record"
+fi
 step() {
     awk -F '\t' -v pattern="$1" '$2 ~ pattern { print $1 }' "$scratch/steps.tsv"
 }

@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit
 
 cache=.zig-cache
 record=$cache/kosmos-cache-record
 history=$cache/kosmos-build-runners
+restored=$cache.restored
 tool_root=tools/
 pairs_source=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zig-cache-pairs.zig
+output=${GITHUB_OUTPUT:-/dev/null}
 unread_epoch=1
 save_bytes_max=${KOSMOS_CACHE_BYTES_MAX:-1000000000}
 build_runner_jobs_max=6
+job_seconds_max=600
+after_checks_seconds_min=150
 host_cpu_flags=(pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave sha_ni)
+mark=
 
 usage() {
     printf 'Usage: bash tools/zig-cache.sh host-cpu < /proc/cpuinfo\n' >&2
@@ -23,7 +29,7 @@ tree_bytes() {
 }
 
 tree_record() {
-    find "$cache" -type f ! -path "$record" -printf '%s %P\n' | LC_ALL=C sort
+    find "$1" -type f ! -path "$1/kosmos-cache-record" -printf '%s %P\n' | LC_ALL=C sort
 }
 
 host_cpu() {
@@ -45,6 +51,34 @@ pairs() {
         "$pairs_source" -- "$cache"
 }
 
+failed() {
+    local status=$?
+    if (( status != 0 )); then
+        printf '::warning::Compiler cache: %s failed with status %d; this job saves no further compiler cache\n' \
+            "$mode" "$status"
+    fi
+}
+
+skip() {
+    printf '%s; save skipped\n' "$1"
+    if [[ -n "$mark" ]]; then
+        give
+    fi
+    exit 0
+}
+
+take() {
+    if [[ -e "$state/armed" ]]; then
+        mark=$(< "$state/armed")
+        rm -f -- "$state/armed"
+    fi
+}
+
+give() {
+    printf '%s\n' "$mark" > "$state/armed.next"
+    mv -- "$state/armed.next" "$state/armed"
+}
+
 access_time_tracking() {
     local probe=$cache/tmp/access-probe
     printf 'probe' > "$probe"
@@ -61,43 +95,71 @@ access_time_tracking() {
 }
 
 arm() {
+    local tracking probe=$cache/tmp/armed-mark changed
     mkdir -p -- "$cache/tmp"
-    access_time_tracking > "$state/tracking"
-    if [[ "$(< "$state/tracking")" == on ]]; then
+    tracking=$(access_time_tracking)
+    if [[ "$tracking" == on ]]; then
         find "$cache" -type f -exec touch -a -d "@$unread_epoch" -- {} +
     fi
-    local mark=$cache/tmp/armed-mark
-    touch -- "$mark"
-    find "$mark" -printf '%C@\n' > "$state/armed"
-    touch -- "$mark"
-    while [[ "$(find "$mark" -printf '%C@')" == "$(< "$state/armed")" ]]; do
+    touch -- "$probe"
+    mark=$(find "$probe" -printf '%C@')
+    changed=$mark
+    while [[ "$changed" == "$mark" ]]; do
         sleep 0.001
-        touch -- "$mark"
+        touch -- "$probe"
+        changed=$(find "$probe" -printf '%C@')
     done
-    rm -f -- "$mark"
+    rm -f -- "$probe"
+    printf '%s\n' "$tracking" > "$state/tracking"
 }
 
 track() {
-    if [[ "$1" != success ]]; then
-        rm -rf -- "$cache"
-    elif [[ -e "$cache" ]] && ! { [[ -f "$record" ]] && cmp -s -- "$record" <(tree_record); }; then
-        printf '::warning::Compiler cache: the restored tree differs from its record; compiling from nothing\n'
-        rm -rf -- "$cache"
+    local bytes tracking
+    if [[ -e "$cache" ]]; then
+        mv -T -- "$cache" "$restored"
+    fi
+    rm -rf -- "$state"
+    mkdir -p -- "$state"
+    if [[ "$1" == success && -f "$restored/kosmos-cache-record" ]]; then
+        tree_record "$restored" > "$state/restored-record"
+        if cmp -s -- "$restored/kosmos-cache-record" "$state/restored-record"; then
+            mv -T -- "$restored" "$cache"
+        fi
+    fi
+    if [[ -e "$restored" ]]; then
+        if [[ "$1" == success ]]; then
+            printf '::warning::Compiler cache: the restored tree differs from its record; compiling from nothing\n'
+        fi
+        rm -rf -- "$restored"
     fi
     rm -f -- "$record"
-    rm -rf -- "$state"
-    mkdir -p -- "$state" "$cache"
+    mkdir -p -- "$cache"
     if [[ -f "$history" ]]; then
         mv -- "$history" "$state/runners"
     else
         : > "$state/runners"
     fi
     arm
-    printf 'Compiler cache restored (%s): %s bytes; access tracking %s\n' \
-        "$1" "$(tree_bytes "$cache")" "$(< "$state/tracking")"
+    bytes=$(tree_bytes "$cache")
+    tracking=$(< "$state/tracking")
+    printf 'Compiler cache restored (%s): %s bytes; access tracking %s\n' "$1" "$bytes" "$tracking"
     if ! pairs < /dev/null > /dev/null; then
         printf '::warning::Compiler cache: the pairing tool failed to build; nothing will be saved\n'
     fi
+    give
+}
+
+fits() {
+    local started=${KOSMOS_JOB_STARTED:-} now left
+    if [[ ! "$started" =~ ^[0-9]+$ ]]; then
+        skip '::warning::Compiler cache: the job start is unknown, so a save might outlast the job'
+    fi
+    now=$(date +%s)
+    left=$(( job_seconds_max - (now - started) ))
+    if (( left < after_checks_seconds_min )); then
+        skip "::warning::Compiler cache: ${left} s of the job's ${job_seconds_max} s remain, fewer than the ${after_checks_seconds_min} s the admission, the save and the job's end may take"
+    fi
+    printf "Compiler cache: %s s of the job's %s s remain\n" "$left" "$job_seconds_max"
 }
 
 unit_program='
@@ -117,7 +179,7 @@ unit_kinds='^(h|o|c|z|b|p|zig-pkg)$'
 classify_units() {
     awk -F '\t' \
         -v kinds="$unit_kinds" \
-        -v armed="$(< "$state/armed")" \
+        -v armed="$mark" \
         -v unread="$unread_epoch" \
         -v pairs_in="$state/pairs" \
         -v earlier_in="$state/earlier" \
@@ -170,16 +232,23 @@ classify_units() {
             for (name in output_of) {
                 if (!(name in unit_root) || !kept[name]) continue
                 if ((name in group_used) && unit_root[name] != tool_root) used_pairs++
+                queue[++queued] = name
+                queued_manifest[name] = 1
+            }
+            for (q = 1; q <= queued; q++) {
+                name = queue[q]
                 for (i = 1; i <= inputs[name]; i++) {
                     path = unit_root[name] input[name, i]
                     if (!(unit(path) in unit_root)) path = input[name, i]
-                    needed[unit(path)] = 1
+                    need = unit(path)
+                    if (!(need in unit_root) || broken[need]) continue
+                    kept[need] = 1
+                    manifest = (need in manifest_of) ? manifest_of[need] : need
+                    if (!(manifest in output_of) || (manifest in queued_manifest)) continue
+                    kept[manifest] = 1
+                    queue[++queued] = manifest
+                    queued_manifest[manifest] = 1
                 }
-            }
-            for (name in needed) {
-                if (!(name in unit_root) || broken[name]) continue
-                kept[name] = 1
-                if (name in manifest_of) kept[manifest_of[name]] = 1
             }
             line = ""
             for (name in runner) {
@@ -205,10 +274,12 @@ classify_units() {
                     print name > kept_out
                     continue
                 }
-                print name > prune_out
                 pruned[root]++
                 pruned_bytes[root] += unit_bytes[name]
+                if (name in output_of) print name > prune_out
+                else later[++laters] = name
             }
+            for (i = 1; i <= laters; i++) print later[i] > prune_out
             for (root in units) {
                 printf "Compiler cache %s: %d units; %d manifest-output pairs; %d manifests without output dropped; %d build runners kept; pruned %d units (%.0f bytes)\n", \
                     root == "" ? "root" : root, units[root], pairs[root], dropped[root], \
@@ -220,34 +291,28 @@ classify_units() {
 }
 
 classify() {
-    local output=${GITHUB_OUTPUT:-/dev/null}
-    printf 'save=false\n' >> "$output"
-    if [[ ! -e "$state/armed" || ! -d "$cache" ]]; then
-        printf 'Compiler cache: untracked; save skipped\n'
-        return 1
+    local tracking nonregular status=0
+    if [[ -z "$mark" || ! -d "$cache" ]]; then
+        skip 'Compiler cache: untracked, or an earlier compiler cache step failed'
     fi
-    if [[ "$(< "$state/tracking")" != on ]]; then
-        printf '::warning::Compiler cache: reads leave no access time here, so the cache cannot be pruned to what the job used; save skipped\n'
-        return 1
+    tracking=$(< "$state/tracking")
+    if [[ "$tracking" != on ]]; then
+        skip '::warning::Compiler cache: reads leave no access time here, so the cache cannot be pruned to what the job used'
     fi
-    if [[ -n "$(find "$cache" ! -type d ! -type f -print -quit)" ]]; then
-        printf 'Compiler cache: nonregular file; save skipped\n'
-        return 1
+    nonregular=$(find "$cache" ! -type d ! -type f -print -quit)
+    if [[ -n "$nonregular" ]]; then
+        skip 'Compiler cache: nonregular file'
     fi
     find "$cache" -type f -printf '%A@\t%C@\t%s\t%P\n' > "$state/listing"
     awk -F '\t' -v kinds="$unit_kinds" "$unit_program"'{ if (unit($4) != "" && kind == "h") print unit($4) }' \
         "$state/listing" > "$state/manifests"
     if ! pairs < "$state/manifests" > "$state/pairs"; then
-        printf '::warning::Compiler cache: the pairing tool failed; save skipped\n'
-        return 1
+        skip '::warning::Compiler cache: the pairing tool failed'
     fi
     touch -- "$state/earlier" "$state/runners"
-    local status=0
     classify_units || status=$?
     if (( status == 3 )); then
-        printf '::warning::Compiler cache: the job used no compiled output; save skipped\n'
-    elif (( status != 0 )); then
-        printf '::warning::Compiler cache: classification failed; save skipped\n'
+        skip '::warning::Compiler cache: the job used no compiled output'
     fi
     return "$status"
 }
@@ -262,45 +327,55 @@ seal() {
     cp -- "$state/history" "$history"
     bytes=$(tree_bytes "$cache")
     if (( bytes > save_bytes_max )); then
-        printf '::warning::Compiler cache: %s bytes exceed the %s-byte ceiling; save skipped\n' \
-            "$bytes" "$save_bytes_max"
-        return 0
+        skip "::warning::Compiler cache: ${bytes} bytes exceed the ${save_bytes_max}-byte ceiling"
     fi
-    tree_record > "$record"
+    tree_record "$cache" > "$record"
+    give
     printf 'Compiler cache: save %s bytes\n' "$bytes"
-    printf 'save=true\n' >> "${GITHUB_OUTPUT:-/dev/null}"
+    printf 'save=true\n' >> "$output"
 }
 
 stage() {
-    classify || return 0
     local unit
+    take
+    classify
     while IFS= read -r unit; do
         mkdir -p -- "$(dirname -- "$aside/$unit")"
-        mv -- "$cache/$unit" "$aside/$unit"
+        mv -T -- "$cache/$unit" "$aside/$unit"
     done < "$state/prune"
     seal
 }
 
 unstage() {
+    local unit
+    take
     rm -f -- "$record" "$history"
-    if [[ ! -f "$state/kept" ]]; then
+    if [[ -f "$state/prune" ]]; then
+        tac -- "$state/prune" > "$state/return"
+        while IFS= read -r unit; do
+            if [[ -e "$aside/$unit" ]]; then
+                mkdir -p -- "$(dirname -- "$cache/$unit")"
+                mv -T -- "$aside/$unit" "$cache/$unit"
+            fi
+        done < "$state/return"
+    fi
+    rm -rf -- "$aside"
+    if [[ -z "$mark" ]]; then
+        printf 'Compiler cache: untracked, or an earlier compiler cache step failed\n'
         return 0
     fi
-    local unit
-    while IFS= read -r unit; do
-        if [[ -e "$aside/$unit" ]]; then
-            mkdir -p -- "$(dirname -- "$cache/$unit")"
-            mv -- "$aside/$unit" "$cache/$unit"
-        fi
-    done < "$state/prune"
-    rm -rf -- "$aside"
-    cat -- "$state/used" >> "$state/earlier"
+    if [[ -f "$state/used" ]]; then
+        cat -- "$state/used" >> "$state/earlier"
+    fi
     arm
+    give
 }
 
 admit() {
-    classify || return 0
     local unit
+    take
+    fits
+    classify
     while IFS= read -r unit; do
         rm -rf -- "${cache:?}/$unit"
     done < "$state/prune"
@@ -315,12 +390,19 @@ case "${1:-}" in
     track)
         [[ $# -eq 2 && "$2" =~ ^(success|failure|cancelled|skipped)$ ]] || usage
         state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
+        mode=$1
+        trap failed EXIT
         track "$2"
         ;;
     stage | unstage | admit)
         [[ $# -eq 1 ]] || usage
         state=${KOSMOS_CACHE_STATE:-${RUNNER_TEMP:?}/zig-cache-access}
         aside=$state/aside
+        mode=$1
+        trap failed EXIT
+        if [[ "$1" != unstage ]]; then
+            printf 'save=false\n' >> "$output"
+        fi
         "$1"
         ;;
     *)
